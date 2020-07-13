@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 
 import re
 
+from time import time
+
 
 def weights_as_list(layer):
     return [w.tolist() for w in layer.get_weights()]
@@ -333,7 +335,7 @@ class NormalizingFlow(object):
         return cls(d['n_dim'], d['n_units'], rqs=rqs, lu_fact=lu_fact)
 
 
-def get_plot_fn(flow):
+def get_flow_plot_fn(flow, p_true_fn=None):
     """
     Returns a function that produces a visualization of the flow.
     """
@@ -348,6 +350,13 @@ def get_plot_fn(flow):
     xy_grid = np.stack([x,y], axis=-1)
     xy_grid.shape = (-1, 2)
     xy_grid = tf.Variable(xy_grid.astype('f4'))
+
+    if p_true_fn is None:
+        p_true_img = None
+    else:
+        p_true_img = p_true_fn(xy_grid)
+        p_true_img /= np.sum(p_true_img)
+        p_true_img.shape = s
 
     def plot_fn():
         # Sample y, and get x through inverse
@@ -393,10 +402,10 @@ def get_plot_fn(flow):
         p_img = np.exp(lnp_img)
         p_img /= np.sum(p_img)
 
-        r = np.sqrt(xy_grid[:,0]**2+xy_grid[:,1]**2)
-        p_true_img = np.exp(-0.5*((r-1.)/0.1)**2) / r
-        p_true_img /= np.sum(p_true_img)
-        p_true_img.shape = s
+        if p_true_img is None:
+            vmax = np.max(p_img)
+        else:
+            vmax = 1.2 * np.max(p_true_img)
 
         ax1,ax2,ax3 = ax_arr[1]
         ax1.imshow(
@@ -404,25 +413,29 @@ def get_plot_fn(flow):
             extent=(-2., 2., -2., 2.),
             interpolation='nearest',
             vmax=np.max(lnp_img),
-            vmin=np.max(lnp_img) - 30.
+            vmin=np.max(lnp_img) - 25.
         )
         ax1.set_title(r'$\ln p \left( y \right)$')
         ax2.imshow(
             p_img,
             extent=(-2., 2., -2., 2.),
             interpolation='nearest',
-            vmax=1.2*np.max(p_true_img),
-            vmin=0.
+            vmin=0.,
+            vmax=vmax
         )
         ax2.set_title(r'$p \left( y \right)$')
-        ax3.imshow(
-            p_true_img / np.sum(p_true_img),
-            extent=(-2., 2., -2., 2.),
-            interpolation='nearest',
-            vmax=1.2*np.max(p_true_img),
-            vmin=0.
-        )
-        ax3.set_title(r'$p_{\mathrm{true}} \left( y \right)$')
+
+        if p_true_img is None:
+            ax3.axis('off')
+        else:
+            ax3.imshow(
+                p_true_img,
+                extent=(-2., 2., -2., 2.),
+                interpolation='nearest',
+                vmin=0.,
+                vmax=vmax
+            )
+            ax3.set_title(r'$p_{\mathrm{true}} \left( y \right)$')
 
         return fig
 
@@ -451,9 +464,9 @@ def plot_inv1x1conv(bij, ax, label_y_axis=True):
             alpha=0.1
         )
 
-    if isinstance(b, tfb.ScaleMatvecLU):
+    if isinstance(bij, tfb.ScaleMatvecLU):
         ax.set_title('invertible 1x1 convolution')
-    elif isinstance(b, ActNorm):
+    elif isinstance(bij, ActNorm):
         ax.set_title('activation normalization')
 
     ax.set_xlabel(r'$x_0$')
@@ -573,7 +586,7 @@ def plot_bijections(flow):
     return fig
 
 
-def get_loss_gradient_func(flow):
+def get_flow_loss_gradient_func(flow):
     """
     Returns a function that calculates the
     loss and gradients (dloss/dparams) of
@@ -581,8 +594,8 @@ def get_loss_gradient_func(flow):
     observations y.
     """
     @tf.function
-    def get_loss_gradients(y):
-        print('Tracing get_loss_gradients')
+    def calc_flow_loss_gradients(y):
+        print('Tracing calc_flow_loss_gradients')
 
         with tf.GradientTape() as g:
             g.watch(flow.bij.trainable_variables)
@@ -593,7 +606,119 @@ def get_loss_gradient_func(flow):
 
         return loss, grads
 
-    return get_loss_gradients
+    return calc_flow_loss_gradients
+
+
+def get_training_callback(flow, every=500,
+                                fname='nvp_{i:05d}.png',
+                                p_true_fn=None):
+    """
+    Returns a standard callback function that can be passed
+    to train_flow. Every <every> steps callback prints the
+    step number, loss and learning rate, and plots the flow.
+
+    Inputs:
+        flow (NormalizingFlow): Normalizing flow to be trained.
+        every (int): The callback will run every <every> steps.
+            Defaults to 500.
+        fname (str): Pattern (using the new Python formatting
+            language) used to generate the filename. Can use
+            <i>, <n_steps> and <every>.
+        p_true_fn (callable): Function that takes coordinates,
+            and returns the true probability density. Defaults
+            to None.
+    """
+    plt_fn = get_flow_plot_fn(flow, p_true_fn=p_true_fn)
+
+    def training_callback(i, n_steps, loss_history, opt):
+        if (i % every == 0):
+            loss_avg = np.mean(loss_history[-50:])
+            lr = float(opt._decayed_lr(tf.float32))
+            print(
+                f'Step {i+1: >5d} of {n_steps}: '
+                f'<loss> = {loss_avg: >7.5f} , '
+                f'lr = {lr:.4g}'
+            )
+            fig = plt_fn()
+            namespace = dict(i=i, n_steps=n_steps, every=every)
+            fig.savefig(fname.format(**namespace), dpi=100)
+            plt.close(fig)
+
+    return training_callback
+
+
+def train_flow(flow, data, optimizer=None, batch_size=32,
+               n_epochs=1, callback=None):
+    """
+    Trains a flow using the given data.
+
+    Inputs:
+      flow (NormalizingFlow): Normalizing flow to be trained.
+      data (tf.Tensor): Observed points. Shape = (# of points, # of dim).
+      optimizer (tf.keras.optimizers.Optimizer): Optimizer to use.
+          Defaults to the Rectified Adam implementation from
+          tensorflow_addons.
+      batch_size (int): Number of points per training batch.
+      n_epochs (int): Number of training epochs.
+      callback (callable): Function that will be called
+          at the end of each iteration. Function
+          signature: f(i, n_steps, loss_history, opt), where i is the
+          iteration index (int), n_steps (int) is the total number of
+          steps, loss_history is a list of floats, containing the loss
+          at each iteration so far, and opt is the optimizer.
+
+    Returns:
+      loss_history (list of floats): Loss after each training iteration.
+    """
+
+    n_samples = data.shape[0]
+    batches = tf.data.Dataset.from_tensor_slices(data)
+    batches = batches.repeat(n_epochs)
+    batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.batch(batch_size, drop_remainder=True)
+
+    n_steps = n_epochs * n_samples // batch_size
+
+    if optimizer is None:
+        lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+            2.e-2,
+            n_steps,
+            0.001,
+            staircase=False
+        )
+        opt = tfa.optimizers.RectifiedAdam(
+            lr_schedule,
+            total_steps=n_steps,
+            warmup_proportion=0.1
+        )
+    else:
+        opt = optimizer
+
+    loss_history = []
+
+    t0 = time()
+
+    calc_loss_gradients = get_flow_loss_gradient_func(flow)
+
+    for i,y in enumerate(batches):
+        loss, grads = calc_loss_gradients(y)
+        opt.apply_gradients(zip(grads, flow.bij.trainable_variables))
+
+        if i == 0:
+            # Get time after gradients function is first traced
+            t1 = time()
+
+        loss_history.append(float(loss))
+        callback(i, n_steps, loss_history, opt)
+
+    t2 = time()
+    loss_avg = np.mean(loss_history[-50:])
+    n_steps = len(loss_history)
+    print(f'<loss> = {loss_avg: >7.5f}')
+    print(f'tracing time: {t1-t0:.2f} s')
+    print(f'training time: {t2-t1:.1f} s ({(t2-t1)/n_steps:.4f} s/step)')
+
+    return loss_history
 
 
 def main():
