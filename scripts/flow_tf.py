@@ -573,6 +573,29 @@ def plot_bijections(flow):
     return fig
 
 
+def get_loss_gradient_func(flow):
+    """
+    Returns a function that calculates the
+    loss and gradients (dloss/dparams) of
+    the provided flow, given a set of
+    observations y.
+    """
+    @tf.function
+    def get_loss_gradients(y):
+        print('Tracing get_loss_gradients')
+
+        with tf.GradientTape() as g:
+            g.watch(flow.bij.trainable_variables)
+            log_p = flow.nvp.log_prob(y)
+            loss = -tf.reduce_mean(log_p)
+
+        grads = g.gradient(loss, flow.bij.trainable_variables)
+
+        return loss, grads
+
+    return get_loss_gradients
+
+
 def main():
     return 0
 
