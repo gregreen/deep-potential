@@ -19,13 +19,10 @@ import re
 
 from time import time
 
-
-def weights_as_list(layer):
-    return [w.tolist() for w in layer.get_weights()]
-
-
-def set_weights_w_list(layer, weights):
-    layer.set_weights([np.array(w, dtype='f4') for w in weights])
+from serializers_tf import (
+    serialize_variable, deserialize_variable,
+    weights_as_list, set_weights_w_list
+)
 
 
 class RQSBijector(tf.Module):
@@ -119,7 +116,7 @@ class RQSBijector(tf.Module):
             bin_widths=self._bin_widths(z),
             bin_heights=self._bin_heights(z),
             knot_slopes=self._knot_slopes(z),
-            validate_args=True
+            #validate_args=True
         )
 
     def serialize(self):
@@ -217,32 +214,6 @@ def trainable_lu_factorization(event_size, batch_shape=(), name=None):
     return lower_upper, permutation
 
 
-def serialize_variable(v):
-    """
-    Returns a JSON-serializable dictionary representing a
-    tf.Variable.
-    """
-    return dict(
-        dtype=v.dtype.name,
-        shape=list(v.shape),
-        values=v.numpy().tolist(),
-        name=re.sub('\:[0-9]+$', '', v.name),
-        trainable=v.trainable
-    )
-
-
-def deserialize_variable(d):
-    """
-    Returns a tf.Variable, constructed using a dictionary
-    of the form returned by `serialize_variable`.
-    """
-    return tf.Variable(
-        np.array(d['values'], dtype=d['dtype']),
-        name=d['name'],
-        trainable=d['trainable']
-    )
-
-
 class NormalizingFlow(object):
     """
     Represents a normalizing flow, with a unit Gaussian prior
@@ -250,7 +221,7 @@ class NormalizingFlow(object):
     convolutions and Rational Quadratic Splines.
     """
 
-    def __init__(self, n_dim, n_units, rqs=None, lu_fact=None):
+    def __init__(self, n_dim, n_units, rqs=None, lu_fact=None, log_scale=None):
         """
         Randomly initializes the normalizing flow.
 
@@ -260,9 +231,14 @@ class NormalizingFlow(object):
         """
         self._n_dim = n_dim
         self._n_units = n_units
-        self.build(n_dim, n_units, rqs=rqs, lu_fact=lu_fact)
+        self.build(
+            n_dim, n_units,
+            rqs=rqs,
+            lu_fact=lu_fact,
+            log_scale=log_scale
+        )
 
-    def build(self, n_dim, n_units, rqs=None, lu_fact=None):
+    def build(self, n_dim, n_units, rqs=None, lu_fact=None, log_scale=None):
         # Base distribution: p(x)
         self.dist = tfd.MultivariateNormalDiag(
             loc=np.zeros(n_dim, dtype='f4')
@@ -270,32 +246,53 @@ class NormalizingFlow(object):
 
         # Generate bijectors first, so that they are accessible later
         if rqs is None:
-            self.rqs = [RQSBijector(n_bins=8) for i in range(n_units)]
+            self.rqs = [RQSBijector(n_bins=8) for i in range(2*n_units)]
         else:
             self.rqs = rqs
         
         if lu_fact is None:
             self.lu_fact = [
                 trainable_lu_factorization(n_dim)
-                for i in range(n_units+1)
+                for i in range(n_units)
             ]
         else:
             self.lu_fact = lu_fact
 
+        if log_scale is None:
+            self.log_scale = [
+                tf.Variable(
+                    initial_value=0.1*tf.random.truncated_normal([n_dim]),
+                    trainable=True,
+                    name='log_scale'
+                )
+                for i in range(n_units+1)
+            ]
+        else:
+            self.log_scale = log_scale
+
         # Bijection: x -> y
         chain = []
         for i in range(n_units):
-            chain.append(tfb.ScaleMatvecLU(
-                *self.lu_fact[i],
+            chain.append(tfb.ScaleMatvecDiag(
+                tf.exp(self.log_scale[i]),
                 validate_args=True
             ))
             chain.append(tfb.RealNVP(
                 fraction_masked=0.5,
-                bijector_fn=self.rqs[i],
+                bijector_fn=self.rqs[2*i],
                 validate_args=True
             ))
-        chain.append(tfb.ScaleMatvecLU(
-            *self.lu_fact[n_units],
+            chain.append(tfb.RealNVP(
+                fraction_masked=-0.5,
+                bijector_fn=self.rqs[2*i+1],
+                validate_args=True
+            ))
+            chain.append(tfb.ScaleMatvecLU(
+                *self.lu_fact[i],
+                validate_args=True
+            ))
+        chain.append(tfb.ScaleMatvecDiag(
+            tf.exp(self.log_scale[n_units]),
             validate_args=True
         ))
         self.bij = tfb.Chain(chain[::-1])
@@ -319,6 +316,7 @@ class NormalizingFlow(object):
             [serialize_variable(v) for v in lu]
             for lu in self.lu_fact
         ]
+        o['log_scale'] = [serialize_variable(v) for v in self.log_scale]
         return o
     
     @classmethod
@@ -332,7 +330,14 @@ class NormalizingFlow(object):
             [deserialize_variable(v) for v in lu]
             for lu in d['lu_fact']
         ]
-        return cls(d['n_dim'], d['n_units'], rqs=rqs, lu_fact=lu_fact)
+        log_scale = [deserialize_variable(v) for v in d['log_scale']]
+        return cls(
+            d['n_dim'],
+            d['n_units'],
+            rqs=rqs,
+            lu_fact=lu_fact,
+            log_scale=log_scale
+        )
 
 
 def get_flow_plot_fn(flow, p_true_fn=None):
@@ -465,9 +470,9 @@ def plot_inv1x1conv(bij, ax, label_y_axis=True):
         )
 
     if isinstance(bij, tfb.ScaleMatvecLU):
-        ax.set_title('invertible 1x1 convolution')
-    elif isinstance(bij, ActNorm):
-        ax.set_title('activation normalization')
+        ax.set_title('ScaleMatvecLU')
+    elif isinstance(bij, tfb.ScaleMatvecDiag):
+        ax.set_title('ScaleMatvecDiag')
 
     ax.set_xlabel(r'$x_0$')
 
@@ -493,7 +498,7 @@ def plot_nsf(bij, ax, label_y_axis=True):
         ], axis=1)
         y = bij(x)
         ax.plot(x[:,1], y[:,1], c=c)
-        ax.set_title('RQS')
+        ax.set_title('RealNVP-RQS')
 
     ax.grid('on', alpha=0.25)
     ax.set_xlabel(r'$x_1$')
@@ -568,7 +573,8 @@ def plot_bijections(flow):
     for i,b in enumerate(flow.bij.bijectors[::-1]):
         if isinstance(b, tfb.RealNVP):
             plot_nsf(b, ax_arr[0,i], label_y_axis=(i==0))
-        elif isinstance(b, tfb.ScaleMatvecLU) or isinstance(b, ActNorm):
+        elif (isinstance(b, tfb.ScaleMatvecLU)
+              or isinstance(b, tfb.ScaleMatvecDiag)):
             plot_inv1x1conv(b, ax_arr[0,i], label_y_axis=(i==0))
         else:
             ax_arr[0,i].axis('off')
@@ -611,7 +617,8 @@ def get_flow_loss_gradient_func(flow):
 
 def get_training_callback(flow, every=500,
                                 fname='nvp_{i:05d}.png',
-                                p_true_fn=None):
+                                p_true_fn=None,
+                                **kwargs):
     """
     Returns a standard callback function that can be passed
     to train_flow. Every <every> steps callback prints the
@@ -628,10 +635,13 @@ def get_training_callback(flow, every=500,
             and returns the true probability density. Defaults
             to None.
     """
-    plt_fn = get_flow_plot_fn(flow, p_true_fn=p_true_fn)
+    plt_fn = kwargs.get(
+        'plt_fn', 
+        get_flow_plot_fn(flow, p_true_fn=p_true_fn)
+    )
 
     def training_callback(i, n_steps, loss_history, opt):
-        if (i % every == 0):
+        if (i % every == 0) or (i == n_steps - 1):
             loss_avg = np.mean(loss_history[-50:])
             lr = float(opt._decayed_lr(tf.float32))
             print(
@@ -639,10 +649,11 @@ def get_training_callback(flow, every=500,
                 f'<loss> = {loss_avg: >7.5f} , '
                 f'lr = {lr:.4g}'
             )
-            fig = plt_fn()
-            namespace = dict(i=i, n_steps=n_steps, every=every)
-            fig.savefig(fname.format(**namespace), dpi=100)
-            plt.close(fig)
+            if plt_fn is not None:
+                fig = plt_fn()
+                namespace = dict(i=i, n_steps=n_steps, every=every)
+                fig.savefig(fname.format(**namespace), dpi=100)
+                plt.close(fig)
 
     return training_callback
 
