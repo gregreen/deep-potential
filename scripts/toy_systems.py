@@ -2,10 +2,13 @@
 
 from __future__ import print_function, division
 
+import tensorflow as tf
+print(f'Tensorflow version {tf.__version__}')
+
 import numpy as np
 import scipy
 
-from scipy.integrate import cumtrapz
+from scipy.integrate import cumtrapz, solve_ivp
 from scipy.interpolate import interp1d
 
 
@@ -78,6 +81,42 @@ class PlummerSphere(object):
         v2 = np.sum(v**2, axis=1)
         E = self.psi(r) - 0.5*v2
         return self.df_norm * np.clip(E, 0., np.inf)**(7/2)
+
+
+def integrate_path(force_fn, x0, v0, t_max, **kwargs):
+    assert x0.shape == v0.shape
+
+    n_particles, n_dim = x0.shape
+    s = (x0.size,)
+
+    def dy_dt(t, y):
+        y = np.reshape(y, (2, n_particles, n_dim))
+        x, x_t = y
+        x_tt = force_fn(t, x)
+        y_t = np.concatenate([np.reshape(x_t, s), np.reshape(x_tt, s)])
+        return y_t
+
+    y0 = np.concatenate([np.reshape(x0, s), np.reshape(v0, s)])
+
+    sol = solve_ivp(dy_dt, (0.,t_max), y0, **kwargs)
+
+    x,v = np.reshape(sol.y, (2, n_particles, n_dim, sol.y.shape[1]))
+
+    return sol, x, v
+
+
+@tf.function
+def calc_force(phi_func, x):
+    with tf.GradientTape() as g:
+        g.watch(x)
+        phi = phi_func(x)
+    dphi_dx = g.gradient(phi, x)
+    return -dphi_dx
+
+
+def calc_force_np(phi_func, x):
+    x = tf.constant(x)
+    return calc_force(phi_func, x).numpy()
 
 
 def main():
