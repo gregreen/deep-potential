@@ -20,6 +20,9 @@ from matplotlib.ticker import AutoMinorLocator
 from time import time
 import re
 import json
+import progressbar
+from glob import glob
+import gc
 
 import serializers_tf
 import potential_tf
@@ -112,6 +115,36 @@ def gen_data(n_samples):
     return data
 
 
+def save_data(data, fname):
+    o = {'eta': data.numpy().tolist()}
+    with open(fname, 'w') as f:
+        json.dump(o, f)
+
+
+def load_data(fname):
+    with open(fname, 'r') as f:
+        o = json.load(f)
+    d = tf.constant(np.array(o['eta'], dtype='f4'))
+    return d
+
+
+def get_training_callback(n_steps):
+    widgets = [
+        progressbar.Bar(),
+        progressbar.Percentage(), ' |',
+        progressbar.Timer(), '|',
+        progressbar.ETA(), '|',
+        progressbar.Variable('loss', width=6, precision=4), ', ',
+        progressbar.Variable('lr', width=8, precision=3)
+    ]
+    bar = progressbar.ProgressBar(max_value=n_steps, widgets=widgets)
+    def update_progressbar(i, n_steps, loss_history, opt):
+        loss = np.mean(loss_history[-50:])
+        lr = float(opt._decayed_lr(tf.float32))
+        bar.update(i+1, loss=loss, lr=lr)
+    return update_progressbar
+
+
 def train_flows(data, n_flows, n_samples, n_epochs=128, batch_size=1024):
     n_dim = 6
     n_units = 4
@@ -139,19 +172,20 @@ def train_flows(data, n_flows, n_samples, n_epochs=128, batch_size=1024):
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
+            callback=get_training_callback(n_steps)
             # optimizer=opt,
-            callback=flow_tf.get_training_callback(
-                flow,
-                plt_fn=None,
-                every=1024,
-                # fname='plummer_flow_training_{i:05d}.png'
-            )
+            #callback=flow_tf.get_training_callback(
+            #    flow,
+            #    plt_fn=None,
+            #    every=1024,
+            #    # fname='plummer_flow_training_{i:05d}.png'
+            #)
         )
 
         with open(f'plummer_flow_{i:02d}.json', 'w') as f:
             json.dump(flow.serialize(), f)
         
-        fig = plot_samples(flow.nvp.sample([128*1024]))
+        fig = plot_samples(flow.nvp.sample([128*1024]).numpy())
         fig.savefig(f'plummer_flow_{i:02d}.png', dpi=100)
         plt.close(fig)
 
@@ -173,85 +207,80 @@ def df_ideal(q, p):
     return A * f
 
 
-def compare_gradients(flow_list, n_points=1024*32):
-    q,p = plummer_sphere.sample_df(n_points)
-    q = tf.constant(q.astype('f4'))
-    p = tf.constant(p.astype('f4'))
+def plot_gradients(df_data, batch_size=1024):
+    #plummer_sphere = toy_systems.PlummerSphere()
+    #q,p = plummer_sphere.sample_df(n_points)
+    #q = tf.constant(q.astype('f4'))
+    #p = tf.constant(p.astype('f4'))
 
-    f_ideal, df_dq, df_dp = potential_tf.calc_df_deta(df_ideal, q, p)
-    df_dq = df_dq.numpy()
-    df_dp = df_dp.numpy()
+    q = df_data['q']
+    p = df_data['p']
 
-    f_star_list, dflow_dq_list, dflow_dp_list = [], [], []
-    f_star = np.zeros_like(f_ideal.numpy())
-    dflow_dq = np.zeros_like(df_dq.numpy())
-    dflow_dp = np.zeros_like(df_dp.numpy())
+    # Calculate ideal gradients
+    df_dq_ideal, df_dp_ideal = batch_calc_df_deta(
+        df_ideal, q, p,
+        batch_size=batch_size
+    )
+    #f_ideal, df_dq, df_dp = potential_tf.calc_df_deta(
+    #    df_ideal,
+    #    tf.constant(q.astype('f4')),
+    #    tf.constant(p.astype('f4'))
+    #)
+    #df_dq_ideal = df_dq.numpy()
+    #df_dp_ideal = df_dp.numpy()
+    print(f'df/dq (ideal): {df_dq_ideal.shape} {type(df_dq_ideal)}')
+    print(f'df/dp (ideal): {df_dp_ideal.shape} {type(df_dp_ideal)}')
 
-    n_flows = len(flow_list)
-
-    for i,flow in enumerate(flow_list):
-        print(f'Calculating gradients of flow {i+1} of {n_flows} ...')
-
-        def get_f_star(q, p):
-            eta = tf.concat([q,p], axis=1)
-            return flow.nvp.prob(eta)
-        
-        res = potential_tf.calc_df_deta(get_f_star, q, p)
-        f_star_list.append(res[0].numpy())
-        dflow_dq_list.append(res[1].numpy())
-        dflow_dp_list.append(res[2].numpy())
-
-        f_star += res[0].numpy() / n_flows
-        dflow_dq += res[1].numpy() / n_flows
-        dflow_dp += res[2].numpy() / n_flows
-    
     #
     # Plot the true vs. estimated gradients
     #
 
-    def sigma_clipped_mean(x, n_sigma=3.):
-        sigma = np.std(x, axis=0)
-        mu = np.median(x, axis=0)
-        idx = np.abs(x - mu[None,...]) < n_sigma*(sigma[None,...]+1.e-8)
-        w = idx.astype(x.dtype)
-        x_avg = np.sum(x*w, axis=0) / np.sum(w, axis=0)
-        return x_avg
+    df_dq_est = [df_data['df_dq']]
+    df_dp_est = [df_data['df_dp']]
 
-    df_dq_est = sigma_clipped_mean(np.stack(dflow_dq_list, axis=0), n_sigma=5)
-    df_dp_est = sigma_clipped_mean(np.stack(dflow_dp_list, axis=0), n_sigma=5)
+    if 'df_dq_indiv' in df_data:
+        df_dq_est += df_data['df_dq_indiv']
+        df_dp_est += df_data['df_dp_indiv']
 
-    # df_dq_est = np.median(
-    #     np.stack(dflow_dq_list, axis=0),
-    #     axis=0
-    # )
+    xlim_list = []
+    nlim_list = []
+    
+    n_sc = 2**14
 
-    # df_dp_est = np.median(
-    #     np.stack(dflow_dp_list, axis=0),
-    #     axis=0
-    # )
+    for k,(df_dq,df_dp) in enumerate(zip(df_dq_est, df_dp_est)):
+        suffix = (k-1) if k else 'ensemble'
 
-    fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
+        print(f'Plotting flow: {suffix} ...')
 
-    for i,ax in enumerate(ax_arr.flat):
-        ax.set_aspect('equal')
-        if i < 3:
-            ax.scatter(
-                df_dq[:,i],
-                df_dq_est[:,i],
-                alpha=0.1, s=2,
-                edgecolors='none'
-            )
-        else:
-            ax.scatter(
-                df_dp[:,i-3],
-                df_dp_est[:,i-3],
-                alpha=0.1, s=2,
-                edgecolors='none'
-            )
+        fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
 
-            xlim = ax.get_xlim()
-            ylim = ax.get_ylim()
-            xlim = (min(xlim[0], ylim[0]), max(xlim[1], ylim[1]))
+        for i,ax in enumerate(ax_arr.flat):
+            ax.set_aspect('equal')
+            if i < 3:
+                ax.scatter(
+                    df_dq_ideal[:n_sc,i],
+                    df_dq[:n_sc,i],
+                    alpha=0.1, s=2,
+                    edgecolors='none'
+                )
+            else:
+                ax.scatter(
+                    df_dp_ideal[:n_sc,i-3],
+                    df_dp[:n_sc,i-3],
+                    alpha=0.1, s=2,
+                    edgecolors='none'
+                )
+
+            if k == 0:
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+                xlim = (min(xlim[0], ylim[0]), max(xlim[1], ylim[1]))
+                xlim = max(xlim)
+                xlim = (-xlim, xlim)
+                xlim_list.append(xlim)
+            else:
+                xlim = xlim_list[i]
+
             ax.set_xlim(xlim)
             ax.set_ylim(xlim)
 
@@ -260,59 +289,92 @@ def compare_gradients(flow_list, n_points=1024*32):
             ax.set_xlabel(r'true')
             ax.set_ylabel(r'normalizing flow')
 
+            ax.grid('on', which='major', alpha=0.20)
+            ax.grid('on', which='minor', alpha=0.05)
+
             ax.set_title(rf'$\mathrm{{d}}f / \mathrm{{d}}\eta_{i}$')
 
-            fig.subplots_adjust(
-                hspace=0.25, wspace=0.3,
-                top=0.91, bottom=0.06
+        fig.subplots_adjust(
+            hspace=0.25, wspace=0.3,
+            top=0.91, bottom=0.06
+        )
+        fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
+
+        fig.savefig(f'flow_gradients_comparison_scatter_{suffix}.png', dpi=100)
+        plt.close(fig)
+
+        #
+        # Plot histogram of gradient residuals along each dimension in phase space
+        #
+
+        fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
+
+        for i,ax in enumerate(ax_arr.flat):
+            ax.set_aspect('auto')
+            if i < 3:
+                resid = df_dq[:,i] - df_dq_ideal[:,i]
+            else:
+                resid = df_dp[:,i-3] - df_dp_ideal[:,i-3]
+            
+            ax.hist(
+                resid,
+                range=(-0.05, 0.05),
+                bins=51,
+                log=True
             )
-            fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
 
-            fig.savefig('flow_gradients_comparison.png', dpi=100)
+            ax.set_xlabel(r'(normalizing flow) - (true)')
+            ax.set_title(rf'$\mathrm{{d}}f / \mathrm{{d}}\eta_{i}$')
 
-    #
-    # Plot histogram of gradient residuals along each dimension in phase space
-    #
+            if k == 0:
+                nlim = ax.get_ylim()
+                nlim_list.append(nlim)
+            else:
+                nlim = nlim_list[i]
+            ax.set_ylim(nlim)
 
-    fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
+            sigma = np.std(resid)
+            kurt = scipy.stats.kurtosis(resid)
+            ax.text(
+                0.95, 0.95,
+                rf'$\sigma = {sigma:.4f}$'+'\n'+rf'$\kappa = {kurt:.2f}$',
+                ha='right',
+                va='top',
+                transform=ax.transAxes
+            )
 
-    for i,ax in enumerate(ax_arr.flat):
-        ax.set_aspect('auto')
-        if i < 3:
-            resid = df_dq_est[:,i] - df_dq[:,i]
-        else:
-            resid = df_dp_est[:,i-3] - df_dp[:,i-3]
-        
-        ax.hist(
-            resid,
-            range=(-0.05, 0.05),
-            bins=51,
-            log=True
+            ax.grid('on', which='major', alpha=0.20)
+            ax.grid('on', which='minor', alpha=0.05)
+
+        fig.subplots_adjust(
+            hspace=0.25, wspace=0.3,
+            top=0.91, bottom=0.06
         )
+        fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
 
-        ax.set_xlabel(r'(normalizing flow) - (true)')
-        ax.set_title(rf'$\mathrm{{d}}f / \mathrm{{d}}\eta_{i}$')
-
-        sigma = np.std(resid)
-        kurt = scipy.stats.kurtosis(resid)
-        ax.text(
-            0.95, 0.95,
-            rf'$\sigma = {sigma:.4f}$'+'\n'+rf'$\kappa = {kurt:.2f}$',
-            ha='right',
-            va='top',
-            transform=ax.transAxes
-        )
-
-    fig.subplots_adjust(
-        hspace=0.25, wspace=0.3,
-        top=0.91, bottom=0.06
-    )
-    fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
-
-    fig.savefig('flow_gradients_comparison_hist.png', dpi=100)
+        fig.savefig(f'flow_gradients_comparison_hist_{suffix}.png', dpi=100)
+        plt.close(fig)
 
 
-def sample_from_flows(flow_list, n_samples):
+def batch_calc_df_deta(f_func, q, p, batch_size):
+    df_dq = np.empty_like(q)
+    df_dp = np.empty_like(p)
+    n_data = q.shape[0]
+
+    for k in range(0,n_data,batch_size):
+        print(f'{k+batch_size} of {n_data}')
+        b0,b1 = k, k+batch_size
+        qq = tf.constant(q[b0:b1])
+        pp = tf.constant(p[b0:b1])
+        res = potential_tf.calc_df_deta(f_func, qq, pp)
+        df_dq[b0:b1] = res[1].numpy()
+        df_dp[b0:b1] = res[2].numpy()
+
+    return df_dq, df_dp
+
+
+
+def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024):
     n_flows = len(flow_list)
 
     # Sample from ensemble of flows
@@ -321,33 +383,99 @@ def sample_from_flows(flow_list, n_samples):
         print(f'Sampling from flow {i+1} of {n_flows} ...')
         eta.append(flow.nvp.sample([n_samples//n_flows]).numpy())
     eta = np.concatenate(eta, axis=0)
-    q = tf.constant(eta[:,:3].astype('f4'))
-    p = tf.constant(eta[:,3:].astype('f4'))
+    q = eta[:,:3].astype('f4')
+    p = eta[:,3:].astype('f4')
 
     # Calculate gradients
+    df_dq = np.zeros_like(q)
+    df_dp = np.zeros_like(p)
+
+    df_dq_indiv, df_dp_indiv = [], []
+
     for i,flow in enumerate(flow_list):
         print(f'Calculating gradients of flow {i+1} of {n_flows} ...')
 
+        @tf.function
         def get_f_star(q, p):
+            print('Tracing get_f_star ...')
             eta = tf.concat([q,p], axis=1)
             return flow.nvp.prob(eta)
         
-        res = potential_tf.calc_df_deta(get_f_star, q, p)
+        df_dq_i, df_dp_i = batch_calc_df_deta(
+            get_f_star, q, p,
+            batch_size=batch_size
+        )
+        df_dq += df_dq_i / n_flows
+        df_dp += df_dp_i / n_flows
 
-        f += res[0].numpy() / n_flows
-        df_dq += res[1].numpy() / n_flows
-        df_dp += res[2].numpy() / n_flows
+        if return_indiv:
+            df_dq_indiv.append(df_dq_i)
+            df_dp_indiv.append(df_dp_i)
 
-    df_dq = tf.constant(df_dq.astype('f4'))
-    df_dp = tf.constant(df_dp.astype('f4'))
+        print('Cache:')
+        print(f._stateful_fn._function_cache._garbage_collectors[0]._cache)
+        get_f_star._stateful_fn._function_cache._garbage_collectors[0]._cache.popitem()
 
-    return q, p, df_dq, df_dp
+        gc.collect()
+
+    ret = {
+        'q': q,
+        'p': p,
+        'df_dq': df_dq,
+        'df_dp': df_dp
+    }
+    if return_indiv:
+        ret['df_dq_indiv'] = df_dq_indiv
+        ret['df_dp_indiv'] = df_dp_indiv
+    return ret
 
 
-def train_potential(flow_list, n_samples, epochs=4096, batch_size=1024):
-    q, p, df_dq, df_dp = sample_from_flows(n_samples)
+def plot_phi_model(phi_model):
+    # Instantiate Plummer sphere class
+    plummer_sphere = toy_systems.PlummerSphere()
 
-    data = tf.stack([q, p, df_dq, df_dp], axis=1)
+    x,v = plummer_sphere.sample_df(1024)
+
+    q = tf.constant(x.astype('f4'))
+    Phi = phi_model(q).numpy()
+
+    r = np.sqrt(np.sum(x**2, axis=1))
+    Phi_ideal = plummer_sphere.phi(r)
+
+    Phi_0 = np.median(Phi_ideal - Phi)
+    Phi += Phi_0
+
+    fig,ax = plt.subplots(1,1, figsize=(8,6))
+
+    r_range = np.linspace(0.05, 50., 1000)
+    ax.semilogx(
+        r_range,
+        plummer_sphere.phi(r_range),
+        c='g', alpha=0.2,
+        label='ideal'
+    )
+    ax.scatter(r, Phi, alpha=0.2, s=3, label='NN model')
+    ax.legend(loc='upper left')
+
+    ax.set_xlim(0.05, 50.)
+    ax.set_ylim(-1.4, 0.4)
+
+    ax.set_xlabel(r'$r$')
+    ax.set_ylabel(r'$\Phi$')
+
+    return fig
+
+
+def train_potential(df_data, n_epochs=4096, batch_size=1024):
+    n_samples = df_data['q'].shape[0]
+
+    data = tf.stack(
+        [
+            df_data['q'], df_data['p'],
+            df_data['df_dq'], df_data['df_dp']
+        ],
+        axis=1
+    )
     data = tf.data.Dataset.from_tensor_slices(data)
 
     phi_model = potential_tf.PhiNN(n_dim=3, n_hidden=3, n_features=128)
@@ -357,7 +485,7 @@ def train_potential(flow_list, n_samples, epochs=4096, batch_size=1024):
 
     # How much to weight Laplacian in loss function
     lam = tf.constant(1.0)  # Penalty for negative matter densities
-    mu = tf.constant(0.0001)   # Penalty for positive matter densities
+    mu = tf.constant(0.0)   # Penalty for positive matter densities
 
     # Optimizer
     n_steps = n_epochs * (n_samples // batch_size)
@@ -383,6 +511,8 @@ def train_potential(flow_list, n_samples, epochs=4096, batch_size=1024):
 
     t0 = time()
 
+    callback = get_training_callback(n_steps)
+
     for i,b in enumerate(batches):
         # Unpack the data from the batch
         q_b, p_b, df_dq_b, df_dp_b = [
@@ -406,36 +536,88 @@ def train_potential(flow_list, n_samples, epochs=4096, batch_size=1024):
         # Logging
         loss_history.append(loss)
 
-        if (i % 128 == 0) or (i == n_steps - 1):
-            loss_avg = np.mean(loss_history[-128:])
-            lr = float(opt._decayed_lr(tf.float32))
-            print(
-                f'Step {i+1} of {n_steps} : '
-                f'<loss> = {loss_avg:.5g} '
-                f'lr = {lr:.5g}'
-            )
+        callback(i, n_steps, loss_history, opt)
 
-            fig = plot_model(phi_model)
+        if (i % 128 == 0) or (i == n_steps - 1):
+            #loss_avg = np.mean(loss_history[-128:])
+            #lr = float(opt._decayed_lr(tf.float32))
+            #print(
+            #    f'Step {i+1} of {n_steps} : '
+            #    f'<loss> = {loss_avg:.5g} '
+            #    f'lr = {lr:.5g}'
+            #)
+            fig = plot_phi_model(phi_model)
             fig.savefig(f'phi_training_{i:05d}.png', dpi=150)
             plt.close(fig)
 
     t1 = time()
     print(f'Elapsed time: {t1-t0:.1f} s')
 
+    d = phi_model.serialize()
+    with open('plummer_phi_nn.json', 'w') as f:
+        json.dump(d, f)
+
     return phi_model
 
 
+def load_flows():
+    flow_list = []
+
+    fnames = glob('plummer_flow_??.json')
+    fnames = sorted(fnames)
+
+    for i,fn in enumerate(fnames):
+        print(f'Loading flow {i+1} of {len(fnames)} ...')
+        with open(fn, 'r') as f:
+            d = json.load(f)
+        flow_list.append(flow_tf.NormalizingFlow.deserialize(d))
+
+    return flow_list
+
+
+def save_df_data(df_data, fname):
+    o = {}
+    for key in df_data:
+        d = df_data[key]
+        if isinstance(d, list):
+            o[key] = [dd.tolist() for dd in d]
+        else:
+            o[key] = d.tolist()
+
+    with open(fname, 'w') as f:
+        json.dump(o, f)
+
+
+def load_df_data(fname):
+    with open(fname, 'r') as f:
+        o = json.load(f)
+
+    d = {}
+    for key in ['q','p','df_dq','df_dp']:
+        d[key] = np.array(o[key], dtype='f4')
+    for key in ['df_dq_indiv','df_dp_indiv']:
+        d[key] = [np.array(oo,dtype='f4') for oo in o[key]]
+
+    return d
+
+
 def main():
-    n_samples = 1024 * 128
-    n_flows = 2
+    #n_samples = 1024 * 128
+    #data = gen_data(n_samples)
+    #save_data(data, 'plummer_observations.json')
 
-    data = gen_data(n_samples)
-    flows = train_flows(data, n_flows, n_samples, epochs=4)
+    #n_flows = 16
+    #data = load_data('plummer_observations.json')
+    #flows = train_flows(data, n_flows, n_samples, n_epochs=256, batch_size=8192)
 
-    compare_gradients(flows)
+    #n_samples = 1024 * 32
+    #flows = load_flows()
+    #df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=4)
+    #save_df_data(df_data, 'plummer_df_data.json')
 
-    n_samples = 1024 * 32
-    phi_model = train_potential(flows, n_samples, epochs=32)
+    df_data = load_df_data('plummer_df_data.json')
+    #plot_gradients(df_data)
+    phi_model = train_potential(df_data, n_epochs=1024, batch_size=2048)
     
     return 0
 

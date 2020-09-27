@@ -694,7 +694,7 @@ def train_flow(flow, data, optimizer=None, batch_size=32,
         lr_schedule = keras.optimizers.schedules.ExponentialDecay(
             2.e-2,
             n_steps,
-            0.001,
+            0.05,
             staircase=False
         )
         opt = tfa.optimizers.RectifiedAdam(

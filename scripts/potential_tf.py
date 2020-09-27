@@ -21,7 +21,10 @@ from serializers_tf import (
 )
 
 
+#@tf.function
 def calc_df_deta(f_func, q, p):
+    #print('Tracing calc_df_deta ...')
+
     # Calculate gradients of distribution function
     with tf.GradientTape(persistent=True) as g:
         g.watch([q, p])
