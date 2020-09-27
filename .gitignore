@@ -130,3 +130,13 @@ dmypy.json
 
 # Put miscellaneous untracked docs in misc/
 misc/
+
+# Plots
+*.png
+*.pdf
+
+# Data files
+*.json
+
+# Checkpoints
+checkpoints/
