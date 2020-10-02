@@ -299,7 +299,7 @@ def train_potential(
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
         1.e-3,
         n_steps,
-        0.1,
+        0.01,
         staircase=False
     )
     opt = tfa.optimizers.RectifiedAdam(
@@ -332,6 +332,9 @@ def train_potential(
             mu=mu,
             weight_samples=False
         )
+
+        dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
+        #tf.print('\n',global_norm)
 
         # Take step using optimizer
         opt.apply_gradients(zip(dloss_dparam, phi_param))

@@ -355,21 +355,23 @@ def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = load_or_create_flow(exact=True)
+        flow = flow_ffjord_tf.FFJORDFlow(6, 4, 32, exact=True)
         flow_list.append(flow)
         
         loss_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
-            checkpoint_dir='checkpoints/plummer_flow',
-            checkpoint_name=f'plummer_{i}',
+            #checkpoint_dir='checkpoints/plummer_sphere',
+            #checkpoint_name=f'flow_{i:02d}',
             checkpoint_every=None
         )
 
-        #fig = plot_samples(flow.sample([128*1024]).numpy())
-        #fig.savefig(f'plots/plummer_flow_{i:02d}.png', dpi=100)
-        #plt.close(fig)
+        flow.save(f'models/plummer_sphere/df/flow_{i:02d}')
+
+        fig = utils.plot_loss(loss_history)
+        fig.savefig(f'plots/plummer_flow_loss_history_{i:02d}.png', dpi=200)
+        plt.close(fig)
 
     return flow_list
 
@@ -383,20 +385,19 @@ def train_potential(df_data, n_epochs=4096, batch_size=1024):
         n_epochs=n_epochs,
         batch_size=batch_size,
         checkpoint_dir=r'checkpoints/plummer_sphere',
-        checkpoint_every=None
+        checkpoint_every=None,
+        lam=tf.constant(1.0)
     )
 
-    phi_model.save('models/plummer_sphere/Phi_final')
+    phi_model.save('models/plummer_sphere/Phi/Phi')
     #phi_model = potential_tf.PhiNN.load('models/plummer_sphere/Phi_final-1')
 
     fig = utils.plot_loss(loss_history)
-    fig.savefig('plots/plummer_loss_history.png', dpi=200)
-    fig.savefig('plots/plummer_loss_history.pdf', dpi=200)
+    fig.savefig('plots/plummer_potential_loss_history.png', dpi=200)
     plt.close(fig)
 
     fig = plot_phi(phi_model, n_samples=1024, grid_size=51, r_max=13.)
     fig.savefig('plots/plummer_potential_vs_ideal.png', dpi=200)
-    fig.savefig('plots/plummer_potential_vs_ideal.pdf', dpi=200)
     plt.close(fig)
 
     return phi_model
@@ -698,10 +699,10 @@ def compare_flow_with_ideal(flows):
         f'plots/plummer_df_vs_ideal.png',
         dpi=200
     )
-    fig.savefig(
-        f'plots/plummer_df_vs_ideal.pdf',
-        dpi=200
-    )
+    #fig.savefig(
+    #    f'plots/plummer_df_vs_ideal.pdf',
+    #    dpi=200
+    #)
     plt.close(fig)
 
 
@@ -716,7 +717,7 @@ def batch_calc_df_deta(f, eta, batch_size):
 
     for k in range(0,n_data,batch_size):
         if k != 0:
-            bar = ProgressBar(max_value=n_data)
+            bar = progressbar.ProgressBar(max_value=n_data)
             bar.update(k)
         #print(f'{k} to {k+batch_size-1} of {n_data}')
         b0,b1 = k, k+batch_size
@@ -929,24 +930,19 @@ def plot_phi(phi_nn, r_max=13., x_max=5., n_samples=1024, grid_size=51):
 
 
 
-def load_or_create_flow(fname=None, exact=False):
-    flow = flow_ffjord_tf.create_flow(6, 4, 64, exact=exact)
-    if fname is not None:
-        flow_ffjord_tf.load_flow_params(flow, fname)
-    return flow
-
-
 def load_flows():
     flow_list = []
 
-    fnames = glob('checkpoints/plummer_flow_bak4/plummer_*_final-1.index')
+    fnames = glob('models/plummer_sphere/df/flow_*-1.index')
     fnames = sorted(fnames)
     fnames = [fn[:-6] for fn in fnames]
+
+    print(f'Found {len(fnames)} flows.')
 
     for i,fn in enumerate(fnames):
         print(f'Loading flow {i+1} of {len(fnames)} ...')
         print(fn)
-        flow = load_or_create_flow(fname=fn, exact=True)
+        flow = flow_ffjord_tf.FFJORDFlow.load(fname=fn)
         flow_list.append(flow)
 
     return flow_list
@@ -984,20 +980,20 @@ def main():
     #data = gen_data(n_samples)
     #save_data(data, 'data/plummer_observations.json')
 
-    #n_flows = 16
-    #data = load_data('data/plummer_observations.json')
-    #flows = train_flows(data, n_flows, n_epochs=16, batch_size=512)
+    n_flows = 6
+    data = load_data('data/plummer_observations.json')
+    flows = train_flows(data, n_flows, n_epochs=64, batch_size=512)
 
-    n_samples = 1024 * 128
-    flows = load_flows()
+    #flows = load_flows()
     plot_flows(flows)
-    #compare_flow_with_ideal(flows)
-    #df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=2048)
-    #save_df_data(df_data, 'data/plummer_df_data.json')
+    compare_flow_with_ideal(flows)
+    n_samples = 1024 * 512
+    df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=2048)
+    save_df_data(df_data, 'data/plummer_df_data.json')
 
     #df_data = load_df_data('data/plummer_df_data.json')
-    #plot_gradients(df_data)
-    #phi_model = train_potential(df_data, n_epochs=512, batch_size=2048)
+    plot_gradients(df_data)
+    phi_model = train_potential(df_data, n_epochs=128, batch_size=2048)
     
     return 0
 
