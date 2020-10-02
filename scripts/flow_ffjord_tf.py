@@ -20,6 +20,7 @@ import sonnet as snt
 # Misc imports
 from time import time
 import os
+import json
 
 # Custom libraries
 from utils import *
@@ -43,37 +44,81 @@ class ForceFieldModel(snt.Module):
         return self._nn(tx)
 
 
-def create_flow(n_dim, n_hidden, hidden_size, exact=False):
-    dz_dt = ForceFieldModel(n_dim, n_hidden, hidden_size)
-    ode_solver = tfp.math.ode.DormandPrince(atol=1.e-5)
+class FFJORDFlow(tfd.TransformedDistribution):
+    def __init__(self, n_dim, n_hidden, hidden_size,
+                 exact=True, atol=1.e-5, name='DF'):
+        self._n_dim = n_dim
+        self._n_hidden = n_hidden
+        self._hidden_size = hidden_size
+        self._name = name
 
-    if exact:
-        trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
-    else:
-        trace_augmentation_fn = tfb.ffjord.trace_jacobian_hutchinson
+        # Force field guiding transformation
+        dz_dt = ForceFieldModel(n_dim, n_hidden, hidden_size)
 
-    bij = tfb.FFJORD(
-        state_time_derivative_fn=dz_dt,
-        ode_solve_fn=ode_solver.solve,
-        trace_augmentation_fn=trace_augmentation_fn
-    )
+        ode_solver = tfp.math.ode.DormandPrince(atol=atol)
 
-    base_dist = tfd.MultivariateNormalDiag(
-        loc=np.zeros(n_dim, dtype='f4')
-    )
+        if exact:
+            trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
+        else:
+            # Stochastic estimate of the Jacobian. Better scaling with
+            # number of dimensions, but noisy.
+            trace_augmentation_fn = tfb.ffjord.trace_jacobian_hutchinson
 
-    dist = tfd.TransformedDistribution(
-        distribution=base_dist,
-        bijector=bij
-    )
+        # Initialize bijector
+        bij = tfb.FFJORD(
+            state_time_derivative_fn=dz_dt,
+            ode_solve_fn=ode_solver.solve,
+            trace_augmentation_fn=trace_augmentation_fn
+        )
 
-    # Initialize flow
-    dist.sample([1])
+        # Multivariate normal base distribution
+        base_dist = tfd.MultivariateNormalDiag(
+            loc=np.zeros(n_dim, dtype='f4')
+        )
 
-    n_var = sum([int(tf.size(v)) for v in dist.trainable_variables])
-    print(f'# of trainable variables: {n_var}')
+        # Initialize FFJORD
+        super(FFJORDFlow, self).__init__(
+            distribution=base_dist,
+            bijector=bij,
+            name=name
+        )
 
-    return dist
+        # Initialize flow by taking a sample
+        self.sample([1])
+
+        self.n_var = sum([int(tf.size(v)) for v in self.trainable_variables])
+        print(f'# of trainable variables: {self.n_var}')
+    
+    def save(self, fname_base):
+        # Save variables
+        checkpoint = tf.train.Checkpoint(flow=self)
+        fname_out = checkpoint.save(fname_base)
+
+        # Save the specs of the neural network
+        d = dict(
+            n_dim=self._n_dim,
+            n_hidden=self._n_hidden,
+            hidden_size=self._hidden_size,
+            name=self._name
+        )
+        with open(fname_out+'_spec.json', 'w') as f:
+            json.dump(d, f)
+
+        return fname_out
+
+    @classmethod
+    def load(cls, fname, **kwargs):
+        # Load network specs
+        with open(fname+'_spec.json', 'r') as f:
+            kw = json.load(f)
+        kw.update(kwargs)
+        flow = cls(**kw)
+
+        # Restore variables
+        checkpoint = tf.train.Checkpoint(flow=flow)
+        checkpoint.restore(fname)
+
+        return flow
 
 
 def train_flow(flow, data,
@@ -116,7 +161,7 @@ def train_flow(flow, data,
         lr_schedule = keras.optimizers.schedules.ExponentialDecay(
             2.e-2,
             n_steps,
-            0.05,
+            0.005,
             staircase=False
         )
         opt = tfa.optimizers.RectifiedAdam(
@@ -157,6 +202,10 @@ def train_flow(flow, data,
             g.watch(variables)
             loss = -tf.reduce_mean(flow.log_prob(batch))
         grads = g.gradient(loss, variables)
+        #tf.print([(v.name,tf.norm(v)) for v in grads])
+        grads,global_norm = tf.clip_by_global_norm(grads, 1.)
+        #tf.print('\n',global_norm)
+        #tf.print([(v.name,tf.norm(v)) for v in grads])
         opt.apply_gradients(zip(grads, variables))
         return loss
 
@@ -189,15 +238,27 @@ def train_flow(flow, data,
     print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
 
     # Save the trained model
-    checkpoint = tf.train.Checkpoint(flow=flow)
-    checkpoint.save(checkpoint_prefix + '_final')
+    #checkpoint = tf.train.Checkpoint(flow=flow)
+    #checkpoint.save(checkpoint_prefix + '_final')
     
     return loss_history
 
 
-def load_flow_params(flow, checkpoint_fname):
+def save_flow(flow, fname_base):
     checkpoint = tf.train.Checkpoint(flow=flow)
-    checkpoint.restore(checkpoint_fname)
+    fname_out = checkpoint.save(fname_base)
+    
+    # Save the specs of the neural network
+    d = dict(
+        n_dim=self._n_dim,
+        n_hidden=self._n_hidden,
+        hidden_size=self._hidden_size,
+        name=self._name
+    )
+    with open(fname_out+'_spec.json', 'w') as f:
+        json.dump(d, f)
+
+    return fname_out
 
 
 def calc_f_gradients(f, eta):
@@ -209,9 +270,10 @@ def calc_f_gradients(f, eta):
 
 
 def main():
-    flow = create_flow(2, 4, 16)
+    #flow = create_flow(2, 4, 16)
+    flow = FFJORDFlow(2, 4, 16)
 
-    n_samples = 128*1024
+    n_samples = 32*1024
     mu = [[-2., 0.], [2., 0.]]
     cov = [
         [[1., 0.],
@@ -227,10 +289,18 @@ def main():
     train_flow(
         flow, data,
         batch_size=1024,
-        n_epochs=16,
+        n_epochs=1,
         checkpoint_every=256
     )
-    load_flow_params(flow, 'checkpoints/ffjord/ffjord_final-1')
+
+    fname = flow.save('checkpoints/ffjord/ffjord_test')
+    flow2 = FFJORDFlow.load(fname)
+
+    x = tf.random.normal([5,2])
+    y = flow.log_prob(x)
+    y2 = flow2.log_prob(x)
+    print(y)
+    print(y2)
 
     #for i in range(10):
     #    eta = tf.random.normal([1024,2])
