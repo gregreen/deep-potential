@@ -39,7 +39,7 @@ class ForceFieldModel(snt.Module):
 
     def __call__(self, t, x):
         # Concatenate time and position vectors
-        tx = tf.concat([tf.broadcast_to(t, x.shape), x], -1)
+        tx = tf.concat([tf.broadcast_to(t, [x.shape[0],1]), x], 1)
         # Return dz_dt(t,x)
         return self._nn(tx)
 
