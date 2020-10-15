@@ -99,8 +99,7 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
 
 def get_phi_loss_gradients(phi, params, q, p,
                            f=None, df_dq=None, df_dp=None,
-                           lam=tf.constant(1.0),
-                           mu=tf.constant(0.01),
+                           lam=1., mu=0,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
@@ -153,6 +152,7 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # Weight each point differently
         if weight_samples:
+            print('Re-weighting samples.')
             w = tf.stop_gradient(
                 tf.reduce_sum(
                     dphi_dq**2 / sigma_p**2 + p**2 / sigma_q**2,
@@ -165,24 +165,43 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # Average over sampled points in phase space
         likelihood = tf.math.asinh(tf.math.abs(df_dt))
-        prior_neg = tf.math.asinh(
-            tf.clip_by_value(-d2phi_dq2, 0., np.inf)
-        )
-        prior_pos = tf.math.asinh(
-            tf.clip_by_value(d2phi_dq2, 0., np.inf)
-        )
+
+        if lam != 0:
+            prior_neg = tf.math.asinh(
+                tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            )
+            print(f'prior_neg = {prior_neg}')
+            #pneg_mean = tf.math.reduce_mean(prior_neg)
+            #pneg_max = tf.math.reduce_max(prior_neg)
+            #L_mean = tf.math.reduce_mean(likelihood)
+            #r = tf.norm(q, axis=1)
+            #r_max = tf.math.reduce_max(r)
+            #tf.print('     lambda =', lam)
+            #tf.print('        <L> =', L_mean)
+            #tf.print('  <penalty> =', pneg_mean)
+            #tf.print('penalty_max =', pneg_max)
+            #tf.print('      r_max =', r_max)
+            #tf.print('')
+            likelihood = likelihood + lam * prior_neg
+
+        if mu != 0:
+            prior_pos = tf.math.asinh(
+                tf.clip_by_value(d2phi_dq2, 0., np.inf)
+            )
+            print(f'prior_pos = {prior_pos}')
+            likelihood = likelihood + mu * prior_pos
 
         # Regularization penalty
         # penalty = 0.
         # for p in params:
         #     penalty += tf.reduce_sum(p**2)
 
-        loss = tf.reduce_mean(
-            likelihood
-            + lam*prior_neg
-            + mu*prior_pos
-            # + reg*penalty
-        )
+        loss = tf.reduce_mean(likelihood)
+        #    likelihood
+        #    + lam*prior_neg
+        #    + mu*prior_pos
+        #    # + reg*penalty
+        #)
 
     # Gradients of loss w.r.t. NN parameters
     dloss_dparam = g.gradient(loss, params)
@@ -221,6 +240,7 @@ class PhiNN(snt.Module):
             for i in range(n_hidden)
         ]
         self._layers.append(snt.Linear(1, with_bias=False, name='Phi'))
+        #self._activation = tf.math.sigmoid
         self._activation = tf.math.tanh
 
         # Initialize
@@ -273,17 +293,17 @@ def train_potential(
             checkpoint_every=128,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
-            lam = tf.constant(1.0), # Penalty for negative matter densities
-            mu = tf.constant(0.0)   # Penalty for positive matter densities
+            lam=1.,  # Penalty for negative matter densities
+            mu=0     # Penalty for positive matter densities
         ):
     n_samples = df_data['eta'].shape[0]
     n_dim = df_data['eta'].shape[1] // 2
     data = tf.stack(
         [
-            df_data['eta'][:,:n_dim],
-            df_data['eta'][:,n_dim:],
-            df_data['df_deta'][:,:n_dim],
-            df_data['df_deta'][:,n_dim:]
+            df_data['eta'][:,:n_dim],     # q
+            df_data['eta'][:,n_dim:],     # p
+            df_data['df_deta'][:,:n_dim], # df/dq
+            df_data['df_deta'][:,n_dim:]  # df/dp
         ],
         axis=1
     )
@@ -299,7 +319,7 @@ def train_potential(
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
         1.e-3,
         n_steps,
-        0.01,
+        0.001,
         staircase=False
     )
     opt = tfa.optimizers.RectifiedAdam(
@@ -319,7 +339,7 @@ def train_potential(
 
         # Unpack the data from the batch
         q_b, p_b, df_dq_b, df_dp_b = [
-            tf.squeeze(x) for x in tf.split(b, 4, axis=1)
+            tf.squeeze(x) for x in tf.split(batch, 4, axis=1)
         ]
 
         # Calculate the loss and its gradients w.r.t. the parameters
@@ -333,8 +353,8 @@ def train_potential(
             weight_samples=False
         )
 
-        dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
-        #tf.print('\n',global_norm)
+        #dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
+        #tf.print('\nglobal norm:', global_norm)
 
         # Take step using optimizer
         opt.apply_gradients(zip(dloss_dparam, phi_param))
