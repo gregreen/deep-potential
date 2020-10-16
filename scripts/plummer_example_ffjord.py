@@ -18,7 +18,7 @@ import matplotlib.colors as mcolors
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from matplotlib.gridspec import GridSpec
 
-from time import time
+from time import time, sleep
 import re
 import json
 import progressbar
@@ -50,13 +50,28 @@ def sample_df(n_samples, max_dist=None):
 
 
 def vec2ang(x):
-    phi = np.arctan2(x[:,1], x[:,0])
-    theta = np.arctan2(x[:,2], np.sqrt(x[:,0]**2+x[:,1]**2))
+    phi = np.arctan2(x[...,1], x[...,0])
+    theta = np.arctan2(x[...,2], np.sqrt(x[...,0]**2+x[...,1]**2))
     return theta, phi
+
+
+def wrap_path(x, dx_max):
+    dx = np.diff(x, axis=0)
+    idx = np.any(np.abs(dx) > dx_max[None,:], axis=1)
+    idx = np.where(idx)[0]
+    y = np.insert(x, idx+1, np.nan, axis=0)
+    return y
 
 
 def plot_flows(flows):
     n_flows = len(flows)
+
+    # Plot flow trajectories
+    for i,flow in enumerate(flows):
+        print(f'Plotting trajectories of flow {i+1} of {len(flows)} ...')
+        fig = plot_flow_trajectories(flow)
+        fig.savefig(f'plots/plummer_flow_traj_{i:02d}.png', dpi=200)
+        plt.close(fig)
 
     # Plot slices of flows
     print('Plotting slices through flows ...')
@@ -303,6 +318,93 @@ def plot_flow_projections(eta):
     return fig
 
 
+def plot_flow_trajectories(flow, n_samples=100, n_t=100):
+    # Integrate paths
+    t_eval = np.linspace(0., 1., n_t)
+    res = flow.calc_trajectories(n_samples, t_eval)
+    eta_path = res.states.numpy() # shape = (time, sample, dimension)
+
+    # Set up figure
+    fig = plt.figure(figsize=(8,4), dpi=200)
+    gs = GridSpec(2,4)
+    ax_rv = fig.add_subplot(gs[:,:3])
+    ax_angles_q = fig.add_subplot(gs[0,3])
+    ax_angles_p = fig.add_subplot(gs[1,3])
+    
+    # v vs. r
+    r_lim = (0., 7.)
+    v_lim = (0., 3.)
+    
+    # Background ideal probabilities
+    bins = (140, 60)
+    p_rv, r, v = calc_prob_rv_grid(r_lim, v_lim, bins)
+    p_sorted = np.sort(p_rv.flat)
+    P_cumulative = np.cumsum(p_sorted)
+    P_cumulative /= P_cumulative[-1]
+    P_levels = [0.01, 0.1, 0.5, 0.9]
+    idx_levels = np.searchsorted(P_cumulative, P_levels)
+    p_levels = p_sorted[idx_levels]
+    level_labels = {pl: rf'{100*(1-P):.0f}\%' for pl,P in zip(p_levels,P_levels)}
+    cs = ax_rv.contour(r, v, p_rv, p_levels, alpha=0.1)
+    ax_rv.clabel(cs, fmt=level_labels)
+
+    # Trajectories
+    r = np.sqrt(np.sum(eta_path[:,:,:3]**2, axis=2))
+    v = np.sqrt(np.sum(eta_path[:,:,3:]**2, axis=2))
+    for k in range(n_samples):
+        ax_rv.plot(r[:,k], v[:,k], c='k', alpha=0.1, lw=1.)
+    ax_rv.scatter(
+        r[0], v[0],
+        s=4,
+        alpha=0.1,
+        edgecolors='k',
+        facecolors='none',
+        lw=0.5
+    )
+    ax_rv.scatter(r[-1], v[-1], s=9, alpha=0.5, edgecolors='none')
+    ax_rv.set_xlim(r_lim)
+    ax_rv.set_ylim(v_lim)
+    ax_rv.set_xlabel(r'$r$')
+    ax_rv.set_ylabel(r'$v$', labelpad=0)
+
+    # Zero-energy line
+    r_E0 = np.linspace(r_lim[0], r_lim[1], 100)
+    v_E0 = np.sqrt(2.) * (1+r_E0**2)**(-1/4)
+    ax_rv.plot(r_E0, v_E0, c='k', ls='--', alpha=0.2)
+    ax_rv.text(
+        r_E0[-1]*0.98, v_E0[-1]*0.95, r'$E = 0$',
+        ha='right', va='top',
+        fontsize=12, c='k', alpha=0.2
+    )
+
+    # Angular plots
+    tp_q = np.stack(vec2ang(eta_path[:,:,:3]), axis=2)
+    tp_p = np.stack(vec2ang(eta_path[:,:,3:]), axis=2)
+    dtp_max = np.array([1., np.pi])
+    for ax,tp,lab in ((ax_angles_q,tp_q,'q'),(ax_angles_p,tp_p,'p')):
+        for k in range(n_samples):
+            #tp_plot = tp[:,k,:]
+            tp_plot = wrap_path(tp[:,k,:], dtp_max)
+            ax.plot(tp_plot[:,1], tp_plot[:,0], c='k', alpha=0.1, lw=1.)
+        ax.scatter(
+            tp[-1,:,1], tp[-1,:,0],
+            s=9, alpha=0.5, edgecolors='none'
+        )
+        ax.set_xlim(-np.pi, np.pi)
+        ax.set_ylim(-1., 1.)
+        ax.set_xlabel(rf'$\varphi_{lab}$', labelpad=0)
+        ax.set_ylabel(rf'$\theta_{lab}$', labelpad=0)
+    
+    # Adjust figure
+    fig.subplots_adjust(
+        left=0.06, right=0.99,
+        bottom=0.12, top=0.97,
+        wspace=0.4, hspace=0.3
+    )
+
+    return fig
+
+
 def plot_flow_histograms(eta):
     n_bins = 60
     r_max = 6.
@@ -355,7 +457,10 @@ def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(6, 4, 32, exact=True)
+        flow = flow_ffjord_tf.FFJORDFlow(
+            6, 4, 32,
+            reg_kw=dict(dv_dt_reg=0.01, kinetic_reg=0.01)
+        )
         flow_list.append(flow)
         
         loss_history = flow_ffjord_tf.train_flow(
@@ -378,25 +483,24 @@ def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
 
 def train_potential(df_data, n_epochs=4096, batch_size=1024):
     # Create model
-    phi_model = potential_tf.PhiNN(n_dim=3, n_hidden=3, hidden_size=128)
+    phi_model = potential_tf.PhiNN(n_dim=3, n_hidden=3, hidden_size=256)
 
     loss_history = potential_tf.train_potential(
         df_data, phi_model,
         n_epochs=n_epochs,
         batch_size=batch_size,
-        checkpoint_dir=r'checkpoints/plummer_sphere',
         checkpoint_every=None,
-        lam=tf.constant(1.0)
+        lam=1.
     )
 
     phi_model.save('models/plummer_sphere/Phi/Phi')
-    #phi_model = potential_tf.PhiNN.load('models/plummer_sphere/Phi_final-1')
+    #phi_model = potential_tf.PhiNN.load('models/plummer_sphere/Phi/Phi-1')
 
     fig = utils.plot_loss(loss_history)
     fig.savefig('plots/plummer_potential_loss_history.png', dpi=200)
     plt.close(fig)
 
-    fig = plot_phi(phi_model, n_samples=1024, grid_size=51, r_max=13.)
+    fig = plot_phi(phi_model, df_data, n_samples=1024, grid_size=51, r_max=13.)
     fig.savefig('plots/plummer_potential_vs_ideal.png', dpi=200)
     plt.close(fig)
 
@@ -560,11 +664,7 @@ def plot_gradients(df_data, batch_size=1024):
         plt.close(fig)
 
 
-def compare_flow_with_ideal(flows):
-    r_lim = (0., 5.)
-    v_lim = (0., 1.5)
-    bins = (50, 50)
-
+def calc_prob_rv_grid(r_lim, v_lim, bins):
     r = np.linspace(r_lim[0], r_lim[1], 2*bins[0]+1)
     v = np.linspace(v_lim[0], v_lim[1], 2*bins[1]+1)
 
@@ -585,6 +685,16 @@ def compare_flow_with_ideal(flows):
     n = 0.5 * (n[:,:-1:2] + n[:,1::2])
     r = 0.5 * (r[:-1:2] + r[1::2])
     v = 0.5 * (v[:-1:2] + v[1::2])
+
+    return n, r, v
+
+
+def compare_flow_with_ideal(flows):
+    r_lim = (0., 5.)
+    v_lim = (0., 1.5)
+    bins = (50, 50)
+
+    n, r, v = calc_prob_rv_grid(r_lim, v_lim, bins)
 
     fig,ax_arr = plt.subplots(
         1,4,
@@ -621,7 +731,7 @@ def compare_flow_with_ideal(flows):
     # 2D histogram of samples
     n_samples = 1024*1024*4 # Increase this number to increase quality of figure
 
-    # Modify this to sample from your flow
+    # Sample from ensemble of flows
     eta_samp = []
     batch_size = 1024*32
     n_flows = len(flows)
@@ -735,9 +845,21 @@ def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024)
 
     # Sample from ensemble of flows
     eta = []
+    n_batches = n_samples // (n_flows * batch_size)
+
     for i,flow in enumerate(flow_list):
         print(f'Sampling from flow {i+1} of {n_flows} ...')
-        eta.append(flow.sample([n_samples//n_flows]).numpy().astype('f4'))
+
+        @tf.function
+        def sample_batch():
+            print('Tracing sample_batch ...')
+            return flow.sample([batch_size])
+
+        bar = progressbar.ProgressBar(max_value=n_batches)
+        for k in range(n_batches):
+            eta.append(sample_batch().numpy().astype('f4'))
+            bar.update(k+1)
+
     eta = np.concatenate(eta, axis=0)
 
     # Calculate gradients
@@ -809,7 +931,7 @@ def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024)
 #    return fig
 
 
-def plot_phi(phi_nn, r_max=13., x_max=5., n_samples=1024, grid_size=51):
+def plot_phi(phi_nn, df_data, r_max=13., x_max=5., n_samples=1024, grid_size=51):
     plummer_sphere = toy_systems.PlummerSphere()
     q,_ = plummer_sphere.sample_df(n_samples)
     q = tf.constant(q.astype('f4'))
@@ -891,6 +1013,13 @@ def plot_phi(phi_nn, r_max=13., x_max=5., n_samples=1024, grid_size=51):
     for lh in leg.legendHandles:
         lh.set_alpha(1)
 
+    # Data near the xy-plane
+    idx = (np.abs(df_data['eta'][:,2]) < 0.1)
+    xy_data = df_data['eta'][idx,:2]
+    r2_data = np.sum(xy_data**2, axis=1)
+    idx = (r2_data > 9.)
+    xy_data = xy_data[idx]
+
     # phi in (x,y)-plane
     x = np.linspace(-x_max, x_max, grid_size)
     y = np.linspace(-x_max, x_max, grid_size)
@@ -909,6 +1038,16 @@ def plot_phi(phi_nn, r_max=13., x_max=5., n_samples=1024, grid_size=51):
     ax2.set_ylabel(r'$y$', labelpad=-2)
     ax2.set_title(r'$\Phi$')
 
+    ax2.scatter(
+        xy_data[:,0], xy_data[:,1],
+        edgecolors='none',
+        c='k',
+        s=2,
+        alpha=0.1
+    )
+    ax2.set_xlim(xlim)
+    ax2.set_ylim(ylim)
+
     # log(rho) in (x,y)-plane
     p_grid = tf.random.normal(q_grid.shape)
     _,rho_img = potential_tf.calc_phi_derivatives(phi_nn, q_grid)
@@ -919,6 +1058,16 @@ def plot_phi(phi_nn, r_max=13., x_max=5., n_samples=1024, grid_size=51):
     ax3.set_xlabel(r'$x$', labelpad=-1)
     ax3.set_yticklabels([])
     ax3.set_title(r'$\ln \rho$')
+
+    ax3.scatter(
+        xy_data[:,0], xy_data[:,1],
+        edgecolors='none',
+        c='k',
+        s=2,
+        alpha=0.1
+    )
+    ax3.set_xlim(xlim)
+    ax3.set_ylim(ylim)
 
     for a in (ax2,ax3):
         a.xaxis.set_major_locator(MultipleLocator(4.))
@@ -976,23 +1125,23 @@ def load_df_data(fname):
 
 
 def main():
-    #n_samples = 1024 * 128
-    #data = gen_data(n_samples)
-    #save_data(data, 'data/plummer_observations.json')
+    n_samples = 1024 * 128
+    data = gen_data(n_samples)
+    save_data(data, 'data/plummer_observations.json')
 
-    n_flows = 6
+    n_flows = 4
     data = load_data('data/plummer_observations.json')
     flows = train_flows(data, n_flows, n_epochs=64, batch_size=512)
 
-    #flows = load_flows()
+    flows = load_flows()
     plot_flows(flows)
     compare_flow_with_ideal(flows)
     n_samples = 1024 * 512
-    df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=2048)
+    df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=1024)
     save_df_data(df_data, 'data/plummer_df_data.json')
-
-    #df_data = load_df_data('data/plummer_df_data.json')
     plot_gradients(df_data)
+
+    df_data = load_df_data('data/plummer_df_data.json')
     phi_model = train_potential(df_data, n_epochs=128, batch_size=2048)
     
     return 0
