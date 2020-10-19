@@ -290,11 +290,13 @@ def train_potential(
             df_data, phi_model,
             n_epochs=4096,
             batch_size=1024,
-            checkpoint_every=128,
+            checkpoint_every=None,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
             lam=1.,  # Penalty for negative matter densities
-            mu=0     # Penalty for positive matter densities
+            mu=0,    # Penalty for positive matter densities
+            lr_init=1.e-3,
+            lr_final=1.e-6
         ):
     n_samples = df_data['eta'].shape[0]
     n_dim = df_data['eta'].shape[1] // 2
@@ -317,9 +319,9 @@ def train_potential(
     n_steps = n_epochs * (n_samples // batch_size)
     print(f'{n_steps} steps planned.')
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-        1.e-3,
+        lr_init,
         n_steps,
-        0.001,
+        lr_final/lr_init,
         staircase=False
     )
     opt = tfa.optimizers.RectifiedAdam(

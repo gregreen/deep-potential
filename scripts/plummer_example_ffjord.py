@@ -24,6 +24,7 @@ import json
 import progressbar
 from glob import glob
 import gc
+import cerberus
 
 import serializers_tf
 import potential_tf
@@ -447,7 +448,9 @@ def load_data(fname):
     return d
 
 
-def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
+def train_flows(data, n_flows=1, n_hidden=4, hidden_size=32,
+                n_epochs=128, batch_size=1024, reg={},
+                lr_init=2.e-2, lr_final=1.e-4):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
@@ -457,18 +460,15 @@ def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(
-            6, 4, 32,
-            reg_kw=dict(dv_dt_reg=0.01, kinetic_reg=0.01)
-        )
+        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, reg_kw=reg)
         flow_list.append(flow)
         
         loss_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
-            #checkpoint_dir='checkpoints/plummer_sphere',
-            #checkpoint_name=f'flow_{i:02d}',
+            lr_init=lr_init,
+            lr_final=lr_final,
             checkpoint_every=None
         )
 
@@ -481,16 +481,24 @@ def train_flows(data, n_flows, n_epochs=128, batch_size=1024):
     return flow_list
 
 
-def train_potential(df_data, n_epochs=4096, batch_size=1024):
+def train_potential(df_data, n_hidden=3, hidden_size=256, lam=1.,
+                    n_epochs=4096, batch_size=1024,
+                    lr_init=1.e-3, lr_final=1.e-6):
     # Create model
-    phi_model = potential_tf.PhiNN(n_dim=3, n_hidden=3, hidden_size=256)
+    phi_model = potential_tf.PhiNN(
+        n_dim=3,
+        n_hidden=n_hidden,
+        hidden_size=hidden_size
+    )
 
     loss_history = potential_tf.train_potential(
         df_data, phi_model,
         n_epochs=n_epochs,
         batch_size=batch_size,
+        lr_init=lr_init,
+        lr_final=lr_final,
         checkpoint_every=None,
-        lam=1.
+        lam=lam
     )
 
     phi_model.save('models/plummer_sphere/Phi/Phi')
@@ -1124,25 +1132,85 @@ def load_df_data(fname):
     return d
 
 
+def load_params(fname):
+    d = {}
+    if fname is not None:
+        with open(fname, 'r') as f:
+            d = json.load(f)
+    schema = {
+        "df": {
+            'type': 'dict',
+            'schema': {
+                "n_flows": {'type':'integer', 'default':1},
+                "n_hidden": {'type':'integer', 'default':4},
+                "hidden_size": {'type':'integer', 'default':32},
+                "reg": {
+                    'type': 'dict',
+                    'schema': {
+                        "dv_dt_reg": {'type':'float'},
+                        "kinetic_reg": {'type':'float'},
+                        "jacobian_reg": {'type':'float'}
+                    }
+                },
+                "n_epochs": {'type':'integer', 'default':64},
+                "batch_size": {'type':'integer', 'default':512},
+                "lr_init": {'type':'float', 'default':0.02},
+                "lr_final": {'type':'float', 'default':0.0001}
+            }
+        },
+        "Phi": {
+            'type': 'dict',
+            'schema': {
+                "n_samples": {'type':'integer', 'default':524288},
+                "n_hidden": {'type':'integer', 'default':3},
+                "hidden_size": {'type':'integer', 'default':256},
+                "lam": {'type':'float', 'default':1.0},
+                "n_epochs": {'type':'integer', 'default':64},
+                "batch_size": {'type':'integer', 'default':1024},
+                "lr_init": {'type':'float', 'default':0.001},
+                "lr_final": {'type':'float', 'default':0.000001}
+            }
+        }
+    }
+    validator = cerberus.Validator(schema)
+    params = validator.normalized(d)
+    return params
+
+
 def main():
+    from argparse import ArgumentParser
+    parser = ArgumentParser(
+        description='Deep Potential: Plummer sphere example.',
+        add_help=True
+    )
+    parser.add_argument('--params', type=str, help='JSON with kwargs.')
+    args = parser.parse_args()
+    params = load_params(args.params)
+
+    print('Options:')
+    print(json.dumps(params, indent=2))
+
     n_samples = 1024 * 128
     data = gen_data(n_samples)
     save_data(data, 'data/plummer_observations.json')
 
-    n_flows = 4
     data = load_data('data/plummer_observations.json')
-    flows = train_flows(data, n_flows, n_epochs=64, batch_size=512)
+    flows = train_flows(data, **params['df'])
 
     flows = load_flows()
     plot_flows(flows)
     compare_flow_with_ideal(flows)
-    n_samples = 1024 * 512
-    df_data = sample_from_flows(flows, n_samples, return_indiv=True, batch_size=1024)
+    n_samples = params['Phi'].pop('n_samples')
+    df_data = sample_from_flows(
+        flows, n_samples,
+        return_indiv=True,
+        batch_size=1024
+    )
     save_df_data(df_data, 'data/plummer_df_data.json')
     plot_gradients(df_data)
 
     df_data = load_df_data('data/plummer_df_data.json')
-    phi_model = train_potential(df_data, n_epochs=128, batch_size=2048)
+    phi_model = train_potential(df_data, **params['Phi'])
     
     return 0
 

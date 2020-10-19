@@ -268,7 +268,9 @@ def train_flow(flow, data,
                optimizer=None,
                batch_size=32,
                n_epochs=1,
-               checkpoint_every=128,
+               lr_init=2.e-2,
+               lr_final=1.e-4,
+               checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
     """
@@ -302,9 +304,9 @@ def train_flow(flow, data,
 
     if optimizer is None:
         lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-            2.e-2,
+            lr_init,
             n_steps,
-            0.05,
+            lr_final/lr_init,
             staircase=False
         )
         opt = tfa.optimizers.RectifiedAdam(
