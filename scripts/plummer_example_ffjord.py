@@ -833,9 +833,11 @@ def batch_calc_df_deta(f, eta, batch_size):
         print(f'Tracing calc_grads with shape = {batch.shape}')
         return flow_ffjord_tf.calc_f_gradients(f, batch)
 
+    bar = None
     for k in range(0,n_data,batch_size):
         if k != 0:
-            bar = progressbar.ProgressBar(max_value=n_data)
+            if bar is None:
+                bar = progressbar.ProgressBar(max_value=n_data)
             bar.update(k)
         #print(f'{k} to {k+batch_size-1} of {n_data}')
         b0,b1 = k, k+batch_size
