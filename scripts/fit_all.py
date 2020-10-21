@@ -181,12 +181,22 @@ def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024)
     return ret
 
 
-def load_flows():
-    flow_list = []
+def load_flows(fname_pattern):
+    n_max = 9999
 
-    fnames = glob('models/plummer_sphere/df/flow_*-1.index')
-    fnames = sorted(fnames)
-    fnames = [fn[:-6] for fn in fnames]
+    flow_list = []
+    fnames = []
+
+    for i in range(n_max):
+        fn = glob(fname_pattern.format(i)+'-1.index')
+        if len(fn):
+            fnames.append(fn[0][:-6])
+        else:
+            break
+
+    #fnames = glob('models/plummer_sphere/df/flow_*-1.index')
+    #fnames = sorted(fnames)
+    #fnames = [fn[:-6] for fn in fnames]
 
     print(f'Found {len(fnames)} flows.')
 
@@ -275,7 +285,7 @@ def load_params(fname):
 def main():
     from argparse import ArgumentParser
     parser = ArgumentParser(
-        description='Deep Potential: Plummer sphere example.',
+        description='Deep Potential: Fit potential from phase-space samples.',
         add_help=True
     )
     parser.add_argument(
@@ -290,7 +300,7 @@ def main():
     )
     parser.add_argument(
         '--flow-fname',
-        type=str, default='models/df/flow_{:02d}')
+        type=str, default='models/df/flow_{:02d}',
         help='Filename pattern to store flows in.'
     )
     parser.add_argument(
@@ -300,7 +310,7 @@ def main():
     )
     parser.add_argument(
         '--potential-fname',
-        type=str, default='models/Phi/Phi_{:02d}')
+        type=str, default='models/Phi/Phi_{:02d}',
         help='Filename to store potential in.'
     )
     parser.add_argument(
@@ -316,8 +326,8 @@ def main():
     print(json.dumps(params, indent=2))
 
     # Load input phase-space positions
-    data = load_data(parser.input)
-    print(f'Loaded {d.shape[0]} phase-space positions.')
+    data = load_data(args.input)
+    print(f'Loaded {data.shape[0]} phase-space positions.')
 
     # Train normalizing flows
     flows = train_flows(
@@ -328,19 +338,21 @@ def main():
     )
 
     # Re-load the flows (this removes the regularization terms)
-    flows = load_flows()
+    flows = load_flows(args.flow_fname)
 
     # Sample from the flows and calculate gradients
+    print('Sampling from flows ...')
     n_samples = params['Phi'].pop('n_samples')
     batch_size = params['Phi'].pop('grad_batch_size')
     df_data = sample_from_flows(
         flows, n_samples,
         return_indiv=True,
-        batch_size=grad_batch_size
+        batch_size=batch_size
     )
     save_df_data(df_data, args.df_grads_fname)
 
     # Fit the potential
+    print('Fitting the potential ...')
     phi_model = train_potential(
         df_data,
         args.potential_fname,
