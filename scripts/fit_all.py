@@ -310,7 +310,7 @@ def main():
     )
     parser.add_argument(
         '--potential-fname',
-        type=str, default='models/Phi/Phi_{:02d}',
+        type=str, default='models/Phi/Phi',
         help='Filename to store potential in.'
     )
     parser.add_argument(
