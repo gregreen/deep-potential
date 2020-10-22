@@ -98,7 +98,7 @@ def train_potential(df_data, fname, plot_fname,
     phi_model.save(fname)
 
     fig = utils.plot_loss(loss_history)
-    fig.savefig('plots/plummer_potential_loss_history.png', dpi=200)
+    fig.savefig('plots/potential_loss_history.png', dpi=200)
     plt.close(fig)
 
     return phi_model
@@ -193,10 +193,6 @@ def load_flows(fname_pattern):
             fnames.append(fn[0][:-6])
         else:
             break
-
-    #fnames = glob('models/plummer_sphere/df/flow_*-1.index')
-    #fnames = sorted(fnames)
-    #fnames = [fn[:-6] for fn in fnames]
 
     print(f'Found {len(fnames)} flows.')
 
