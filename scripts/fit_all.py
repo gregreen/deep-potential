@@ -224,10 +224,8 @@ def load_df_data(fname):
         o = json.load(f)
 
     d = {}
-    #for key in ['eta','df_deta']:
     for key in o:
         d[key] = np.array(o[key], dtype='f4')
-    #d['df_deta_indiv'] = [np.array(oo,dtype='f4') for oo in o['df_deta_indiv']]
 
     return d
 
@@ -314,6 +312,11 @@ def main():
         type=str, default='plots/potential_loss_history.png',
         help='Filename for potential loss history plots.'
     )
+    parser.add_argument(
+        '--potential-only',
+        action='store_true',
+        help='Skip fitting of distribution function. Assume DF model exists.'
+    )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
     params = load_params(args.params)
@@ -321,31 +324,37 @@ def main():
     print('Options:')
     print(json.dumps(params, indent=2))
 
-    # Load input phase-space positions
-    data = load_data(args.input)
-    print(f'Loaded {data.shape[0]} phase-space positions.')
+    if args.potential_only:
+        print('Loading DF gradients ...')
+        df_data = load_df_data(args.df_grads_fname)
+        params['Phi'].pop('n_samples')
+        params['Phi'].pop('grad_batch_size')
+    else:
+        # Load input phase-space positions
+        data = load_data(args.input)
+        print(f'Loaded {data.shape[0]} phase-space positions.')
 
-    # Train normalizing flows
-    flows = train_flows(
-        data,
-        args.flow_fname,
-        args.flow_loss,
-        **params['df']
-    )
+        # Train normalizing flows
+        flows = train_flows(
+            data,
+            args.flow_fname,
+            args.flow_loss,
+            **params['df']
+        )
 
-    # Re-load the flows (this removes the regularization terms)
-    flows = load_flows(args.flow_fname)
+        # Re-load the flows (this removes the regularization terms)
+        flows = load_flows(args.flow_fname)
 
-    # Sample from the flows and calculate gradients
-    print('Sampling from flows ...')
-    n_samples = params['Phi'].pop('n_samples')
-    batch_size = params['Phi'].pop('grad_batch_size')
-    df_data = sample_from_flows(
-        flows, n_samples,
-        return_indiv=True,
-        batch_size=batch_size
-    )
-    save_df_data(df_data, args.df_grads_fname)
+        # Sample from the flows and calculate gradients
+        print('Sampling from flows ...')
+        n_samples = params['Phi'].pop('n_samples')
+        batch_size = params['Phi'].pop('grad_batch_size')
+        df_data = sample_from_flows(
+            flows, n_samples,
+            return_indiv=True,
+            batch_size=batch_size
+        )
+        save_df_data(df_data, args.df_grads_fname)
 
     # Fit the potential
     print('Fitting the potential ...')
