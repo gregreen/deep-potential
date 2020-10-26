@@ -7,6 +7,7 @@ import scipy.stats
 
 import matplotlib
 matplotlib.use('Agg')
+#matplotlib.rc('text', usetex=True)
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
@@ -21,6 +22,8 @@ import json
 import os
 
 import flow_ffjord_tf
+import potential_tf
+import toy_systems
 
 
 def batch_calc_df_deta(f, eta, batch_size):
@@ -47,7 +50,7 @@ def batch_calc_df_deta(f, eta, batch_size):
     return df_deta
 
 
-def df_ideal(eta):
+def df_ideal(eta, r_max=None):
     q,p = tf.split(eta, 2, axis=1)
 
     r2 = tf.math.reduce_sum(q**2, axis=1)
@@ -59,16 +62,25 @@ def df_ideal(eta):
     f = tf.clip_by_value(-E, 0, np.inf)**(7/2)
 
     A = 24 * np.sqrt(2.) / (7. * np.pi**3)
+    
+    if r_max is not None:
+        A /= plummer_mass(r_max)
 
     return A * f
 
 
-def plot_gradients(df_data, fname, batch_size=1024):
+def plummer_mass(r_max):
+    return r_max**3 / (1. + r_max)**1.5
+
+
+def plot_gradients(df_data, fname, batch_size=1024, r_max=None):
     eta = df_data['eta']
+
+    df_trunc = lambda eta: df_ideal(eta, r_max=r_max)
 
     # Calculate ideal gradients
     df_deta_ideal = batch_calc_df_deta(
-        df_ideal, eta,
+        df_trunc, eta,
         batch_size=batch_size
     )
     print(f'df/deta (ideal): {df_deta_ideal.shape} {type(df_deta_ideal)}')
@@ -83,8 +95,25 @@ def plot_gradients(df_data, fname, batch_size=1024):
         df_deta_est = [np.median(df_data['df_deta_indiv'], axis=0)]
         df_deta_est += [x for x in df_data['df_deta_indiv']]
 
+    #if r_max is not None:
+    #    r2 = np.sum(eta[:,:3]**2, axis=1)
+    #    idx = (r2 < (0.8*r_max)**2)
+    #    print(f'Keeping {np.count_nonzero(idx)} of {idx.size} points.')
+    #    eta = eta[idx]
+    #    df_deta_ideal = df_deta_ideal[idx]
+    #    for k,v in enumerate(df_deta_est):
+    #        df_deta_est[k] = v[idx]
+
     xlim_list = []
     nlim_list = []
+
+    df_dq_lim = np.array([-0.15, 0.15])
+    df_dp_lim = np.array([-0.22, 0.22])
+
+    if r_max is not None:
+        M = plummer_mass(r_max)
+        df_dq_lim /= M
+        df_dp_lim /= M
     
     n_sc = 2**14
 
@@ -108,9 +137,9 @@ def plot_gradients(df_data, fname, batch_size=1024):
             )
 
             if i < 3:
-                xlim = [-0.15, 0.15]
+                xlim = df_dq_lim
             else:
-                xlim = [-0.22, 0.22]
+                xlim = df_dp_lim
 
             ax.set_xlim(xlim)
             ax.set_ylim(xlim)
@@ -592,6 +621,160 @@ def plot_flow_projections(eta):
     return fig
 
 
+def plot_phi(phi_nn, df_data, fname,
+             r_max=13., x_max=5., r_trunc=None,
+             n_samples=1024, grid_size=51):
+    plummer_sphere = toy_systems.PlummerSphere()
+    q,_ = plummer_sphere.sample_df(n_samples)
+    q = tf.constant(q.astype('f4'))
+
+    fig = plt.figure(figsize=(9,2.5), dpi=200)
+    gs_left = GridSpec(1,2, left=0.07, right=0.50, wspace=0.28)
+    gs_right = GridSpec(1,2, left=0.55, right=0.99, wspace=0.05)
+    fig.subplots_adjust(bottom=0.17, top=0.90)
+
+    # add plots to the nested structure
+    ax_phisc = fig.add_subplot(gs_left[0,0])
+    ax_rhosc = fig.add_subplot(gs_left[0,1])
+    ax2 = fig.add_subplot(gs_right[0,0])
+    ax3 = fig.add_subplot(gs_right[0,1])
+
+    # phi vs. r
+    r = tf.sqrt(tf.reduce_sum(q**2, axis=1))
+    phi_r = phi_nn(q).numpy()
+    phi_theory_r = plummer_sphere.phi(r.numpy())
+    if r_trunc is None:
+        phi_0 = np.median(phi_r - phi_theory_r)
+    else:
+        idx = (r.numpy() < r_trunc)
+        phi_0 = np.median(phi_r[idx] - phi_theory_r[idx])
+
+    # rho vs. r
+    # rho_theory_r = plummer_sphere.rho(r.numpy())
+    _, d2phi_dq2 = potential_tf.calc_phi_derivatives(phi_nn, q)
+    rho_r = d2phi_dq2.numpy() / (4.*np.pi)
+
+    r_range = np.logspace(-1.1, np.log10(r_max), 100, base=10.)
+    # r_range = np.linspace(0.0, r_max, 100)
+    phi_theory_r = plummer_sphere.phi(r_range)
+    ax_phisc.scatter(
+        r, phi_r-phi_0,
+        alpha=0.08,
+        s=3,
+        label=r'$\mathrm{Approximation}$'
+    )
+    ax_phisc.semilogx(
+        r_range,
+        phi_theory_r,
+        c='g',
+        alpha=0.5,
+        label=r'$\mathrm{Theory}$'
+    )
+    ax_phisc.set_xlabel(r'$r$', labelpad=-1)
+    ax_phisc.set_ylabel(r'$\Phi$', labelpad=0)
+    ax_phisc.set_xticks([0.01, 0.1, 1., 10.])
+    ax_phisc.set_xlim(10**(-1.1), r_max)
+    ax_phisc.set_ylim(-1.1, 0.1)
+    ax_phisc.yaxis.set_major_locator(MultipleLocator(0.5))
+    ax_phisc.yaxis.set_minor_locator(AutoMinorLocator())
+
+    leg = ax_phisc.legend(loc='upper left', fontsize=8)
+    for lh in leg.legendHandles:
+        lh.set_alpha(1)
+
+    rho_theory_r = plummer_sphere.rho(r_range)
+    ax_rhosc.scatter(
+        r, rho_r,
+        alpha=0.08,
+        s=3,
+        label=r'$\mathrm{Approximation}$'
+    )
+    ax_rhosc.semilogx(
+        r_range,
+        rho_theory_r,
+        c='g',
+        alpha=0.5,
+        label=r'$\mathrm{Theory}$'
+    )
+    ax_rhosc.set_xlabel(r'$r$', labelpad=-1)
+    ax_rhosc.set_ylabel(r'$\rho$', labelpad=1)
+    ax_rhosc.set_xticks([0.01, 0.1, 1., 10.])
+    ax_rhosc.set_xlim(10**(-1.1), r_max)
+    ax_rhosc.set_ylim(-0.1*rho_theory_r[0], 1.2*rho_theory_r[0])
+    ax_rhosc.axhline(0., c='k', alpha=0.5)
+    ax_rhosc.yaxis.set_major_locator(MultipleLocator(0.1))
+    ax_rhosc.yaxis.set_minor_locator(AutoMinorLocator())
+
+    leg = ax_rhosc.legend(loc='upper right', fontsize=8)
+    for lh in leg.legendHandles:
+        lh.set_alpha(1)
+
+    # Data near the xy-plane
+    #idx = (np.abs(df_data['eta'][:,2]) < 0.1)
+    #xy_data = df_data['eta'][idx,:2]
+    #r2_data = np.sum(xy_data**2, axis=1)
+    #idx = (r2_data > 9.)
+    #xy_data = xy_data[idx]
+
+    # phi in (x,y)-plane
+    x = np.linspace(-x_max, x_max, grid_size)
+    y = np.linspace(-x_max, x_max, grid_size)
+    xlim = (x[0], x[-1])
+    ylim = (y[0], y[-1])
+    x,y = np.meshgrid(x, y)
+    s = x.shape
+    x.shape = (x.size,)
+    y.shape = (y.size,)
+    xyz = np.stack([x,y,np.zeros_like(x)], axis=1)
+    q_grid = tf.constant(xyz.astype('f4'))
+    phi_img = phi_nn(q_grid).numpy()
+    phi_img = np.reshape(phi_img, s)
+    ax2.imshow(phi_img, extent=xlim+ylim)
+    ax2.set_xlabel(r'$x$', labelpad=-1)
+    ax2.set_ylabel(r'$y$', labelpad=-2)
+    ax2.set_title(r'$\Phi$')
+
+    #ax2.scatter(
+    #    xy_data[:,0], xy_data[:,1],
+    #    edgecolors='none',
+    #    c='k',
+    #    s=2,
+    #    alpha=0.1
+    #)
+    ax2.set_xlim(xlim)
+    ax2.set_ylim(ylim)
+
+    # log(rho) in (x,y)-plane
+    p_grid = tf.random.normal(q_grid.shape)
+    _,rho_img = potential_tf.calc_phi_derivatives(phi_nn, q_grid)
+    rho_img = np.reshape(rho_img.numpy(), s)
+    ax3.imshow(np.log(rho_img), extent=xlim+ylim)
+    # rho_img[rho_img < 0] = np.nan
+    # ax3.imshow(np.sqrt(rho_img), extent=xlim+ylim)
+    ax3.set_xlabel(r'$x$', labelpad=-1)
+    ax3.set_yticklabels([])
+    ax3.set_title(r'$\ln \rho$')
+
+    #ax3.scatter(
+    #    xy_data[:,0], xy_data[:,1],
+    #    edgecolors='none',
+    #    c='k',
+    #    s=2,
+    #    alpha=0.1
+    #)
+    ax3.set_xlim(xlim)
+    ax3.set_ylim(ylim)
+
+    for a in (ax2,ax3):
+        a.xaxis.set_major_locator(MultipleLocator(4.))
+        a.xaxis.set_minor_locator(AutoMinorLocator())
+        a.yaxis.set_major_locator(MultipleLocator(4.))
+        a.yaxis.set_minor_locator(AutoMinorLocator())
+
+    fig.savefig(fname, dpi=200)
+    plt.close(fig)
+
+
 def load_df_data(fname):
     with open(fname, 'r') as f:
         o = json.load(f)
@@ -640,6 +823,11 @@ def main():
         help='Flow model filename pattern.'
     )
     parser.add_argument(
+        '--potential',
+        type=str, required=True,
+        help='Potential model filename.'
+    )
+    parser.add_argument(
         '--grad',
         type=str,
         default='plots/flow_gradients_comparison.png',
@@ -669,25 +857,54 @@ def main():
         default='plots/flow_hist.png',
         help='Histogram plot filename.'
     )
+    parser.add_argument(
+        '--Phi',
+        type=str,
+        default='plots/potential_vs_ideal.png',
+        help='Potential plot filename.'
+    )
+    parser.add_argument(
+        '--flows-only',
+        action='store_true',
+        help='Only plot results for flows. Ignore potential.'
+    )
+    parser.add_argument(
+        '--potential-only',
+        action='store_true',
+        help='Only plot results for the potential. Ignore the flows.'
+    )
+    parser.add_argument(
+        '--r-max',
+        type=float,
+        help='True distribution function truncated at this radius.'
+    )
     args = parser.parse_args()
 
     print('Loading DF data ...')
     df_data = load_df_data(args.input)
 
-    print('Loading flow models ...')
-    flows = load_flows(args.flows)
+    if not args.flows_only:
+        print('Loading potential model ...')
+        phi_model = potential_tf.PhiNN.load(args.potential)
 
-    print('Plotting DF gradients ...')
-    plot_gradients(df_data, args.grad)
+        print('Plotting potential ...')
+        plot_phi(phi_model, df_data, args.Phi, r_trunc=args.r_max)
 
-    print('Plotting flow trajectories ...')
-    plot_flow_trajectories_multiple(flows, args.traj)
+    if not args.potential_only:
+        print('Loading flow models ...')
+        flows = load_flows(args.flows)
 
-    print('Plotting slices through flows ...')
-    plot_flow_slices(flows, args.slice)
+        print('Plotting DF gradients ...')
+        plot_gradients(df_data, args.grad, r_max=args.r_max)
 
-    print('Plotting projections and histograms of flows ...')
-    plot_flow_projections_ensemble(flows, args.proj, args.hist)
+        print('Plotting flow trajectories ...')
+        plot_flow_trajectories_multiple(flows, args.traj)
+
+        print('Plotting slices through flows ...')
+        plot_flow_slices(flows, args.slice)
+
+        print('Plotting projections and histograms of flows ...')
+        plot_flow_projections_ensemble(flows, args.proj, args.hist)
 
     return 0
 
