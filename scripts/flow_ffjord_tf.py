@@ -268,7 +268,9 @@ def train_flow(flow, data,
                optimizer=None,
                batch_size=32,
                n_epochs=1,
-               checkpoint_every=128,
+               lr_init=2.e-2,
+               lr_final=1.e-4,
+               checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
     """
@@ -302,9 +304,9 @@ def train_flow(flow, data,
 
     if optimizer is None:
         lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-            2.e-2,
+            lr_init,
             n_steps,
-            0.05,
+            lr_final/lr_init,
             staircase=False
         )
         opt = tfa.optimizers.RectifiedAdam(
@@ -332,6 +334,9 @@ def train_flow(flow, data,
             print(f'Restoring from checkpoint {latest} ...')
             checkpoint.restore(latest)
             print(f'Beginning from step {int(step)}.')
+
+        # Convert from # of epochs to # of steps between checkpoints
+        checkpoint_steps = checkpoint_every * n_samples // batch_size
 
     # Keep track of whether this is the first step.
     # Were it not for checkpointing, we could use i == 0.
@@ -369,7 +374,7 @@ def train_flow(flow, data,
             t1 = time()
 
         # Checkpoint
-        if (checkpoint_every is not None) and i and not (i % checkpoint_every):
+        if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             step.assign(i+1)
             checkpoint.save(checkpoint_prefix)
 
