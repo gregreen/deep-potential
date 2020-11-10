@@ -25,6 +25,7 @@ import progressbar
 from glob import glob
 import gc
 import cerberus
+import os.path
 
 import serializers_tf
 import potential_tf
@@ -43,7 +44,8 @@ def load_data(fname):
 def train_flows(data, fname_pattern, plot_fname_pattern,
                 n_flows=1, n_hidden=4, hidden_size=32,
                 n_epochs=128, batch_size=1024, reg={},
-                lr_init=2.e-2, lr_final=1.e-4):
+                lr_init=2.e-2, lr_final=1.e-4,
+                checkpoint_every=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
@@ -56,16 +58,23 @@ def train_flows(data, fname_pattern, plot_fname_pattern,
         flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, reg_kw=reg)
         flow_list.append(flow)
         
+        flow_fname = fname_pattern.format(i)
+
+        checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
+        checkpoint_name += '_chkpt'
+
         loss_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
             lr_init=lr_init,
             lr_final=lr_final,
-            checkpoint_every=None
+            checkpoint_every=checkpoint_every,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_name=checkpoint_name
         )
 
-        flow.save(fname_pattern.format(i))
+        flow.save(flow_fname)
 
         fig = utils.plot_loss(loss_history)
         fig.savefig(plot_fname_pattern.format(i), dpi=200)

@@ -335,6 +335,9 @@ def train_flow(flow, data,
             checkpoint.restore(latest)
             print(f'Beginning from step {int(step)}.')
 
+        # Convert from # of epochs to # of steps between checkpoints
+        checkpoint_steps = checkpoint_every * n_samples // batch_size
+
     # Keep track of whether this is the first step.
     # Were it not for checkpointing, we could use i == 0.
     traced = False
@@ -371,7 +374,7 @@ def train_flow(flow, data,
             t1 = time()
 
         # Checkpoint
-        if (checkpoint_every is not None) and i and not (i % checkpoint_every):
+        if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             step.assign(i+1)
             checkpoint.save(checkpoint_prefix)
 
