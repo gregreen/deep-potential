@@ -2,6 +2,7 @@
 
 from __future__ import print_function, division
 
+# Tensorflow & co
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
 from tensorflow import keras
@@ -10,18 +11,22 @@ import tensorflow_probability as tfp
 print(f'Tensorflow Probability version {tfp.__version__}')
 tfb = tfp.bijectors
 tfd = tfp.distributions
+import sonnet as snt
 
 import numpy as np
 import matplotlib.pyplot as plt
 
+import json
+import os
+from time import time
 
-from serializers_tf import (
-    serialize_variable, deserialize_variable,
-    weights_as_list, set_weights_w_list
-)
+# Custom libraries
+from utils import *
 
 
 def calc_df_deta(f_func, q, p):
+    #print('Tracing calc_df_deta ...')
+
     # Calculate gradients of distribution function
     with tf.GradientTape(persistent=True) as g:
         g.watch([q, p])
@@ -33,11 +38,7 @@ def calc_df_deta(f_func, q, p):
     return f, df_dq, df_dp
 
 
-@tf.function
 def calc_phi_derivatives(phi_func, q):
-    print('Tracing calc_phi_derivatives')
-    print(f'q.shape = {q.shape}')
-
     # Calculate derivatives of the potential.
     # We have to use an unstacking and re-stacking trick,
     # which comes from https://github.com/xuzhiqin1990/laplacian/
@@ -61,7 +62,6 @@ def calc_phi_derivatives(phi_func, q):
     return dphi_dq, d2phi_dq2
 
 
-@tf.function
 def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
     """
     Calculates both {H,f} and the Laplacian of the potential at
@@ -87,9 +87,6 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
       d2phi_dq2 (tf.Tensor): Laplacian of the potential, evaluated
           at the points (q,p). Shape = (n,).
     """
-    print('Tracing calc_loss_terms')
-    print(f'q.shape = {q.shape}')
-    print(f'p.shape = {p.shape}')
 
     # Calculate necessary derivatives
     dphi_dq, d2phi_dq2 = calc_phi_derivatives(phi_func, q)
@@ -100,11 +97,9 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
     return df_dt, d2phi_dq2
 
 
-@tf.function
 def get_phi_loss_gradients(phi, params, q, p,
                            f=None, df_dq=None, df_dp=None,
-                           lam=tf.constant(1.0),
-                           mu=tf.constant(0.01),
+                           lam=1., mu=0,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
@@ -136,9 +131,6 @@ def get_phi_loss_gradients(phi, params, q, p,
         dloss_dparam (list of tf.Tensor): The gradient of the loss
             w.r.t. each parameter.
     """
-    print('Tracing get_phi_loss_gradients')
-    print(f'q.shape = {q.shape}')
-    print(f'p.shape = {p.shape}')
 
     # If df/dq and df/dp are not provided, then calculate them
     # from using the distribution function.
@@ -160,6 +152,7 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # Weight each point differently
         if weight_samples:
+            print('Re-weighting samples.')
             w = tf.stop_gradient(
                 tf.reduce_sum(
                     dphi_dq**2 / sigma_p**2 + p**2 / sigma_q**2,
@@ -172,24 +165,43 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # Average over sampled points in phase space
         likelihood = tf.math.asinh(tf.math.abs(df_dt))
-        prior_neg = tf.math.asinh(
-            tf.clip_by_value(-d2phi_dq2, 0., np.inf)
-        )
-        prior_pos = tf.math.asinh(
-            tf.clip_by_value(d2phi_dq2, 0., np.inf)
-        )
+
+        if lam != 0:
+            prior_neg = tf.math.asinh(
+                tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            )
+            print(f'prior_neg = {prior_neg}')
+            #pneg_mean = tf.math.reduce_mean(prior_neg)
+            #pneg_max = tf.math.reduce_max(prior_neg)
+            #L_mean = tf.math.reduce_mean(likelihood)
+            #r = tf.norm(q, axis=1)
+            #r_max = tf.math.reduce_max(r)
+            #tf.print('     lambda =', lam)
+            #tf.print('        <L> =', L_mean)
+            #tf.print('  <penalty> =', pneg_mean)
+            #tf.print('penalty_max =', pneg_max)
+            #tf.print('      r_max =', r_max)
+            #tf.print('')
+            likelihood = likelihood + lam * prior_neg
+
+        if mu != 0:
+            prior_pos = tf.math.asinh(
+                tf.clip_by_value(d2phi_dq2, 0., np.inf)
+            )
+            print(f'prior_pos = {prior_pos}')
+            likelihood = likelihood + mu * prior_pos
 
         # Regularization penalty
         # penalty = 0.
         # for p in params:
         #     penalty += tf.reduce_sum(p**2)
 
-        loss = tf.reduce_mean(
-            likelihood
-            + lam*prior_neg
-            + mu*prior_pos
-            # + reg*penalty
-        )
+        loss = tf.reduce_mean(likelihood)
+        #    likelihood
+        #    + lam*prior_neg
+        #    + mu*prior_pos
+        #    # + reg*penalty
+        #)
 
     # Gradients of loss w.r.t. NN parameters
     dloss_dparam = g.gradient(loss, params)
@@ -197,18 +209,18 @@ def get_phi_loss_gradients(phi, params, q, p,
     return loss, dloss_dparam
 
 
-class PhiNN(tf.Module):
+class PhiNN(snt.Module):
     """
     Feed-forward neural network to represent the gravitational
     potential.
     """
 
-    def __init__(self, n_dim=3, n_hidden=3, n_features=32, build=True):
+    def __init__(self, n_dim=3, n_hidden=3, hidden_size=32, name='Phi'):
         """
         Constructor for PhiNN.
 
         Inputs:
-            n_dim (int): Number of spatial dimensions in the input.
+            n_dim (int): Dimensionality of space.
             n_hidden (int): Number of hidden layers.
             n_features (int): Number of neurons in each hidden layer.
             build (bool): Whether to create the weights and biases.
@@ -216,99 +228,206 @@ class PhiNN(tf.Module):
                 deserializer can set the weights and biases on its
                 own.
         """
+        super(PhiNN, self).__init__(name=name)
+
         self._n_dim = n_dim
         self._n_hidden = n_hidden
-        self._n_features = n_features
+        self._hidden_size = hidden_size
+        self._name = name
 
-        if build:
-            self._W = [
-                tf.Variable(
-                    tf.random.truncated_normal([n_dim,n_features]),
-                    name='weight_1'
-                )
-            ]
-            self._W += [
-                tf.Variable(
-                    tf.random.truncated_normal([n_features,n_features]),
-                    name=f'weight_{i+1}'
-                )
-                for i in range(n_hidden-1)
-            ]
-            self._W += [
-                tf.Variable(
-                    tf.random.truncated_normal([n_features,1]),
-                    name=f'weight_{n_hidden+1}'
-                )
-            ]
-            self._b = [
-                tf.Variable(
-                    tf.random.truncated_normal([1,n_features]),
-                    name=f'bias_{i+1}'
-                )
-                for i in range(n_hidden)
-            ]
+        self._layers = [
+            snt.Linear(hidden_size, name=f'hidden_{i}')
+            for i in range(n_hidden)
+        ]
+        self._layers.append(snt.Linear(1, with_bias=False, name='Phi'))
+        #self._activation = tf.math.sigmoid
+        self._activation = tf.math.tanh
 
-    @tf.function
-    def __call__(self, q):
-        """
-        Returns the potential at the coordinates q.
+        # Initialize
+        self.__call__(tf.zeros([1,n_dim]))
 
-        Let n = number of input points, d = number
-        of spatial dimensions.
+    def __call__(self, x):
+        for layer in self._layers[:-1]:
+            x = layer(x)
+            x = self._activation(x)
+        x = self._layers[-1](x)
+        return x
+    
+    def save(self, fname_base):
+        # Save variables
+        checkpoint = tf.train.Checkpoint(phi=self)
+        fname_out = checkpoint.save(fname_base)
 
-        Inputs:
-            q (tf.Tensor): Shape = (n,d).
-
-        Outputs:
-            The potential at each input point. Tensor of
-            shape (n,).
-        """
-        print('Tracing PhiNN.__call__')
-        print(f'q.shape = {q.shape}')
-        o = q
-        for i in range(self._n_hidden):
-            o = tf.tensordot(o, self._W[i], (1,0))
-            o = tf.math.sigmoid(o + self._b[i])
-        o = tf.tensordot(o, self._W[-1], (1,0))
-        o = tf.squeeze(o, axis=[1])
-        return o
-
-    def serialize(self):
-        """
-        Returns a JSON-serializable dictionary containing the
-        information necessary to reconstruct the neural network.
-        """
+        # Save the specs of the neural network
         d = dict(
             n_dim=self._n_dim,
             n_hidden=self._n_hidden,
-            n_features=self._n_features,
-            W=[],
-            b=[]
+            hidden_size=self._hidden_size,
+            name=self._name
         )
-        for W in self._W:
-            d['W'].append(serialize_variable(W))
-        for b in self._b:
-            d['b'].append(serialize_variable(b))
-        return d
+        with open(fname_out+'_spec.json', 'w') as f:
+            json.dump(d, f)
+
+        return fname_out
 
     @classmethod
-    def deserialize(cls, d):
-        """
-        Returns a PhiNN constructed from a dictionary of the
-        form created by PhiNN.serialize.
-        """
-        phi_nn = cls(
-            n_dim=d['n_dim'],
-            n_hidden=d['n_hidden'],
-            n_features=d['n_features'],
-            build=False
-        )
-        phi_nn._W = [deserialize_variable(W) for W in d['W']]
-        phi_nn._b = [deserialize_variable(b) for b in d['b']]
+    def load(cls, fname):
+        # Load network specs
+        with open(fname+'_spec.json', 'r') as f:
+            kw = json.load(f)
+        phi_nn = cls(**kw)
+
+        # Restore variables
+        checkpoint = tf.train.Checkpoint(phi=phi_nn)
+        #latest = tf.train.latest_checkpoint(fname_base)
+        #print(f'Restoring from {latest}')
+        checkpoint.restore(fname)
+
         return phi_nn
 
 
+def train_potential(
+            df_data, phi_model,
+            n_epochs=4096,
+            batch_size=1024,
+            checkpoint_every=None,
+            checkpoint_dir=r'checkpoints/Phi',
+            checkpoint_name='Phi',
+            lam=1.,  # Penalty for negative matter densities
+            mu=0,    # Penalty for positive matter densities
+            lr_init=1.e-3,
+            lr_final=1.e-6
+        ):
+    n_samples = df_data['eta'].shape[0]
+    n_dim = df_data['eta'].shape[1] // 2
+    data = tf.stack(
+        [
+            df_data['eta'][:,:n_dim],     # q
+            df_data['eta'][:,n_dim:],     # p
+            df_data['df_deta'][:,:n_dim], # df/dq
+            df_data['df_deta'][:,n_dim:]  # df/dp
+        ],
+        axis=1
+    )
+    data = tf.data.Dataset.from_tensor_slices(data)
+
+    phi_param = phi_model.trainable_variables
+    n_variables = sum([int(tf.size(param)) for param in phi_param])
+    print(f'{n_variables} variables in the gravitational potential model.')
+
+    # Optimizer
+    n_steps = n_epochs * (n_samples // batch_size)
+    print(f'{n_steps} steps planned.')
+    lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+        lr_init,
+        n_steps,
+        lr_final/lr_init,
+        staircase=False
+    )
+    opt = tfa.optimizers.RectifiedAdam(
+        lr_schedule,
+        total_steps=n_steps,
+        warmup_proportion=0.1
+    )
+
+    # Set up batches of data
+    batches = data.repeat(n_epochs)
+    batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.batch(batch_size, drop_remainder=True)
+
+    @tf.function
+    def training_step(batch):
+        print(f'Tracing training_step with batch shape {batch.shape} ...')
+
+        # Unpack the data from the batch
+        q_b, p_b, df_dq_b, df_dp_b = [
+            tf.squeeze(x) for x in tf.split(batch, 4, axis=1)
+        ]
+
+        # Calculate the loss and its gradients w.r.t. the parameters
+        loss, dloss_dparam = get_phi_loss_gradients(
+            phi_model, phi_param,
+            q_b, p_b,
+            df_dq=df_dq_b,
+            df_dp=df_dp_b,
+            lam=lam,
+            mu=mu,
+            weight_samples=False
+        )
+
+        #dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
+        #tf.print('\nglobal norm:', global_norm)
+
+        # Take step using optimizer
+        opt.apply_gradients(zip(dloss_dparam, phi_param))
+
+        return loss
+
+    # Set up checkpointing
+    step = tf.Variable(0, name='step')
+    checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
+    if checkpoint_every is not None:
+        checkpoint = tf.train.Checkpoint(opt=opt, phi=phi_model, step=step)
+
+        # Look for latest extisting checkpoint
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is not None:
+            print(f'Restoring from checkpoint {latest} ...')
+            checkpoint.restore(latest)
+            print(f'Beginning from step {int(step)}.')
+
+    # Keep track of whether this is the first step.
+    # Were it not for checkpointing, we could use i == 0.
+    traced = False
+
+    loss_history = []
+    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+    t0 = time()
+
+    for i,b in enumerate(batches, int(step)):
+        if i >= n_steps:
+            # Break if too many steps taken. This can occur
+            # if we began from a checkpoint.
+            break
+
+        # Take one step
+        loss = training_step(b)
+
+        # Logging
+        loss_history.append(float(loss))
+        update_bar(i)
+
+        if not traced:
+            # Get time after gradients function is first traced
+            traced = True
+            t1 = time()
+
+        # Checkpoint
+        if (checkpoint_every is not None) and i and not (i % checkpoint_every):
+            step.assign(i+1)
+            checkpoint.save(checkpoint_prefix)
+
+    t1 = time()
+    print(f'Elapsed time: {t1-t0:.1f} s')
+
+    return loss_history
+
+
 def main():
+    x = tf.random.normal([7,3])
+    phi_nn = PhiNN(hidden_size=128)
+    y0 = phi_nn(x)
+    fname = phi_nn.save('models/Phi')
+
+    phi_nn_1 = PhiNN.load(fname)
+    y1 = phi_nn_1(x)
+
+    print(y0)
+    print(y1)
+
+    #print(phi_nn.trainable_variables)
+    #print(phi_nn_1.trainable_variables)
+
     return 0
 
 if __name__ == '__main__':
