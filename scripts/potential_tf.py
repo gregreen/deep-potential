@@ -38,7 +38,7 @@ def calc_df_deta(f_func, q, p):
     return f, df_dq, df_dp
 
 
-def calc_phi_derivatives(phi_func, q):
+def calc_phi_derivatives(phi_func, q, return_phi=False):
     # Calculate derivatives of the potential.
     # We have to use an unstacking and re-stacking trick,
     # which comes from https://github.com/xuzhiqin1990/laplacian/
@@ -59,6 +59,9 @@ def calc_phi_derivatives(phi_func, q):
     for di,qi in zip(dphi_dq_unstacked, q_unstacked):
         d2phi_dq2 += gg.gradient(di, qi)
 
+    if return_phi:
+        return phi, dphi_dq, d2phi_dq2
+    
     return dphi_dq, d2phi_dq2
 
 
