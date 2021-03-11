@@ -334,8 +334,8 @@ def train_potential(
     )
 
     # Set up batches of data
-    batches = data.repeat(n_epochs)
-    batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = data.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.repeat(n_epochs)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     @tf.function

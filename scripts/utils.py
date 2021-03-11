@@ -46,13 +46,13 @@ def plot_loss(loss_history, smoothing=100):
         wspace=0.25
     )
 
-    ax0.semilogy(
+    ax0.plot(
         np.arange(len(loss_history)),
         loss_history,
         alpha=0.1,
         label=r'$\mathrm{raw}$'
     )
-    ax0.semilogy(
+    ax0.plot(
         np.arange(len(loss_conv)),
         loss_conv,
         label=r'$\mathrm{smoothed}$'
@@ -92,6 +92,24 @@ def batch_function(f, batch_size, base_library=tf):
         #    b0,b1 = k, k+batch_size
         #    o.append(f(x[b0:b1], *args, **kwargs))
         return base_library.concatenate(o)
+
+
+def append_to_loss_history(fname, key, loss_history):
+    s = f'# {key}\n'
+    s += ' '.join(f'{x}' for x in loss_history) + '\n'
+    with open(fname, 'a') as f:
+        f.write(s)
+    ## Read existing data from JSON
+    #if os.path.isfile(fname):
+    #    with open(fname, 'r') as f:
+    #        d = json.load(f)
+    #else:
+    #    d = {}
+    ## Append new data
+    #d[key] = list(loss_history)
+    ## Re-write data to JSON
+    #with open(fname, 'w') as f:
+    #    f.dump(d, f)
 
 
 def main():

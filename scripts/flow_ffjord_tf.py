@@ -296,8 +296,8 @@ def train_flow(flow, data,
 
     n_samples = data.shape[0]
     batches = tf.data.Dataset.from_tensor_slices(data)
-    batches = batches.repeat(n_epochs)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.repeat(n_epochs+1)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     n_steps = n_epochs * n_samples // batch_size
@@ -354,6 +354,7 @@ def train_flow(flow, data,
         grads,global_norm = tf.clip_by_global_norm(grads, 10.)
         #tf.print('\nglobal_norm =', global_norm)
         #tf.print([(v.name,tf.norm(v)) for v in grads])
+        tf.print('loss =', loss)
         opt.apply_gradients(zip(grads, variables))
         return loss
 

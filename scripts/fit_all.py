@@ -21,6 +21,7 @@ from matplotlib.gridspec import GridSpec
 from time import time, sleep
 import re
 import json
+import h5py
 import progressbar
 from glob import glob
 import gc
@@ -35,13 +36,21 @@ import utils
 
 
 def load_data(fname):
-    with open(fname, 'r') as f:
-        o = json.load(f)
-    d = tf.constant(np.array(o['eta'], dtype='f4'))
+    _,ext = os.path.splitext(fname)
+    if ext == '.json':
+        with open(fname, 'r') as f:
+            o = json.load(f)
+        d = tf.constant(np.array(o['eta'], dtype='f4'))
+    elif ext in ('.h5', '.hdf5'):
+        with h5py.File(fname, 'r') as f:
+            o = f['eta'][:].astype('f4')
+        d = tf.constant(o)
+    else:
+        raise ValueError(f'Unrecognized input file extension: "{ext}"')
     return d
 
 
-def train_flows(data, fname_pattern, plot_fname_pattern,
+def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32,
                 n_epochs=128, batch_size=1024, reg={},
                 lr_init=2.e-2, lr_final=1.e-4,
@@ -76,6 +85,8 @@ def train_flows(data, fname_pattern, plot_fname_pattern,
 
         flow.save(flow_fname)
 
+        utils.append_to_loss_history(loss_fname, f'flow_{i}', loss_history)
+
         fig = utils.plot_loss(loss_history)
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
         plt.close(fig)
@@ -83,7 +94,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern,
     return flow_list
 
 
-def train_potential(df_data, fname, plot_fname,
+def train_potential(df_data, fname, plot_fname, loss_fname,
                     n_hidden=3, hidden_size=256, lam=1.,
                     n_epochs=4096, batch_size=1024,
                     lr_init=1.e-3, lr_final=1.e-6):
@@ -105,6 +116,8 @@ def train_potential(df_data, fname, plot_fname,
     )
 
     phi_model.save(fname)
+
+    utils.append_to_loss_history(loss_fname, 'potential', loss_history)
 
     fig = utils.plot_loss(loss_history)
     fig.savefig('plots/potential_loss_history.png', dpi=200)
@@ -326,6 +339,11 @@ def main():
         action='store_true',
         help='Skip fitting of distribution function. Assume DF model exists.'
     )
+    parser.add_argument(
+        '--loss-history',
+        type=str, default='data/loss_history.json',
+        help='Filename for loss history data.'
+    )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
     params = load_params(args.params)
@@ -348,6 +366,7 @@ def main():
             data,
             args.flow_fname,
             args.flow_loss,
+            args.loss_history,
             **params['df']
         )
 
@@ -371,6 +390,7 @@ def main():
         df_data,
         args.potential_fname,
         args.potential_loss,
+        args.loss_history,
         **params['Phi']
     )
     
