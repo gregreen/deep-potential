@@ -20,6 +20,7 @@ import progressbar
 from glob import glob
 import json
 import os
+import os.path
 
 import flow_ffjord_tf
 import potential_tf
