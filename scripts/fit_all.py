@@ -95,7 +95,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
 
 def train_potential(df_data, fname, plot_fname, loss_fname,
-                    n_hidden=3, hidden_size=256, lam=1.,
+                    n_hidden=3, hidden_size=256, xi=1., lam=1.,
                     n_epochs=4096, batch_size=1024,
                     lr_init=1.e-3, lr_final=1.e-6):
     # Create model
@@ -112,6 +112,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         lr_init=lr_init,
         lr_final=lr_final,
         checkpoint_every=None,
+        xi=xi,
         lam=lam
     )
 
@@ -150,7 +151,9 @@ def batch_calc_df_deta(f, eta, batch_size):
     return df_deta
 
 
-def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024):
+def sample_from_flows(flow_list, n_samples,
+                      return_indiv=False, batch_size=1024,
+                      f_reduce=np.median):
     n_flows = len(flow_list)
 
     # Sample from ensemble of flows
@@ -190,7 +193,7 @@ def sample_from_flows(flow_list, n_samples, return_indiv=False, batch_size=1024)
         #    df_deta_indiv[i] = df_deta_i
 
     # Average gradients
-    df_deta = np.median(df_deta_indiv, axis=0)
+    df_deta = f_reduce(df_deta_indiv, axis=0)
 
     ret = {
         'eta': eta,
@@ -228,26 +231,20 @@ def load_flows(fname_pattern):
 
 
 def save_df_data(df_data, fname):
-    o = {}
-    for key in df_data:
-        d = df_data[key]
-        o[key] = d.tolist()
-        #if isinstance(d, list):
-        #    o[key] = [dd.tolist() for dd in d]
-        #else:
-        #    o[key] = d.tolist()
-
-    with open(fname, 'w') as f:
-        json.dump(o, f)
+    kw = dict(compression='lzf', chunks=True)
+    with h5py.File(fname, 'w') as f:
+        for key in df_data:
+            f.create_dataset(key, data=df_data[key], **kw)
 
 
-def load_df_data(fname):
-    with open(fname, 'r') as f:
-        o = json.load(f)
-
+def load_df_data(fname, mean_indiv=False):
     d = {}
-    for key in o:
-        d[key] = np.array(o[key], dtype='f4')
+    with h5py.File(fname, 'r') as f:
+        for k in f.keys():
+            d[k] = f[k][:].astype('f4')
+    
+    if mean_indiv:
+        d['df_deta'] = np.mean(d['df_deta_indiv'], axis=0)
 
     return d
 
@@ -285,6 +282,7 @@ def load_params(fname):
                 "grad_batch_size": {'type':'integer', 'default':1024},
                 "n_hidden": {'type':'integer', 'default':3},
                 "hidden_size": {'type':'integer', 'default':256},
+                "xi": {'type':'float', 'default':1.0},
                 "lam": {'type':'float', 'default':1.0},
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':1024},
@@ -311,13 +309,18 @@ def main():
     )
     parser.add_argument(
         '--df-grads-fname',
-        type=str, default='data/df_gradients.json',
+        type=str, default='data/df_gradients.h5',
         help='Directory in which to store data.'
     )
     parser.add_argument(
         '--flow-fname',
         type=str, default='models/df/flow_{:02d}',
         help='Filename pattern to store flows in.'
+    )
+    parser.add_argument(
+        '--use-existing-flows',
+        action='store_true',
+        help='Assume that flows are already trained.'
     )
     parser.add_argument(
         '--flow-loss',
@@ -340,8 +343,13 @@ def main():
         help='Skip fitting of distribution function. Assume DF model exists.'
     )
     parser.add_argument(
+        '--flow-mean',
+        action='store_true',
+        help='Use the mean of the flow gradients (default: use the median).'
+    )
+    parser.add_argument(
         '--loss-history',
-        type=str, default='data/loss_history.json',
+        type=str, default='data/loss_history.txt',
         help='Filename for loss history data.'
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
@@ -353,25 +361,29 @@ def main():
 
     if args.potential_only:
         print('Loading DF gradients ...')
-        df_data = load_df_data(args.df_grads_fname)
+        df_data = load_df_data(args.df_grads_fname, mean_indiv=args.flow_mean)
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
     else:
-        # Load input phase-space positions
-        data = load_data(args.input)
-        print(f'Loaded {data.shape[0]} phase-space positions.')
+        if not args.use_existing_flows:
+            # Load input phase-space positions
+            data = load_data(args.input)
+            print(f'Loaded {data.shape[0]} phase-space positions.')
 
-        # Train normalizing flows
-        flows = train_flows(
-            data,
-            args.flow_fname,
-            args.flow_loss,
-            args.loss_history,
-            **params['df']
-        )
+            # Train normalizing flows
+            flows = train_flows(
+                data,
+                args.flow_fname,
+                args.flow_loss,
+                args.loss_history,
+                **params['df']
+            )
 
         # Re-load the flows (this removes the regularization terms)
         flows = load_flows(args.flow_fname)
+        if not len(flows):
+            print('No trained flows were found! Aborting.')
+            return 1
 
         # Sample from the flows and calculate gradients
         print('Sampling from flows ...')
@@ -380,7 +392,8 @@ def main():
         df_data = sample_from_flows(
             flows, n_samples,
             return_indiv=True,
-            batch_size=batch_size
+            batch_size=batch_size,
+            f_reduce=np.mean if args.flow_mean else np.median
         )
         save_df_data(df_data, args.df_grads_fname)
 
