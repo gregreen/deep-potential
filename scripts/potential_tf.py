@@ -103,6 +103,7 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
 def get_phi_loss_gradients(phi, params, q, p,
                            f=None, df_dq=None, df_dp=None,
                            lam=1., mu=0,
+                           xi=1., delf_delt_scale=1.,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
@@ -144,6 +145,9 @@ def get_phi_loss_gradients(phi, params, q, p,
             'If f is not provided, then df_dq and df_dp must be provided.'
         )
 
+    c = xi / delf_delt_scale
+    print(f'c = {c}')
+
     with tf.GradientTape() as g:
         g.watch(params)
 
@@ -167,7 +171,7 @@ def get_phi_loss_gradients(phi, params, q, p,
             df_dt = w * df_dt
 
         # Average over sampled points in phase space
-        likelihood = tf.math.asinh(tf.math.abs(df_dt))
+        likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
 
         if lam != 0:
             prior_neg = tf.math.asinh(
@@ -296,6 +300,7 @@ def train_potential(
             checkpoint_every=None,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
+            xi=1.,   # Scale above which outliers are suppressed
             lam=1.,  # Penalty for negative matter densities
             mu=0,    # Penalty for positive matter densities
             lr_init=1.e-3,
@@ -317,6 +322,16 @@ def train_potential(
     phi_param = phi_model.trainable_variables
     n_variables = sum([int(tf.size(param)) for param in phi_param])
     print(f'{n_variables} variables in the gravitational potential model.')
+
+    # Estimate typical scale of flows (with constant gravitational potential)
+    delf_delt_scale = np.percentile(
+        np.abs(np.sum(
+            df_data['eta'][:,n_dim:] * df_data['df_deta'][:,:n_dim],
+            axis=1
+        )),
+        50.
+    )
+    print(f'Using del(f)/del(t) ~ {delf_delt_scale}')
 
     # Optimizer
     n_steps = n_epochs * (n_samples // batch_size)
@@ -353,6 +368,8 @@ def train_potential(
             q_b, p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
+            xi=xi,
+            delf_delt_scale=delf_delt_scale,
             lam=lam,
             mu=mu,
             weight_samples=False
