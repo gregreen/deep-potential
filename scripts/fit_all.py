@@ -3,6 +3,7 @@ matplotlib.use('Agg')
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
+#tf.debugging.set_log_device_placement(True)
 from tensorflow import keras
 import tensorflow_addons as tfa
 import tensorflow_probability as tfp
@@ -149,6 +150,26 @@ def batch_calc_df_deta(f, eta, batch_size):
     bar.update(n_data)
 
     return df_deta
+
+
+def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
+    n_samp, n_point, n_dim = v_samp.shape
+    
+    # Mean vector: shape = (point, dim)
+    v_mean = np.mean(v_samp, axis=0)
+
+    for i in range(rounds):
+        # Difference from mean: shape = (sample, point)
+        dv_samp = np.linalg.norm(v_samp - v_mean[None], axis=2)
+        # Identify outliers: shape = (sample, point)
+        idx = (dv_samp > clip_threshold * np.median(dv_samp, axis=0)[None])
+        # Construct masked array with outliers masked
+        mask_bad = np.repeat(np.reshape(idx, idx.shape+(1,)), n_dim, axis=2)
+        v_samp_ma = np.ma.masked_array(v_samp, mask=mask_bad)
+        # Take mean of masked array
+        v_mean = np.ma.mean(v_samp_ma, axis=0)
+    
+    return v_mean
 
 
 def sample_from_flows(flow_list, n_samples,
@@ -393,7 +414,7 @@ def main():
             flows, n_samples,
             return_indiv=True,
             batch_size=batch_size,
-            f_reduce=np.mean if args.flow_mean else np.median
+            f_reduce=clipped_vector_mean if args.flow_mean else np.median
         )
         save_df_data(df_data, args.df_grads_fname)
 
