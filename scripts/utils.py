@@ -112,6 +112,57 @@ def append_to_loss_history(fname, key, loss_history):
     #    f.dump(d, f)
 
 
+def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
+    if x_lim is None:
+        x_min, x_max = np.min(x), np.max(x)
+        # w = x_max - x_min
+        xlim = (x_min, x_max)
+    else:
+        xlim = x_lim
+    
+    if d_max is None:
+        dmax = 1.2 * np.percentile(np.abs(y-x), 99.9)
+    else:
+        dmax = d_max
+    dlim = (-dmax, dmax)
+
+    d = y - x
+    n,x_edges,_ = np.histogram2d(x, d, range=(xlim, dlim), bins=bins)
+
+    norm = np.sum(n, axis=1) + 1.e-10
+    n /= norm[:,None]
+
+    ax.imshow(
+      n.T,
+      origin='lower',
+      interpolation='nearest',
+      aspect='auto',
+      extent=xlim+dlim,
+      cmap='binary'
+    )
+    ax.plot(xlim, [0.,0.], c='b', alpha=0.2, lw=1)
+
+    if len(pct):
+        x_pct = np.empty((3, len(x_edges)-1))
+        for i,(x0,x1) in enumerate(zip(x_edges[:-1],x_edges[1:])):
+            idx = (x > x0) & (x < x1)
+            if np.any(idx):
+                x_pct[:,i] = np.percentile(d[idx], pct)
+            else:
+                x_pct[:,i] = np.nan
+        
+        for i,x_env in enumerate(x_pct):
+            ax.step(
+                x_edges,
+                np.hstack([x_env[0], x_env]),
+                c='cyan',
+                alpha=0.5
+            )
+
+    ax.set_xlim(xlim)
+    ax.set_ylim(dlim)
+
+
 def main():
     return 0
 
