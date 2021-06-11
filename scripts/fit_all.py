@@ -222,7 +222,7 @@ def sample_from_flows(flow_list, n_samples,
     }
     if return_indiv:
         ret['df_deta_indiv'] = df_deta_indiv
-        ret['df_deta'] = np.median(df_deta_indiv, axis=0)
+        #ret['df_deta'] = df_deta#np.median(df_deta_indiv, axis=0)
 
     return ret
 
@@ -258,14 +258,16 @@ def save_df_data(df_data, fname):
             f.create_dataset(key, data=df_data[key], **kw)
 
 
-def load_df_data(fname, mean_indiv=False):
+def load_df_data(fname, recalc_avg=None):
     d = {}
     with h5py.File(fname, 'r') as f:
         for k in f.keys():
             d[k] = f[k][:].astype('f4')
     
-    if mean_indiv:
-        d['df_deta'] = np.mean(d['df_deta_indiv'], axis=0)
+    if recalc_avg == 'mean':
+        d['df_deta'] = clipped_vector_mean(d['df_deta_indiv'])
+    elif recalc_avg == 'median':
+        d['df_deta'] = np.median(d['df_deta_indiv'], axis=0)
 
     return d
 
@@ -364,9 +366,14 @@ def main():
         help='Skip fitting of distribution function. Assume DF model exists.'
     )
     parser.add_argument(
-        '--flow-mean',
+        '--flows-only',
         action='store_true',
-        help='Use the mean of the flow gradients (default: use the median).'
+        help='Train only the normalizing flows. Do not fit the potential.'
+    )
+    parser.add_argument(
+        '--flow-median',
+        action='store_true',
+        help='Use the median of the flow gradients (default: use the mean).'
     )
     parser.add_argument(
         '--loss-history',
@@ -375,14 +382,18 @@ def main():
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
-    params = load_params(args.params)
 
+    if args.potential_only and args.flows_only:
+        print('--potential-only and --flows-only are incompatible.')
+        return 1
+
+    params = load_params(args.params)
     print('Options:')
     print(json.dumps(params, indent=2))
 
     if args.potential_only:
         print('Loading DF gradients ...')
-        df_data = load_df_data(args.df_grads_fname, mean_indiv=args.flow_mean)
+        df_data = load_df_data(args.df_grads_fname)
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
     else:
@@ -392,6 +403,7 @@ def main():
             print(f'Loaded {data.shape[0]} phase-space positions.')
 
             # Train normalizing flows
+            print('Training normalizing flows ...')
             flows = train_flows(
                 data,
                 args.flow_fname,
@@ -400,33 +412,35 @@ def main():
                 **params['df']
             )
 
-        # Re-load the flows (this removes the regularization terms)
-        flows = load_flows(args.flow_fname)
-        if not len(flows):
-            print('No trained flows were found! Aborting.')
-            return 1
+        if not args.flows_only:
+            # Re-load the flows (this removes the regularization terms)
+            flows = load_flows(args.flow_fname)
+            if not len(flows):
+                print('No trained flows were found! Aborting.')
+                return 1
 
-        # Sample from the flows and calculate gradients
-        print('Sampling from flows ...')
-        n_samples = params['Phi'].pop('n_samples')
-        batch_size = params['Phi'].pop('grad_batch_size')
-        df_data = sample_from_flows(
-            flows, n_samples,
-            return_indiv=True,
-            batch_size=batch_size,
-            f_reduce=clipped_vector_mean if args.flow_mean else np.median
-        )
-        save_df_data(df_data, args.df_grads_fname)
+            # Sample from the flows and calculate gradients
+            print('Sampling from flows ...')
+            n_samples = params['Phi'].pop('n_samples')
+            batch_size = params['Phi'].pop('grad_batch_size')
+            df_data = sample_from_flows(
+                flows, n_samples,
+                return_indiv=True,
+                batch_size=batch_size,
+                f_reduce=np.median if args.flow_median else clipped_vector_mean
+            )
+            save_df_data(df_data, args.df_grads_fname)
 
     # Fit the potential
-    print('Fitting the potential ...')
-    phi_model = train_potential(
-        df_data,
-        args.potential_fname,
-        args.potential_loss,
-        args.loss_history,
-        **params['Phi']
-    )
+    if not args.flows_only:
+        print('Fitting the potential ...')
+        phi_model = train_potential(
+            df_data,
+            args.potential_fname,
+            args.potential_loss,
+            args.loss_history,
+            **params['Phi']
+        )
     
     return 0
 
