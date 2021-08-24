@@ -256,7 +256,7 @@ def main():
         '--flows',
         type=str, nargs='+',
         required=True,
-        help='Flow model filename pattern.'
+        help='Flow model filename pattern(s).'
     )
     parser.add_argument(
         '--fig-dir',
@@ -295,10 +295,15 @@ def main():
     plot_1d_marginals(cyl_train, cyl_sample, args.fig_dir, loss=loss_mean)
 
     print('Plotting 2D marginal distributions ...')
+    print('  --> (R, z)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'z')
+    print('  --> (R, vz)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vz')
+    print('  --> (R, vR)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vR')
+    print('  --> (R, vz)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'z', 'vz')
+    print('  --> (R, vT)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vT')
 
     return 0
