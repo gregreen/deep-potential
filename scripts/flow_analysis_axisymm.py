@@ -169,10 +169,10 @@ def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
     ns,_,_,_ = ax_s.hist2d(cyl_sample[dim1], cyl_sample[dim2], norm=norm, **kw)
 
     dn = ns/n_sample - nt/n_train
-    #dn /= np.sqrt(nt)/n_train
-    #vmax = 5.
-    dn /= np.max(nt)/n_train
-    vmax = 0.2
+    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    vmax = 5.
+    #dn /= np.max(nt)/n_train
+    #vmax = 0.2
     im = ax_d.imshow(
         dn.T,
         extent=lims[0]+lims[1],
@@ -183,7 +183,8 @@ def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
 
     cb = fig.colorbar(
         im, cax=cax_d,
-        label=r'$\mathrm{fraction\ of\ max\ density}$'
+        label=r'$\mathrm{Poisson\ significance} \ \left( \sigma \right)$'
+        #label=r'$\mathrm{fraction\ of\ max\ density}$'
     )
 
     ax_s.set_yticklabels([])
