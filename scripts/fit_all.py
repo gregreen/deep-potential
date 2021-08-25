@@ -227,20 +227,28 @@ def sample_from_flows(flow_list, n_samples,
     return ret
 
 
-def load_flows(fname_pattern):
-    n_max = 9999
-
-    flow_list = []
+def load_flows(fname_patterns, is_fstring=True):
+    # Determine filenames
     fnames = []
 
-    for i in range(n_max):
-        fn = glob(fname_pattern.format(i)+'-1.index')
-        if len(fn):
-            fnames.append(fn[0][:-6])
-        else:
-            break
+    if is_fstring: # Filename pattern is f-string
+        n_max = 9999
+        for i in range(n_max):
+            fn = glob(fname_patterns.format(i)+'-1.index')
+            if len(fn):
+                fnames.append(fn[0][:-6])
+            else:
+                break
+    else: # Multiple shell globbing patterns
+        for fn in fname_patterns:
+            fnames += glob(fn)
+        fnames = sorted(fnames)
+        fnames = [fn[:-6] for fn in fnames]
 
     print(f'Found {len(fnames)} flows.')
+
+    # Load flows
+    flow_list = []
 
     for i,fn in enumerate(fnames):
         print(f'Loading flow {i+1} of {len(fnames)} ...')
@@ -336,13 +344,13 @@ def main():
         help='Directory in which to store data.'
     )
     parser.add_argument(
-        '--flow-fname',
+        '--flow-save-fname',
         type=str, default='models/df/flow_{:02d}',
         help='Filename pattern to store flows in.'
     )
     parser.add_argument(
         '--use-existing-flows',
-        action='store_true',
+        type=str, nargs='+',
         help='Assume that flows are already trained.'
     )
     parser.add_argument(
@@ -397,7 +405,7 @@ def main():
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
     else:
-        if not args.use_existing_flows:
+        if args.use_existing_flows is None:
             # Load input phase-space positions
             data = load_data(args.input)
             print(f'Loaded {data.shape[0]} phase-space positions.')
@@ -406,7 +414,7 @@ def main():
             print('Training normalizing flows ...')
             flows = train_flows(
                 data,
-                args.flow_fname,
+                args.flow_save_fname,
                 args.flow_loss,
                 args.loss_history,
                 **params['df']
@@ -414,7 +422,11 @@ def main():
 
         if not args.flows_only:
             # Re-load the flows (this removes the regularization terms)
-            flows = load_flows(args.flow_fname)
+            if args.use_existing_flows is None:
+                flows = load_flows(args.flow_save_fname, is_fstring=True)
+            else:
+                flows = load_flows(args.use_existing_flows, is_fstring=False)
+
             if not len(flows):
                 print('No trained flows were found! Aborting.')
                 return 1
