@@ -68,21 +68,25 @@ def sample_from_flows(flow_list, n_samples, batch_size=1024):
     # Sample from ensemble of flows
     n_batches = n_samples // (n_flows * batch_size)
     eta = np.empty((n_samples,6), dtype='f4')
+    eta[:] = np.nan # Make it obvious if there are unfilled values at the end
 
     bar = progressbar.ProgressBar(max_value=n_batches*n_flows)
+
+    batch_idx = 0
 
     for i,flow in enumerate(flow_list):
         #print(f'Sampling from flow {i+1} of {n_flows} ...')
 
         @tf.function
         def sample_batch():
-            print('Tracing sample_batch ...')
+            print(f'Tracing sample_batch for flow {i+1} of {n_flows} ...')
             return flow.sample([batch_size])
 
         for k in range(n_batches):
-            j0 = (i*n_batches + k) * batch_size
+            j0 = batch_idx * batch_size
             eta[j0:j0+batch_size] = sample_batch().numpy()
-            bar.update(i*n_batches+k+1)
+            batch_idx += 1
+            bar.update(batch_idx)
 
     return eta
 
@@ -269,7 +273,7 @@ def main():
         '--oversample',
         type=int,
         default=1,
-        help='Sample X*(# of training samples) from flows.'
+        help='Draw oversample*(# of training samples) samples from flows.'
     )
     args = parser.parse_args()
 
@@ -277,17 +281,18 @@ def main():
     eta_train = load_training_data(args.input)
     n_train = eta_train.shape[0]
     cyl_train = cart2cyl(eta_train)
-    print(eta_train.shape)
+    print(f'  --> Training data shape = {eta_train.shape}')
 
     print('Loading flows ...')
     flows = load_flows(args.flows)
     
     print('Evaluating loss ...')
     loss_mean, loss_std = evaluate_loss(flows, eta_train)
-    print(f'loss = {loss_mean:.5f} +- {loss_std:.5f}')
+    print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
 
     print('Sampling from flows ...')
     eta_sample = sample_from_flows(flows, args.oversample*n_train)
+    print(f'  --> {np.count_nonzero(np.isnan(eta_sample))} NaN values')
 
     print('Converting to cylindrical coordinates ...')
     cyl_sample = cart2cyl(eta_sample)
