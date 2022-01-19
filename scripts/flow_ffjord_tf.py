@@ -30,8 +30,8 @@ from tensorflow_probability.python import math as tfp_math
 from tensorflow_probability.python.internal import prefer_static
 
 def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
-                             kinetic_reg=None, jacobian_reg=None,
-                             dv_dt_reg=None):
+                             kinetic_reg=0, jacobian_reg=0,
+                             dv_dt_reg=0):
     """Generates a function that computes `ode_fn` and trace of the jacobian.
 
     Augments provided `ode_fn` with explicit computation of the trace of the
@@ -62,9 +62,9 @@ def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
         ode_fn_with_time = lambda x: ode_fn(time, x)
         batch_shape = [prefer_static.size0(state)]
 
-        if dv_dt_reg is not None:
+        if dv_dt_reg > 0:
             watched_vars = [time, state]
-        elif (kinetic_reg is not None) or (jacobian_reg is not None):
+        elif (kinetic_reg > 0) or (jacobian_reg > 0):
             watched_vars = [state]
         else:
             watched_vars = []
@@ -84,21 +84,24 @@ def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
         trace_value = diag_jac
 
         # Calculate regularization terms
-        if (dv_dt_reg is not None) or (jacobian_reg is not None):
+        if (dv_dt_reg > 0) or (jacobian_reg > 0):
             delv_delx = g.batch_jacobian(state_time_derivative, state)
 
-        if dv_dt_reg is not None:
+        if dv_dt_reg > 0:
+            print(f'Using dv/dt regularization: {dv_dt_reg}.')
             delv_delt = g.gradient(state_time_derivative, time)
             vnabla_v = tf.linalg.matvec(delv_delx, state_time_derivative)
             dv_dt = delv_delt + vnabla_v
             #print('dv/dt :', dv_dt)
             trace_value = trace_value - dv_dt_reg * dv_dt**2
 
-        if kinetic_reg is not None:
+        if kinetic_reg > 0:
+            print(f'Using kinetic regularization: {kinetic_reg}.')
             #print('v :', state_time_derivative.shape)
             trace_value = trace_value - kinetic_reg * state_time_derivative**2
 
-        if jacobian_reg is not None:
+        if jacobian_reg > 0:
+            print(f'Using Jacobian regularization: {jacobian_reg}.')
             jacobian_norm2 = tf.math.reduce_sum(delv_delx**2, axis=-1)
             #print('|J|^2 :', jacobian_norm2.shape)
             trace_value = trace_value - jacobian_reg * jacobian_norm2
@@ -155,7 +158,7 @@ class ForceFieldModel(snt.Module):
 
 class FFJORDFlow(tfd.TransformedDistribution):
     def __init__(self, n_dim, n_hidden, hidden_size,
-                 reg_kw=dict(), atol=1.e-5, name='DF'):
+                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
@@ -164,7 +167,7 @@ class FFJORDFlow(tfd.TransformedDistribution):
         # Force field guiding transformation
         self.dz_dt = ForceFieldModel(n_dim, n_hidden, hidden_size)
 
-        self.ode_solver = tfp.math.ode.DormandPrince(atol=atol)
+        self.ode_solver = tfp.math.ode.DormandPrince(rtol=rtol, atol=atol)
 
         #if exact:
         #    trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
@@ -279,9 +282,10 @@ def train_flow(flow, data,
     Inputs:
       flow (NormalizingFlow): Normalizing flow to be trained.
       data (tf.Tensor): Observed points. Shape = (# of points, # of dim).
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer to use.
+      optimizer (tf.keras.optimizers.Optimizer or str): Optimizer to use.
           Defaults to the Rectified Adam implementation from
-          tensorflow_addons.
+          tensorflow_addons. If a string, will try to interpret and
+          construct optimizer.
       batch_size (int): Number of points per training batch. Defaults to 32.
       n_epochs (int): Number of training epochs. Defaults to 1.
       checkpoint_dir (str): Directory for checkpoints. Defaults to
@@ -302,20 +306,30 @@ def train_flow(flow, data,
 
     n_steps = n_epochs * n_samples // batch_size
 
-    if optimizer is None:
+    if isinstance(optimizer, str):
         lr_schedule = keras.optimizers.schedules.ExponentialDecay(
             lr_init,
             n_steps,
             lr_final/lr_init,
             staircase=False
         )
-        opt = tfa.optimizers.RectifiedAdam(
-            lr_schedule,
-            total_steps=n_steps,
-            warmup_proportion=0.1
-        )
+        if optimizer == 'RAdam':
+            opt = tfa.optimizers.RectifiedAdam(
+                lr_schedule,
+                total_steps=n_steps,
+                warmup_proportion=0.1
+            )
+        elif optimizer == 'SGD':
+            opt = keras.optimizers.SGD(
+                learning_rate=lr_schedule,
+                momentum=0.5
+            )
+        else:
+            raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
     else:
         opt = optimizer
+
+    print(f'Optimizer: {opt}')
 
     loss_history = []
     update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
@@ -354,7 +368,7 @@ def train_flow(flow, data,
         grads,global_norm = tf.clip_by_global_norm(grads, 10.)
         #tf.print('\nglobal_norm =', global_norm)
         #tf.print([(v.name,tf.norm(v)) for v in grads])
-        tf.print('loss =', loss)
+        #tf.print('loss =', loss)
         opt.apply_gradients(zip(grads, variables))
         return loss
 
@@ -376,6 +390,7 @@ def train_flow(flow, data,
 
         # Checkpoint
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+            print('Checkpointing ...')
             step.assign(i+1)
             checkpoint.save(checkpoint_prefix)
 

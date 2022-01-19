@@ -55,6 +55,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32,
                 n_epochs=128, batch_size=1024, reg={},
                 lr_init=2.e-2, lr_final=1.e-4,
+                optimizer='RAdam',
                 checkpoint_every=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
@@ -77,6 +78,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
+            optimizer=optimizer,
             lr_init=lr_init,
             lr_final=lr_final,
             checkpoint_every=checkpoint_every,
@@ -303,7 +305,9 @@ def load_params(fname):
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':512},
                 "lr_init": {'type':'float', 'default':0.02},
-                "lr_final": {'type':'float', 'default':0.0001}
+                "lr_final": {'type':'float', 'default':0.0001},
+                "optimizer": {'type':'string', 'default':'RAdam'},
+                "checkpoint_every": {'type':'integer'}
             }
         },
         "Phi": {
@@ -318,7 +322,8 @@ def load_params(fname):
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':1024},
                 "lr_init": {'type':'float', 'default':0.001},
-                "lr_final": {'type':'float', 'default':0.000001}
+                "lr_final": {'type':'float', 'default':0.000001},
+                "checkpoint_every": {'type':'integer'}
             }
         }
     }
