@@ -342,7 +342,7 @@ def train_flow(flow, data,
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(opt=opt, flow=flow, step=step)
 
-        # Look for latest extisting checkpoint
+        # Look for latest existing checkpoint
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         if latest is not None:
             print(f'Restoring from checkpoint {latest} ...')
