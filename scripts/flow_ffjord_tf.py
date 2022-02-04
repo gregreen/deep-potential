@@ -157,25 +157,17 @@ class ForceFieldModel(snt.Module):
 
 
 class FFJORDFlow(tfd.TransformedDistribution):
-    def __init__(self, n_dim, n_hidden, hidden_size,
+    def __init__(self, n_dim, n_hidden, hidden_size, n_bij,
                  reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
+        self._n_bij = n_bij
         self._name = name
 
-        # Force field guiding transformation
-        self.dz_dt = ForceFieldModel(n_dim, n_hidden, hidden_size)
-
+        # ODE solver
         self.ode_solver = tfp.math.ode.DormandPrince(rtol=rtol, atol=atol)
 
-        #if exact:
-        #    trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
-        #else:
-        #    # Stochastic estimate of the Jacobian. Better scaling with
-        #    # number of dimensions, but noisy.
-        #    trace_augmentation_fn = tfb.ffjord.trace_jacobian_hutchinson
-        
         if len(reg_kw):
             print('Using regularization.')
             def trace_augmentation_fn(*args):
@@ -183,12 +175,22 @@ class FFJORDFlow(tfd.TransformedDistribution):
         else:
             trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
 
+        # Force fields guiding transformations
+        self.dz_dt = [
+            ForceFieldModel(n_dim, n_hidden, hidden_size)
+            for k in range(n_bij)
+        ]
+
         # Initialize bijector
-        bij = tfb.FFJORD(
-            state_time_derivative_fn=self.dz_dt,
-            ode_solve_fn=self.ode_solver.solve,
-            trace_augmentation_fn=trace_augmentation_fn
-        )
+        bij = [
+            tfb.FFJORD(
+                state_time_derivative_fn=self.dz_dt[k],
+                ode_solve_fn=self.ode_solver.solve,
+                trace_augmentation_fn=trace_augmentation_fn
+            )
+            for k in range(n_bij)
+        ]
+        bij = tfb.Chain(bij)
 
         # Multivariate normal base distribution
         base_dist = tfd.MultivariateNormalDiag(
@@ -208,31 +210,17 @@ class FFJORDFlow(tfd.TransformedDistribution):
         self.n_var = sum([int(tf.size(v)) for v in self.trainable_variables])
         print(f'# of trainable variables: {self.n_var}')
 
-    def calc_path_length(self, x, forward=True):
-        if forward:
-            dxs_dt = self.dz_dt.augmented_field
-        else:
-            dxs_dt = lambda t,x: -self.dz_dt.augmented_field(1.-t,x)
-
-        # Concatenate the initial path length (0) to x
-        xs0 = tf.concat([x, tf.zeros([self._n_dim,1])], 1)
-
-        # Solve the trajectory of x, keeping track of the path length
-        res = self.ode_solver.solve(
-            self.dz_dt.augmented_field,
-            0., xs0,
-            solution_times=[1.]
-        )
-
-        # Extract the final position and the path length
-        xs_T = tf.squeeze(res.states, axis=0)
-        x_T,s_T = tf.split(xs_T, [self._n_dim,1], axis=1)
-
-        return x_T, s_T
-
     def calc_trajectories(self, n_samples, t_eval):
+        if t_eval[-1] < 1.:
+            t_eval = np.hstack([t_eval, 1.])
+
         x0 = self.distribution.sample([n_samples])
-        res = self.ode_solver.solve(self.dz_dt, 0, x0, t_eval)
+
+        res = []
+        for dzdt in self.dz_dt:
+            res.append(self.ode_solver.solve(dzdt, 0, x0, t_eval))
+            x0 = res[-1].states[-1]
+
         return res
     
     def save(self, fname_base):
@@ -245,6 +233,7 @@ class FFJORDFlow(tfd.TransformedDistribution):
             n_dim=self._n_dim,
             n_hidden=self._n_hidden,
             hidden_size=self._hidden_size,
+            n_bij=self._n_bij,
             name=self._name
         )
         with open(fname_out+'_spec.json', 'w') as f:

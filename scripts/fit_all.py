@@ -52,7 +52,7 @@ def load_data(fname):
 
 
 def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
-                n_flows=1, n_hidden=4, hidden_size=32,
+                n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
                 n_epochs=128, batch_size=1024, reg={},
                 lr_init=2.e-2, lr_final=1.e-4,
                 optimizer='RAdam',
@@ -66,7 +66,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, reg_kw=reg)
+        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, n_bij, reg_kw=reg)
         flow_list.append(flow)
         
         flow_fname = fname_pattern.format(i)
