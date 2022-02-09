@@ -14,7 +14,7 @@ def get_training_progressbar_fn(n_steps, loss_history, opt):
     widgets = [
         progressbar.Bar(),
         progressbar.Percentage(), ' |',
-        progressbar.Timer(), '|',
+        progressbar.Timer(format='Elapsed: %(elapsed)s'), '|',
         progressbar.AdaptiveETA(), '|',
         progressbar.Variable('loss', width=6, precision=4), ', ',
         progressbar.Variable('lr', width=8, precision=3)

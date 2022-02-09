@@ -53,8 +53,7 @@ def load_data(fname):
 
 def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
-                n_epochs=128, batch_size=1024, reg={},
-                lr_init=2.e-2, lr_final=1.e-4,
+                n_epochs=128, batch_size=1024, reg={}, lr={},
                 optimizer='RAdam',
                 checkpoint_every=None):
     n_samples = data.shape[0]
@@ -74,16 +73,17 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
         checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
         checkpoint_name += '_chkpt'
 
+        lr_kw = {f'lr_{k}':lr[k] for k in lr}
+
         loss_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
             optimizer=optimizer,
-            lr_init=lr_init,
-            lr_final=lr_final,
             checkpoint_every=checkpoint_every,
             checkpoint_dir=checkpoint_dir,
-            checkpoint_name=checkpoint_name
+            checkpoint_name=checkpoint_name,
+            **lr_kw
         )
 
         flow.save(flow_fname)
@@ -302,10 +302,18 @@ def load_params(fname):
                         "jacobian_reg": {'type':'float'}
                     }
                 },
+                "lr": {
+                    'type': 'dict',
+                    'schema': {
+                        "type": {'type':'string', 'default':'step'},
+                        "init": {'type':'float', 'default':0.02},
+                        "final": {'type':'float', 'default':0.0001},
+                        "patience": {'type':'integer', 'default':32},
+                        "min_delta": {'type':'float', 'default':0.01}
+                    }
+                },
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':512},
-                "lr_init": {'type':'float', 'default':0.02},
-                "lr_final": {'type':'float', 'default':0.0001},
                 "optimizer": {'type':'string', 'default':'RAdam'},
                 "checkpoint_every": {'type':'integer'}
             }
@@ -327,7 +335,7 @@ def load_params(fname):
             }
         }
     }
-    validator = cerberus.Validator(schema)
+    validator = cerberus.Validator(schema, allow_unknown=False)
     params = validator.normalized(d)
     return params
 

@@ -260,8 +260,11 @@ def train_flow(flow, data,
                optimizer=None,
                batch_size=32,
                n_epochs=1,
+               lr_type='step',
                lr_init=2.e-2,
                lr_final=1.e-4,
+               lr_patience=32,
+               lr_min_delta=0.01,
                checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
@@ -296,12 +299,20 @@ def train_flow(flow, data,
     n_steps = n_epochs * n_samples // batch_size
 
     if isinstance(optimizer, str):
-        lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-            lr_init,
-            n_steps,
-            lr_final/lr_init,
-            staircase=False
-        )
+        if lr_type == 'exponential':
+            lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+                lr_init,
+                n_steps,
+                lr_final/lr_init,
+                staircase=False
+            )
+        elif lr_type == 'step':
+            lr_schedule = lr_init
+            steps_since_decline = 0
+        else:
+            raise ValueError(
+                f'Unknown lr_type: "{lr_type}" ("exponential" or "step")'
+            )
         if optimizer == 'RAdam':
             opt = tfa.optimizers.RectifiedAdam(
                 lr_schedule,
@@ -321,15 +332,19 @@ def train_flow(flow, data,
     print(f'Optimizer: {opt}')
 
     loss_history = []
-    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+    lr_history = []
 
     t0 = time()
 
     # Set up checkpointing
     step = tf.Variable(0, name='step')
+    loss_min = tf.Variable(np.inf, name='loss_min')
     checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
     if checkpoint_every is not None:
-        checkpoint = tf.train.Checkpoint(opt=opt, flow=flow, step=step)
+        checkpoint = tf.train.Checkpoint(
+            opt=opt, flow=flow,
+            step=step, loss_min=loss_min
+        )
 
         # Look for latest extisting checkpoint
         latest = tf.train.latest_checkpoint(checkpoint_dir)
@@ -337,6 +352,12 @@ def train_flow(flow, data,
             print(f'Restoring from checkpoint {latest} ...')
             checkpoint.restore(latest)
             print(f'Beginning from step {int(step)}.')
+
+            # Try to load loss history
+            loss_fname = f'{latest}_loss.txt'
+            loss_lr = np.loadtxt(loss_fname)
+            loss_history = loss_lr[:,0].tolist()
+            lr_history = loss_lr[:,1].tolist()
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -361,6 +382,9 @@ def train_flow(flow, data,
         opt.apply_gradients(zip(grads, variables))
         return loss
 
+    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+
+    # Main training loop
     for i,y in enumerate(batches, int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
@@ -370,7 +394,33 @@ def train_flow(flow, data,
         loss = training_step(y)
 
         loss_history.append(float(loss))
+        lr_history.append(float(opt._decayed_lr(tf.float32)))
+
+        # Progress bar
         update_bar(i)
+        
+        # Adjust learning rate?
+        if lr_type == 'step':
+            n_smooth = max(lr_patience//8, 1)
+            if len(loss_history) >= n_smooth:
+                loss_avg = np.mean(loss_history[-n_smooth:])
+            else:
+                loss_avg = np.inf
+
+            if loss_avg < loss_min - lr_min_delta:
+                steps_since_decline = 0
+                print(f'New minimum loss: {loss_avg}.')
+                loss_min.assign(loss_avg)
+            elif steps_since_decline >= lr_patience:
+                # Reduce learning rate
+                old_lr = float(opt.lr)
+                new_lr = 0.5 * old_lr
+                print(f'Reducing learning rate from {old_lr} to {new_lr}.')
+                print(f'   (loss threshold: {float(loss_min-lr_min_delta)})')
+                opt.lr.assign(new_lr)
+                steps_since_decline = 0
+            else:
+                steps_since_decline += 1
 
         if not traced:
             # Get time after gradients function is first traced
@@ -381,7 +431,12 @@ def train_flow(flow, data,
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             print('Checkpointing ...')
             step.assign(i+1)
-            checkpoint.save(checkpoint_prefix)
+            chkpt_fname = checkpoint.save(checkpoint_prefix)
+            print(f'  --> {chkpt_fname}')
+            loss_lr = np.stack([loss_history, lr_history], axis=1)
+            loss_fname = f'{chkpt_fname}_loss.txt'
+            header = f'{"loss": >16s} {"learning_rate": >18s}'
+            np.savetxt(loss_fname, loss_lr, header=header, fmt='%.12e')
 
     t2 = time()
     loss_avg = np.mean(loss_history[-50:])
