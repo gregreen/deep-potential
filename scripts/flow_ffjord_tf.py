@@ -265,6 +265,7 @@ def train_flow(flow, data,
                lr_final=1.e-4,
                lr_patience=32,
                lr_min_delta=0.01,
+               warmup_proportion=0.1,
                checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
@@ -317,7 +318,7 @@ def train_flow(flow, data,
             opt = tfa.optimizers.RectifiedAdam(
                 lr_schedule,
                 total_steps=n_steps,
-                warmup_proportion=0.1
+                warmup_proportion=warmup_proportion
             )
         elif optimizer == 'SGD':
             opt = keras.optimizers.SGD(
