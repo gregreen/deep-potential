@@ -118,7 +118,7 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
     if loss is not None:
         ax = ax_arr.flat[1]
         ax.text(
-            0.02, 0.98, rf'$\left< \ln p \right> = {loss:.4f}$',
+            0.02, 0.98, rf'$\left< \ln p \right> = {-loss:.4f}$',
             ha='left', va='top',
             transform=ax.transAxes
         )
@@ -285,7 +285,7 @@ def main():
 
     print('Loading flows ...')
     flows = load_flows(args.flows)
-    
+
     print('Evaluating loss ...')
     loss_mean, loss_std = evaluate_loss(flows, eta_train)
     print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
