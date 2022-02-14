@@ -141,9 +141,26 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
     plt.close(fig)
 
 
-def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
-    labels = ['$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$']
-    keys = ['R', 'z', 'phi', 'vR', 'vz', 'vT']
+def plot_2d_marginal(cyl_train, cyl_sample,
+                     eta_train, eta_sample,
+                     fig_dir, dim1, dim2):
+    labels = [
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$',
+        '$x$', '$v_x', '$y$', '$v_y$'
+    ]
+    keys = [
+        'R', 'z', 'phi', 'vR', 'vz', 'vT',
+        'x', 'y', 'vx', 'vz'
+    ]
+
+    def extract_dims(dim):
+        if dim in keys[:-4]:
+            return cyl_train[dim], cyl_sample[dim]
+        elif dim in keys[-4:]:
+            return eta_train[dim], eta_sample[dim]
+
+    x_train, x_sample = extract_dims(dim1)
+    y_train, y_sample = extract_dims(dim2)
 
     labels = {k:l for k,l in zip(keys,labels)}
 
@@ -155,8 +172,8 @@ def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
     )
 
     lims = []
-    for i,k in enumerate([dim1,dim2]):
-        xlim = np.percentile(cyl_train[k], [1., 99.])
+    for i,z in enumerate([x_train,y_train]):
+        xlim = np.percentile(z, [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
         if k == 'R':
@@ -167,12 +184,12 @@ def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
 
     kw = dict(range=lims, bins=40)
 
-    n_train = cyl_train['R'].shape[0]
-    n_sample = cyl_sample['R'].shape[0]
+    n_train = len(x_train)
+    n_sample = len(x_sample)
 
-    nt,_,_,_ = ax_t.hist2d(cyl_train[dim1], cyl_train[dim2], **kw)
+    nt,_,_,_ = ax_t.hist2d(x_train, y_train, **kw)
     norm = Normalize(vmin=0, vmax=np.max(nt)*n_sample/n_train)
-    ns,_,_,_ = ax_s.hist2d(cyl_sample[dim1], cyl_sample[dim2], norm=norm, **kw)
+    ns,_,_,_ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
 
     dn = ns/n_sample - nt/n_train
     dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
@@ -314,22 +331,28 @@ def main():
     plot_1d_marginals(cyl_train, cyl_sample, args.fig_dir, loss=loss_mean)
 
     print('Plotting 2D marginal distributions ...')
-    print('  --> (R, z)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'z')
-    print('  --> (R, vz)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vz')
-    print('  --> (R, vR)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vR')
-    print('  --> (R, vz)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'z', 'vz')
-    print('  --> (R, vT)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vT')
-    print('  --> (vz, vT)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vz', 'vT')
-    print('  --> (vR, vz)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vR', 'vz')
-    print('  --> (vR, vT)')
-    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vR', 'vT')
+
+    dims = [
+        ('R', 'z'),
+        ('R', 'vz'),
+        ('R', 'vR'),
+        ('R', 'vT'),
+        ('z', 'vz'),
+        ('vz', 'vT'),
+        ('vR', 'vz'),
+        ('vR', 'vT'),
+        ('x', 'y'),
+        ('x', 'z'),
+        ('y', 'z')
+    ]
+
+    for dim1,dim2 in dims:
+        print(f'  --> ({dim1}, {dim2})')
+        plot_2d_marginal(
+            cyl_train, cyl_sample,
+            eta_train, eta_sample,
+            args.fig_dir, dim1, dim2
+        )
 
     return 0
 
