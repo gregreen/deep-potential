@@ -67,7 +67,9 @@ def sample_from_flows(flow_list, n_samples, batch_size=1024):
 
     # Sample from ensemble of flows
     n_batches = n_samples // (n_flows * batch_size)
-    eta = np.empty((n_samples,6), dtype='f4')
+    n_samples_rounded = n_flows * n_batches * batch_size
+    print(f'Rounding down # of samples: {n_samples} -> {n_samples_rounded}')
+    eta = np.empty((n_samples_rounded,6), dtype='f4')
     eta[:] = np.nan # Make it obvious if there are unfilled values at the end
 
     bar = progressbar.ProgressBar(max_value=n_batches*n_flows)
@@ -118,7 +120,7 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
     if loss is not None:
         ax = ax_arr.flat[1]
         ax.text(
-            0.02, 0.98, rf'$\left< \ln p \right> = {loss:.4f}$',
+            0.02, 0.98, rf'$\left< \ln p \right> = {-loss:.4f}$',
             ha='left', va='top',
             transform=ax.transAxes
         )
@@ -144,7 +146,7 @@ def plot_2d_marginal(cyl_train, cyl_sample, fig_dir, dim1, dim2):
     keys = ['R', 'z', 'phi', 'vR', 'vz', 'vT']
 
     labels = {k:l for k,l in zip(keys,labels)}
-    
+
     fig,(ax_t,ax_s,ax_d,cax_d) = plt.subplots(
         1,4,
         figsize=(12,4),
@@ -220,25 +222,36 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     n_samples = eta_train.shape[0]
 
     # Sample from ensemble of flows
+    #n_batches = n_samples // batch_size
+    #eta_batches = np.reshape(eta_train, (n_batches,batch_size,6)).astype('f4')
+    #eta_batches = [
+    #    eta_train[i0:i0+batch_size].astype('f4')
+    #    for i0 in range(0,n_samples,batch_size)
+    #]
+    #n_batches = len(eta_batches)
     n_batches = n_samples // batch_size
-    eta_batches = np.reshape(eta_train, (n_batches,batch_size,6)).astype('f4')
-    
+    if np.mod(n_samples, batch_size) > 0:
+        n_batches += 1
+
     loss = []
     bar = progressbar.ProgressBar(max_value=n_batches*n_flows)
 
     for i,flow in enumerate(flow_list):
         loss_i = []
+        weight_i = []
 
         @tf.function
         def logp_batch(eta):
             print('Tracing logp_batch ...')
             return -tf.math.reduce_mean(flow.log_prob(eta))
-        
-        for k,eta in enumerate(eta_batches):
-            loss_i.append(logp_batch(tf.constant(eta)).numpy())
-            bar.update(i*n_batches+k+1)
 
-        loss.append(np.mean(loss_i))
+        for k in range(0,n_samples,batch_size):
+            eta = eta_train[k:k+batch_size].astype('f4')
+            loss_i.append(logp_batch(tf.constant(eta)).numpy())
+            weight_i.append(eta.shape[0])
+            bar.update(i*n_batches + k//batch_size + 1)
+
+        loss.append(np.average(loss_i, weights=weight_i))
 
     loss_std = np.std(loss)
     loss_mean = np.mean(loss)
@@ -285,7 +298,7 @@ def main():
 
     print('Loading flows ...')
     flows = load_flows(args.flows)
-    
+
     print('Evaluating loss ...')
     loss_mean, loss_std = evaluate_loss(flows, eta_train)
     print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
@@ -311,6 +324,12 @@ def main():
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'z', 'vz')
     print('  --> (R, vT)')
     plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'R', 'vT')
+    print('  --> (vz, vT)')
+    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vz', 'vT')
+    print('  --> (vR, vz)')
+    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vR', 'vz')
+    print('  --> (vR, vT)')
+    plot_2d_marginal(cyl_train, cyl_sample, args.fig_dir, 'vR', 'vT')
 
     return 0
 
