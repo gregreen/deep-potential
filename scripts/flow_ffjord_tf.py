@@ -458,10 +458,12 @@ def train_flow(flow, data,
             step.assign(i+1)
             chkpt_fname = checkpoint.save(checkpoint_prefix)
             print(f'  --> {chkpt_fname}')
-            loss_lr = np.stack([loss_history, val_loss_history, lr_history], axis=1)
-            loss_fname = f'{chkpt_fname}_loss.txt'
-            header = f'{"loss": >16s} {"val_loss": >18s} {"learning_rate": >18s}'
-            np.savetxt(loss_fname, loss_lr, header=header, fmt='%.12e')
+            save_loss_history(
+                f'{chkpt_fname}_loss.txt'
+                loss_history,
+                val_loss_history,
+                lr_history
+            )
 
     t2 = time()
     loss_avg = np.mean(loss_history[-50:])

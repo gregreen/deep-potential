@@ -112,6 +112,12 @@ def append_to_loss_history(fname, key, loss_history):
     #    f.dump(d, f)
 
 
+def save_loss_history(fname, loss_history, val_loss_history, lr_history):
+    data = np.stack([loss_history, val_loss_history, lr_history], axis=1)
+    header = f'{"loss": >16s} {"val_loss": >18s} {"learning_rate": >18s}'
+    np.savetxt(fname, data, header=header, fmt='%.12e')
+
+
 def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
     if x_lim is None:
         x_min, x_max = np.min(x), np.max(x)
@@ -119,7 +125,7 @@ def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
         xlim = (x_min, x_max)
     else:
         xlim = x_lim
-    
+
     if d_max is None:
         dmax = 1.2 * np.percentile(np.abs(y-x), 99.9)
     else:
