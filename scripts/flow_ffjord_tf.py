@@ -266,6 +266,7 @@ def train_flow(flow, data,
                lr_patience=32,
                lr_min_delta=0.01,
                warmup_proportion=0.1,
+               validation_frac=0.25,
                checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
@@ -291,11 +292,24 @@ def train_flow(flow, data,
       loss_history (list of floats): Loss after each training iteration.
     """
 
+    # Split training/validation sample
     n_samples = data.shape[0]
+    n_val = int(validation_frac * n_samples)
+    val_batch_size = int(validation_frac * batch_size)
+    n_samples -= n_val
+    val = data[:n_val]
+    data = data[n_val:]
+
+    # Create Tensorflow datasets
     batches = tf.data.Dataset.from_tensor_slices(data)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
     batches = batches.repeat(n_epochs+1)
     batches = batches.batch(batch_size, drop_remainder=True)
+
+    val_batches = tf.data.Dataset.from_tensor_slices(val)
+    val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
+    val_batches = val_batches.repeat(n_epochs+1)
+    val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
     n_steps = n_epochs * n_samples // batch_size
 
@@ -333,6 +347,7 @@ def train_flow(flow, data,
     print(f'Optimizer: {opt}')
 
     loss_history = []
+    val_loss_history = []
     lr_history = []
 
     t0 = time()
@@ -384,18 +399,26 @@ def train_flow(flow, data,
         opt.apply_gradients(zip(grads, variables))
         return loss
 
+    @tf.function
+    def validation_step(batch):
+        print(f'Tracing validation_step with batch shape {batch.shape} ...')
+        loss = -tf.reduce_mean(flow.log_prob(batch))
+        return loss
+
     update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
 
     # Main training loop
-    for i,y in enumerate(batches, int(step)):
+    for i,(y,y_val) in enumerate(zip(batches,val_batches), int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
             # if we began from a checkpoint.
             break
 
         loss = training_step(y)
+        val_loss = validation_step(y_val)
 
         loss_history.append(float(loss))
+        val_loss_history.append(float(val_loss))
         lr_history.append(float(opt._decayed_lr(tf.float32)))
 
         # Progress bar
@@ -435,9 +458,9 @@ def train_flow(flow, data,
             step.assign(i+1)
             chkpt_fname = checkpoint.save(checkpoint_prefix)
             print(f'  --> {chkpt_fname}')
-            loss_lr = np.stack([loss_history, lr_history], axis=1)
+            loss_lr = np.stack([loss_history, val_loss_history, lr_history], axis=1)
             loss_fname = f'{chkpt_fname}_loss.txt'
-            header = f'{"loss": >16s} {"learning_rate": >18s}'
+            header = f'{"loss": >16s} {"val_loss": >18s} {"learning_rate": >18s}'
             np.savetxt(loss_fname, loss_lr, header=header, fmt='%.12e')
 
     t2 = time()
@@ -451,7 +474,7 @@ def train_flow(flow, data,
     #checkpoint = tf.train.Checkpoint(flow=flow)
     #checkpoint.save(checkpoint_prefix + '_final')
 
-    return loss_history, lr_history
+    return loss_history, val_loss_history, lr_history
 
 
 def save_flow(flow, fname_base):
