@@ -52,10 +52,9 @@ def load_data(fname):
 
 
 def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
-                n_flows=1, n_hidden=4, hidden_size=32,
-                n_epochs=128, batch_size=1024, reg={},
-                lr_init=2.e-2, lr_final=1.e-4,
-                optimizer='RAdam',
+                n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
+                n_epochs=128, batch_size=1024, reg={}, lr={},
+                optimizer='RAdam', warmup_proportion=0.1,
                 checkpoint_every=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
@@ -66,29 +65,33 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, reg_kw=reg)
+        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, n_bij, reg_kw=reg)
         flow_list.append(flow)
-        
+
         flow_fname = fname_pattern.format(i)
 
         checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
         checkpoint_name += '_chkpt'
 
-        loss_history = flow_ffjord_tf.train_flow(
+        lr_kw = {f'lr_{k}':lr[k] for k in lr}
+
+        loss_history, lr_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
             optimizer=optimizer,
-            lr_init=lr_init,
-            lr_final=lr_final,
+            warmup_proportion=warmup_proportion,
             checkpoint_every=checkpoint_every,
             checkpoint_dir=checkpoint_dir,
-            checkpoint_name=checkpoint_name
+            checkpoint_name=checkpoint_name,
+            **lr_kw
         )
 
         flow.save(flow_fname)
 
-        utils.append_to_loss_history(loss_fname, f'flow_{i}', loss_history)
+        loss_lr = np.stack([loss_history, lr_history], axis=1)
+        header = f'{"loss": >16s} {"learning_rate": >18s}'
+        np.savetxt(loss_fname.format(i), loss_lr, header=header, fmt='%.12e')
 
         fig = utils.plot_loss(loss_history)
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
@@ -302,11 +305,20 @@ def load_params(fname):
                         "jacobian_reg": {'type':'float'}
                     }
                 },
+                "lr": {
+                    'type': 'dict',
+                    'schema': {
+                        "type": {'type':'string', 'default':'step'},
+                        "init": {'type':'float', 'default':0.02},
+                        "final": {'type':'float', 'default':0.0001},
+                        "patience": {'type':'integer', 'default':32},
+                        "min_delta": {'type':'float', 'default':0.01}
+                    }
+                },
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':512},
-                "lr_init": {'type':'float', 'default':0.02},
-                "lr_final": {'type':'float', 'default':0.0001},
                 "optimizer": {'type':'string', 'default':'RAdam'},
+                "warmup_proportion": {'type':'float', 'default':0.1},
                 "checkpoint_every": {'type':'integer'}
             }
         },
@@ -327,7 +339,7 @@ def load_params(fname):
             }
         }
     }
-    validator = cerberus.Validator(schema)
+    validator = cerberus.Validator(schema, allow_unknown=False)
     params = validator.normalized(d)
     return params
 
@@ -390,7 +402,7 @@ def main():
     )
     parser.add_argument(
         '--loss-history',
-        type=str, default='data/loss_history.txt',
+        type=str, default='data/loss_history_{:02d}.txt',
         help='Filename for loss history data.'
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
