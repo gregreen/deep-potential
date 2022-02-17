@@ -87,11 +87,11 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             **lr_kw
         )
 
-        flow.save(flow_fname)
+        fn = flow.save(flow_fname)
 
         loss_lr = np.stack([loss_history, lr_history], axis=1)
         header = f'{"loss": >16s} {"learning_rate": >18s}'
-        np.savetxt(loss_fname.format(i), loss_lr, header=header, fmt='%.12e')
+        np.savetxt(fn+'_loss.txt', loss_lr, header=header, fmt='%.12e')
 
         fig = utils.plot_loss(loss_history)
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
