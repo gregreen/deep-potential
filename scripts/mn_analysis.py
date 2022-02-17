@@ -10,7 +10,7 @@ matplotlib.use('Agg')
 #matplotlib.rc('text', usetex=True)
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator, MaxNLocator
 from matplotlib.gridspec import GridSpec
 
 import tensorflow as tf
@@ -49,169 +49,6 @@ def batch_calc_df_deta(f, eta, batch_size):
     bar.update(n_data)
 
     return df_deta
-
-
-def df_ideal(eta, r_max=None):
-    q,p = tf.split(eta, 2, axis=1)
-
-    r2 = tf.math.reduce_sum(q**2, axis=1)
-    v2 = tf.math.reduce_sum(p**2, axis=1)
-
-    Phi = -(1+r2)**(-1/2)
-    E = v2/2 + Phi
-
-    f = tf.clip_by_value(-E, 0, np.inf)**(7/2)
-
-    A = 24 * np.sqrt(2.) / (7. * np.pi**3)
-    
-    if r_max is not None:
-        A /= plummer_mass(r_max)
-
-    return A * f
-
-
-def plummer_mass(r_max):
-    return r_max**3 / (1. + r_max)**1.5
-
-
-def plot_gradients(df_data, fname, batch_size=1024, r_max=None):
-    eta = df_data['eta']
-
-    df_trunc = lambda eta: df_ideal(eta, r_max=r_max)
-
-    # Calculate ideal gradients
-    df_deta_ideal = batch_calc_df_deta(
-        df_trunc, eta,
-        batch_size=batch_size
-    )
-    print(f'df/deta (ideal): {df_deta_ideal.shape} {type(df_deta_ideal)}')
-
-    #
-    # Plot the true vs. estimated gradients
-    #
-
-    df_deta_est = [df_data['df_deta']]
-
-    if 'df_deta_indiv' in df_data:
-        df_deta_est = [np.median(df_data['df_deta_indiv'], axis=0)]
-        df_deta_est += [x for x in df_data['df_deta_indiv']]
-
-    #if r_max is not None:
-    #    r2 = np.sum(eta[:,:3]**2, axis=1)
-    #    idx = (r2 < (0.8*r_max)**2)
-    #    print(f'Keeping {np.count_nonzero(idx)} of {idx.size} points.')
-    #    eta = eta[idx]
-    #    df_deta_ideal = df_deta_ideal[idx]
-    #    for k,v in enumerate(df_deta_est):
-    #        df_deta_est[k] = v[idx]
-
-    xlim_list = []
-    nlim_list = []
-
-    df_dq_lim = np.array([-0.15, 0.15])
-    df_dp_lim = np.array([-0.22, 0.22])
-
-    if r_max is not None:
-        M = plummer_mass(r_max)
-        df_dq_lim /= M
-        df_dp_lim /= M
-    
-    n_sc = 2**14
-
-    fname_base, ext = os.path.splitext(fname)
-    ext = ext.lstrip('.')
-
-    for k,df_deta in enumerate(df_deta_est):
-        suffix = (k-1) if k else 'ensemble'
-
-        print(f'Plotting flow: {suffix} ...')
-
-        fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
-
-        for i,ax in enumerate(ax_arr.flat):
-            ax.set_aspect('equal')
-            ax.scatter(
-                df_deta_ideal[:n_sc,i],
-                df_deta[:n_sc,i],
-                alpha=0.1, s=2,
-                edgecolors='none'
-            )
-
-            if i < 3:
-                xlim = df_dq_lim
-            else:
-                xlim = df_dp_lim
-
-            ax.set_xlim(xlim)
-            ax.set_ylim(xlim)
-
-            ax.plot([xlim[0],xlim[1]], [xlim[0],xlim[1]], c='k', alpha=0.25)
-
-            ax.set_xlabel(r'true')
-            ax.set_ylabel(r'normalizing flow')
-
-            ax.grid('on', which='major', alpha=0.20)
-            ax.grid('on', which='minor', alpha=0.05)
-
-            ax.set_title(rf'$\mathrm{{d}}f / \mathrm{{d}}\eta_{i}$')
-
-        fig.subplots_adjust(
-            hspace=0.25, wspace=0.3,
-            top=0.91, bottom=0.06
-        )
-        fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
-
-        fig.savefig(f'{fname_base}_scatter_{suffix}.{ext}', dpi=100)
-        plt.close(fig)
-
-        #
-        # Plot histogram of gradient residuals along each dimension in phase space
-        #
-
-        fig,ax_arr = plt.subplots(2,3, figsize=(16,9))
-
-        for i,ax in enumerate(ax_arr.flat):
-            ax.set_aspect('auto')
-            resid = df_deta[:,i] - df_deta_ideal[:,i]
-            
-            ax.hist(
-                resid,
-                range=(-0.05, 0.05),
-                bins=51,
-                log=True
-            )
-
-            ax.set_xlabel(r'(normalizing flow) - (true)')
-            ax.set_title(rf'$\mathrm{{d}}f / \mathrm{{d}}\eta_{i}$')
-
-            if k == 0:
-                nlim = ax.get_ylim()
-                nlim_list.append(nlim)
-            else:
-                nlim = nlim_list[i]
-            ax.set_ylim(nlim)
-
-            sigma = np.std(resid)
-            kurt = scipy.stats.kurtosis(resid)
-            ax.text(
-                0.95, 0.95,
-                rf'$\sigma = {sigma:.4f}$'+'\n'+rf'$\kappa = {kurt:.2f}$',
-                ha='right',
-                va='top',
-                transform=ax.transAxes
-            )
-
-            ax.grid('on', which='major', alpha=0.20)
-            ax.grid('on', which='minor', alpha=0.05)
-
-        fig.subplots_adjust(
-            hspace=0.25, wspace=0.3,
-            top=0.91, bottom=0.06
-        )
-        fig.suptitle('Performance of normalizing flow gradients', fontsize=20)
-
-        fig.savefig(f'{fname_base}_hist_{suffix}.{ext}', dpi=100)
-        plt.close(fig)
 
 
 def vec2ang(x):
@@ -434,10 +271,7 @@ def plot_flow_slices(flows, fname):
 
     img_avg_stack = [np.zeros(s, dtype='f4') for i in range(6)]
 
-    log_df_fns = (
-        [lambda eta: tf.math.log(df_ideal(eta))]
-        + [flow.log_prob for flow in flows]
-    )
+    log_df_fns = [flow.log_prob for flow in flows]
 
     img_ideal_stack = []
 
@@ -622,11 +456,425 @@ def plot_flow_projections(eta):
     return fig
 
 
+def phi_Miyamoto_Nagai(R, z, a, b):
+    return -1 / np.sqrt(R**2 + (np.sqrt(z**2 + b**2) + a)**2)
+
+
+def rho_Miyamoto_Nagai(R, z, a, b):
+    z_eff = np.sqrt(z**2 + b**2)
+    return (
+        b**2 / (4*np.pi)
+        * (a*R**2 + (3*z_eff+a) * (z_eff+a)**2)
+        / ((R**2 + (z_eff+a)**2)**(5/2) * z_eff**3)
+    )
+
+
+class MiyamotoNagaiDisk(object):
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+    def rho(self, R, z):
+        z_eff = np.sqrt(z**2 + self.b**2)
+        return (
+            self.b**2 / (4*np.pi)
+            * (self.a*R**2 + (3*z_eff+self.a) * (z_eff+self.a)**2)
+            / ((R**2 + (z_eff+self.a)**2)**(5/2) * z_eff**3)
+        )
+
+    def phi(self, R, z):
+        return -1 / np.sqrt(R**2 + (np.sqrt(z**2 + self.b**2) + self.a)**2)
+
+    def force(self, R, z):
+        phi3 = np.abs(self.phi(R, z))**3
+        F_R = -R * phi3
+        F_z = -z * (1 + self.a/np.sqrt(z**2 + self.b**2)) * phi3
+        return F_R, F_z
+
+
+def force_residuals(phi_nn, q, mn_disk, batch_size=256):
+    @tf.function
+    def dphi_dq_batch(q_batch):
+        with tf.GradientTape() as g:
+            g.watch(q_batch)
+            phi = phi_nn(q_batch)
+        dphi_dq_batch = g.gradient(phi, q_batch)
+        return dphi_dq_batch
+
+    F = np.empty(q.shape, dtype='f8')
+    n_batches = int(np.ceil(q.shape[0]/batch_size))
+    bar = progressbar.ProgressBar(max_value=n_batches)
+    for k in range(n_batches):
+        i0 = k * batch_size
+        i1 = (k+1) * batch_size
+        F[i0:i1] = -dphi_dq_batch(tf.constant(q[i0:i1].astype('f4'))).numpy()
+        bar.update(k+1)
+
+    #theta = np.arctan2(q[...,1], q[...,0])
+    q_mod = np.sqrt(q[...,0]**2 + q[...,1]**2)
+    cos_th = q[...,0] / q_mod
+    sin_th = q[...,1] / q_mod
+
+    F_R = cos_th * F[...,0] + sin_th * F[...,1]
+    F_phi = -sin_th * F[...,0] + cos_th * F[...,1]
+    F_z = F[...,2]
+
+    R = np.sqrt(q[...,0]**2 + q[...,1]**2)
+    F_R_true, F_z_true = mn_disk.force(R, q[...,2])
+    
+    dF = np.sqrt(
+        (F_R - F_R_true)**2
+      + (F_z - F_z_true)**2
+      + F_phi**2
+    )
+
+    return dF, {'R': (F_R_true, F_R), 'z': (F_z_true, F_z), 'phi': F_phi}
+
+
+def plot_force_residuals_slices(phi_nn, fname, x_max=5., grid_size=256):
+    # (x,y)-plane
+    x = np.linspace(-x_max, x_max, grid_size)
+    y = np.linspace(-x_max, x_max, grid_size)
+    xlim = (x[0], x[-1])
+    ylim = (y[0], y[-1])
+    x,y = np.meshgrid(x, y)
+    s = x.shape
+    x.shape = (x.size,)
+    y.shape = (y.size,)
+    xyz = np.stack([x,y,np.zeros_like(x)], axis=1)
+
+    mn_disk = MiyamotoNagaiDisk(1., 0.1)
+    dF,F = force_residuals(phi_nn, xyz, mn_disk)
+    F_mod = np.sqrt(F['R'][0]**2 + F['z'][0]**2)
+    dFR = F['R'][1] - F['R'][0]
+    dFz = F['z'][1] - F['z'][0]
+    F_mod.shape = s
+    dF.shape = s
+    dFR.shape = s
+    dFz.shape = s
+
+    fn_base, fn_ext = os.path.splitext(fname)
+
+    spec = [
+        (dF/F_mod,
+         'total_norm',
+         r'$\left| \vec{F}^{\ast}-\vec{F} \right|\ /\ \left|\vec{F}\right|$',
+         'viridis'
+        ),
+        (dF,
+         'total',
+         r'$\left| \vec{F}^{\ast}-\vec{F} \right|$',
+         'viridis'
+        ),
+        (dFR,
+         'R',
+         r'$F^{\ast}_R-F_R$',
+         'bwr_r'
+        ),
+        (dFz,
+         'z',
+         r'$F^{\ast}_z-F_z$',
+         'bwr_r'
+        )
+    ]
+
+    for img,desc,label,cmap in spec:
+        kw = dict(extent=xlim+ylim, cmap=cmap)
+        if cmap == 'viridis':
+            kw['vmin'] = 0.
+        elif cmap == 'bwr_r':
+            vmax = 1.1 * np.percentile(img, 99.)
+            kw['vmax'] = vmax
+            kw['vmin'] = -vmax
+
+        fig = plt.figure(figsize=(7,5.6), dpi=200)
+
+        fig.subplots_adjust(
+            left=0.10, right=0.92,
+            bottom=0.10, top=0.92
+        )
+
+        ax = fig.add_subplot(1,1,1)
+        im = ax.imshow(img, **kw)
+        #ax.set_title(r'$\mathrm{Force\ residuals}$', pad=2)
+        ax.set_xlabel(r'$x$', labelpad=-1)
+        ax.set_ylabel(r'$y$', labelpad=-2)
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+
+        cb = fig.colorbar(
+            im, ax=ax,
+            label=label
+        )
+
+        fig.savefig(f'{fn_base}_{desc}{fn_ext}', dpi=250)
+        plt.close(fig)
+
+
+def plot_force_residuals(phi_nn, df_data, fname):
+    mn_disk = MiyamotoNagaiDisk(1., 0.1)
+    dF,F = force_residuals(phi_nn, df_data['eta'][:,:3], mn_disk)
+
+    fig = plt.figure(figsize=(8,8), dpi=200)
+
+    fig.suptitle(r'$\mathrm{Force\ residuals}$')
+    fig.subplots_adjust(
+        left=0.12, right=0.88,
+        bottom=0.10, top=0.92,
+        wspace=0.1, hspace=0.2
+    )
+
+    ax = fig.add_subplot(2,2,1)
+    xlim = np.percentile(F['R'][0], [0., 100.])
+    w = xlim[1] - xlim[0]
+    xlim = (xlim[0]-0.2*w, xlim[1]+0.2*w)
+    #ax.scatter(*F['R'], s=2, alpha=0.01, edgecolors='none')
+    ax.hexbin(*F['R'], extent=xlim+xlim, lw=0.2, gridsize=200, bins='log')
+    ax.plot(xlim, xlim, c='w', lw=1., alpha=0.2)
+    ax.set_xlim(xlim)
+    ax.set_ylim(xlim)
+    ax.set_xlabel(r'$F_{R}$')
+    ax.set_ylabel(r'$F_{R}^{\ast}$')
+    ax.xaxis.set_major_locator(MaxNLocator(4))
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.yaxis.set_major_locator(MaxNLocator(4))
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+
+    ax = fig.add_subplot(2,2,2)
+    xlim = np.percentile(F['z'][0], [0., 100.])
+    w = xlim[1] - xlim[0]
+    xlim = (xlim[0]-0.2*w, xlim[1]+0.2*w)
+    #ax.scatter(*F['z'], s=2, alpha=0.01, edgecolors='none')
+    ax.hexbin(*F['z'], extent=xlim+xlim, lw=0.2, gridsize=200, bins='log')
+    ax.plot(xlim, xlim, c='w', lw=1., alpha=0.2)
+    ax.set_xlim(xlim)
+    ax.set_ylim(xlim)
+    ax.set_xlabel(r'$F_{z}$')
+    ax.set_ylabel(r'$F_{z}^{\ast}$')
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position('right')
+    ax.xaxis.set_major_locator(MaxNLocator(4))
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.yaxis.set_major_locator(MaxNLocator(4))
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+
+    ax = fig.add_subplot(2,2,3)
+    vmax = 1.5 * np.percentile(np.abs(F['phi']), 99.)
+    ax.hist(F['phi'], bins=101, range=(-vmax, vmax), density=True)
+    ax.set_xlabel(r'$F_{\varphi}^{\ast}$')
+
+    ax = fig.add_subplot(2,2,4)
+    ax.hist(dF, bins=100, density=True)
+    ax.set_xlabel(r'$\left| \vec{F}^{\ast} - \vec{F} \right|$')
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position('right')
+
+    fig.savefig(fname, dpi=250)
+
+
+def plot_phi_slices(phi_nn, fname,
+                    x_max=5., z_max=1., grid_size=30):
+    fig = plt.figure(figsize=(10,8), dpi=200)
+    gs = GridSpec(3,3, height_ratios=[1,0.5,0.5])
+    fig.subplots_adjust(
+        bottom=0.06, top=0.96,
+        left=0.06, right=0.98,
+        wspace=0.05, hspace=0.25
+    )
+    ax_phi_xy = fig.add_subplot(gs[0,0])
+    ax_rho_xy = fig.add_subplot(gs[0,1])
+    ax_lnrho_xy = fig.add_subplot(gs[0,2])
+    ax_phi_xz = fig.add_subplot(gs[1,0])
+    ax_rho_xz = fig.add_subplot(gs[1,1])
+    ax_lnrho_xz = fig.add_subplot(gs[1,2])
+    ax_phi_Rz = fig.add_subplot(gs[2,0])
+    ax_rho_Rz = fig.add_subplot(gs[2,1])
+    ax_lnrho_Rz = fig.add_subplot(gs[2,2])
+
+    # (x,y)-plane
+    x = np.linspace(-x_max, x_max, 2*grid_size+1)
+    y = np.linspace(-x_max, x_max, 2*grid_size+1)
+    xlim = (x[0], x[-1])
+    ylim = (y[0], y[-1])
+    x,y = np.meshgrid(x, y)
+    s = x.shape
+    x.shape = (x.size,)
+    y.shape = (y.size,)
+    xyz = np.stack([x,y,np.zeros_like(x)], axis=1)
+    q_grid = tf.constant(xyz.astype('f4'))
+
+    phi,_,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+        phi_nn, q_grid,
+        return_phi=True
+    )
+    phi_img = np.reshape(phi.numpy(), s)
+    rho_img = np.reshape(d2phi_dq2.numpy() / (4*np.pi), s)
+    ax_phi_xy.imshow(phi_img, extent=xlim+ylim)
+    ax_phi_xy.set_title(r'$\Phi$')
+    ax_phi_xy.set_xlabel(r'$x$', labelpad=-1)
+    ax_phi_xy.set_ylabel(r'$y$', labelpad=-2)
+    ax_phi_xy.set_xlim(xlim)
+    ax_phi_xy.set_ylim(ylim)
+
+    ax_rho_xy.set_title(r'$\rho$')
+    ax_rho_xy.imshow(rho_img, vmin=0., extent=xlim+ylim)
+    ax_rho_xy.set_xlabel(r'$x$', labelpad=-1)
+    ax_rho_xy.set_yticklabels([])
+    ax_rho_xy.set_xlim(xlim)
+    ax_rho_xy.set_ylim(ylim)
+    ax_rho_xy.tick_params(axis='y', which='both', right=True, left=False)
+
+    ax_lnrho_xy.set_title(r'$\ln \rho$')
+    ax_lnrho_xy.imshow(np.log(rho_img), extent=xlim+ylim)
+    ax_lnrho_xy.set_xlabel(r'$x$', labelpad=-1)
+    ax_lnrho_xy.set_yticklabels([])
+    ax_lnrho_xy.set_xlim(xlim)
+    ax_lnrho_xy.set_ylim(ylim)
+    ax_lnrho_xy.tick_params(axis='y', which='both', right=True, left=False)
+
+    # (x,z)-plane
+    x = np.linspace(-x_max, x_max, 2*grid_size+1)
+    z = np.linspace(-z_max, z_max, grid_size+1)
+    xlim = (x[0], x[-1])
+    ylim = (z[0], z[-1])
+    x,z = np.meshgrid(x, z)
+    s = x.shape
+    x.shape = (x.size,)
+    z.shape = (z.size,)
+    xyz = np.stack([x,np.zeros_like(x),z], axis=1)
+    q_grid = tf.constant(xyz.astype('f4'))
+
+    phi,_,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+        phi_nn, q_grid,
+        return_phi=True
+    )
+    phi_img = np.reshape(phi.numpy(), s)
+    rho_img = np.reshape(d2phi_dq2.numpy() / (4*np.pi), s)
+
+    ax_phi_xz.imshow(phi_img, extent=xlim+ylim, aspect='auto')
+    ax_phi_xz.set_xlabel(r'$x$', labelpad=-1)
+    ax_phi_xz.set_ylabel(r'$z$', labelpad=-2)
+    ax_phi_xz.set_xlim(xlim)
+    ax_phi_xz.set_ylim(ylim)
+
+    ax_rho_xz.imshow(rho_img, vmin=0., extent=xlim+ylim, aspect='auto')
+    ax_rho_xz.set_xlabel(r'$x$', labelpad=-1)
+    ax_rho_xz.set_yticklabels([])
+    ax_rho_xz.set_xlim(xlim)
+    ax_rho_xz.set_ylim(ylim)
+    ax_rho_xz.tick_params(axis='y', which='both', right=True, left=False)
+
+    ax_lnrho_xz.imshow(np.log(rho_img), extent=xlim+ylim, aspect='auto')
+    ax_lnrho_xz.set_xlabel(r'$x$', labelpad=-1)
+    ax_lnrho_xz.set_yticklabels([])
+    ax_lnrho_xz.set_xlim(xlim)
+    ax_lnrho_xz.set_ylim(ylim)
+    ax_lnrho_xz.tick_params(axis='y', which='both', right=True, left=False)
+
+    ## (y,z)-plane
+    #y = np.linspace(-x_max, x_max, 2*grid_size+1)
+    #z = np.linspace(-0.2*x_max, 0.2*x_max, grid_size+1)
+    #xlim = (y[0], y[-1])
+    #ylim = (z[0], z[-1])
+    #y,z = np.meshgrid(y, z)
+    #s = y.shape
+    #y.shape = (y.size,)
+    #z.shape = (z.size,)
+    #xyz = np.stack([np.zeros_like(y),y,z], axis=1)
+    #q_grid = tf.constant(xyz.astype('f4'))
+
+    #phi,_,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+    #    phi_nn, q_grid,
+    #    return_phi=True
+    #)
+    #phi_img = np.reshape(phi.numpy(), s)
+    #rho_img = np.reshape(d2phi_dq2.numpy() / (4*np.pi), s)
+
+    #ax_phi_yz.imshow(phi_img, extent=xlim+ylim, aspect='auto')
+    #ax_phi_yz.set_xlabel(r'$y$', labelpad=-1)
+    #ax_phi_yz.set_ylabel(r'$z$', labelpad=-2)
+    #ax_phi_yz.set_xlim(xlim)
+    #ax_phi_yz.set_ylim(ylim)
+
+    ##ax_rho_yz.imshow(np.log(rho_img), extent=xlim+ylim, aspect='auto')
+    #ax_rho_yz.imshow(rho_img, vmin=0., extent=xlim+ylim, aspect='auto')
+    #ax_rho_yz.set_xlabel(r'$y$', labelpad=-1)
+    #ax_rho_yz.set_yticklabels([])
+    #ax_phi_yz.set_xlim(xlim)
+    #ax_phi_yz.set_ylim(ylim)
+    #ax_rho_yz.tick_params(axis='y', which='both', right=True, left=False)
+
+    # (R,z)-plane (averaged over azimuth)
+    theta = np.linspace(0., 2*np.pi, 32+1)[:-1]
+    img_shape = (grid_size+1, 2*grid_size+1)
+    phi_img = np.zeros(img_shape, dtype='f8')
+    rho_img = np.zeros(img_shape, dtype='f8')
+    for th in theta:
+        R = np.linspace(-x_max, x_max, 2*grid_size+1)
+        z = np.linspace(-z_max, z_max, grid_size+1)
+        xlim = (R[0], R[-1])
+        ylim = (z[0], z[-1])
+        R,z = np.meshgrid(R, z)
+        s = R.shape
+        R.shape = (R.size,)
+        z.shape = (z.size,)
+        xyz = np.stack([np.cos(th)*R,np.sin(th)*R,z], axis=1)
+        q_grid = tf.constant(xyz.astype('f4'))
+
+        phi,_,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+            phi_nn, q_grid,
+            return_phi=True
+        )
+        phi_img += np.reshape(phi.numpy(), s)
+        rho_img += np.reshape(d2phi_dq2.numpy() / (4*np.pi), s)
+    phi_img /= len(theta)
+    rho_img /= len(theta)
+
+    ax_phi_Rz.imshow(phi_img, extent=xlim+ylim, aspect='auto')
+    ax_phi_Rz.set_xlabel(r'$R$', labelpad=-1)
+    ax_phi_Rz.set_ylabel(r'$z$', labelpad=-2)
+    ax_phi_Rz.set_xlim(xlim)
+    ax_phi_Rz.set_ylim(ylim)
+
+    ax_rho_Rz.imshow(rho_img, vmin=0., extent=xlim+ylim, aspect='auto')
+    ax_rho_Rz.set_xlabel(r'$R$', labelpad=-1)
+    ax_rho_Rz.set_yticklabels([])
+    ax_rho_Rz.set_xlim(xlim)
+    ax_rho_Rz.set_ylim(ylim)
+    ax_rho_Rz.tick_params(axis='y', which='both', right=True, left=False)
+
+    ax_lnrho_Rz.imshow(np.log(rho_img), extent=xlim+ylim, aspect='auto')
+    ax_lnrho_Rz.set_xlabel(r'$R$', labelpad=-1)
+    ax_lnrho_Rz.set_yticklabels([])
+    ax_lnrho_Rz.set_xlim(xlim)
+    ax_lnrho_Rz.set_ylim(ylim)
+    ax_lnrho_Rz.tick_params(axis='y', which='both', right=True, left=False)
+
+    for a in (ax_phi_xy,ax_rho_xy,ax_lnrho_xy):
+        a.xaxis.set_major_locator(MultipleLocator(4.))
+        a.xaxis.set_minor_locator(AutoMinorLocator())
+        a.yaxis.set_major_locator(MultipleLocator(4.))
+        a.yaxis.set_minor_locator(AutoMinorLocator())
+
+    for a in (ax_phi_xz,ax_rho_xz,ax_lnrho_xz,ax_phi_Rz,ax_rho_Rz,ax_lnrho_Rz):
+        a.xaxis.set_major_locator(MultipleLocator(4.))
+        a.xaxis.set_minor_locator(AutoMinorLocator())
+        a.yaxis.set_major_locator(MaxNLocator(2))
+        a.yaxis.set_minor_locator(AutoMinorLocator())
+
+    fig.savefig(fname, dpi=250)
+    plt.close(fig)
+
+
 def plot_phi(phi_nn, df_data, fname,
              r_max=13., x_max=5., r_trunc=None,
              n_samples=1024, grid_size=51):
-    plummer_sphere = toy_systems.PlummerSphere()
-    q,_ = plummer_sphere.sample_df(n_samples)
+    idx = np.arange(df_data['eta'].shape[0])
+    np.random.shuffle(idx)
+    idx = idx[:n_samples]
+    q = df_data['eta'][idx,:3]
+    R = np.sqrt(q[:,0]**2 + q[:,1]**2)
+    z = q[:,2]
     q = tf.constant(q.astype('f4'))
 
     fig = plt.figure(figsize=(9,2.5), dpi=200)
@@ -640,82 +888,38 @@ def plot_phi(phi_nn, df_data, fname,
     ax2 = fig.add_subplot(gs_right[0,0])
     ax3 = fig.add_subplot(gs_right[0,1])
 
-    # phi vs. r
-    r = tf.sqrt(tf.reduce_sum(q**2, axis=1))
-    phi_r = phi_nn(q).numpy()
-    phi_theory_r = plummer_sphere.phi(r.numpy())
-    if r_trunc is None:
-        phi_0 = np.median(phi_r - phi_theory_r)
-    else:
-        idx = (r.numpy() < r_trunc)
-        phi_0 = np.median(phi_r[idx] - phi_theory_r[idx])
-
-    # rho vs. r
-    # rho_theory_r = plummer_sphere.rho(r.numpy())
-    _, d2phi_dq2 = potential_tf.calc_phi_derivatives(phi_nn, q)
-    rho_r = d2phi_dq2.numpy() / (4.*np.pi)
-
-    r_range = np.logspace(-1.1, np.log10(r_max), 100, base=10.)
-    # r_range = np.linspace(0.0, r_max, 100)
-    phi_theory_r = plummer_sphere.phi(r_range)
+    # Truth vs. estimate
+    phi_est = phi_nn(q).numpy()
+    phi_theory = phi_Miyamoto_Nagai(R, z, 1., 0.1)
+    phi_0 = np.median(phi_theory - phi_est)
     ax_phisc.scatter(
-        r, phi_r-phi_0,
+        phi_theory, phi_est+phi_0,
         alpha=0.08,
         s=3,
-        label=r'$\mathrm{Approximation}$'
+        edgecolors='none'
     )
-    ax_phisc.semilogx(
-        r_range,
-        phi_theory_r,
-        c='g',
-        alpha=0.5,
-        label=r'$\mathrm{Theory}$'
-    )
-    ax_phisc.set_xlabel(r'$r$', labelpad=-1)
-    ax_phisc.set_ylabel(r'$\Phi$', labelpad=0)
-    ax_phisc.set_xticks([0.01, 0.1, 1., 10.])
-    ax_phisc.set_xlim(10**(-1.1), r_max)
-    ax_phisc.set_ylim(-1.1, 0.1)
-    ax_phisc.yaxis.set_major_locator(MultipleLocator(0.5))
-    ax_phisc.yaxis.set_minor_locator(AutoMinorLocator())
+    xlim = np.min(phi_theory), np.max(phi_theory)
+    ax_phisc.plot(xlim, xlim, c='k', alpha=0.25, lw=1.)
+    ax_phisc.set_xlim(xlim)
+    ax_phisc.set_ylim(xlim)
+    ax_phisc.set_xlabel(r'$\Phi$', labelpad=-1)
+    ax_phisc.set_ylabel(r'$\Phi_{\theta^{\ast}}$', labelpad=0)
 
-    leg = ax_phisc.legend(loc='upper left', fontsize=8)
-    for lh in leg.legendHandles:
-        lh.set_alpha(1)
-
-    rho_theory_r = plummer_sphere.rho(r_range)
+    _, d2phi_dq2 = potential_tf.calc_phi_derivatives(phi_nn, q)
+    rho_est = d2phi_dq2.numpy() / (4.*np.pi)
+    rho_theory = rho_Miyamoto_Nagai(R, z, 1., 0.1)
     ax_rhosc.scatter(
-        r, rho_r,
+        rho_theory, rho_est,
         alpha=0.08,
         s=3,
-        label=r'$\mathrm{Approximation}$'
+        edgecolors='none'
     )
-    ax_rhosc.semilogx(
-        r_range,
-        rho_theory_r,
-        c='g',
-        alpha=0.5,
-        label=r'$\mathrm{Theory}$'
-    )
-    ax_rhosc.set_xlabel(r'$r$', labelpad=-1)
-    ax_rhosc.set_ylabel(r'$\rho$', labelpad=1)
-    ax_rhosc.set_xticks([0.01, 0.1, 1., 10.])
-    ax_rhosc.set_xlim(10**(-1.1), r_max)
-    ax_rhosc.set_ylim(-0.1*rho_theory_r[0], 1.2*rho_theory_r[0])
-    ax_rhosc.axhline(0., c='k', alpha=0.5)
-    ax_rhosc.yaxis.set_major_locator(MultipleLocator(0.1))
-    ax_rhosc.yaxis.set_minor_locator(AutoMinorLocator())
-
-    leg = ax_rhosc.legend(loc='upper right', fontsize=8)
-    for lh in leg.legendHandles:
-        lh.set_alpha(1)
-
-    # Data near the xy-plane
-    #idx = (np.abs(df_data['eta'][:,2]) < 0.1)
-    #xy_data = df_data['eta'][idx,:2]
-    #r2_data = np.sum(xy_data**2, axis=1)
-    #idx = (r2_data > 9.)
-    #xy_data = xy_data[idx]
+    xlim = np.min(rho_theory), np.max(rho_theory)
+    ax_rhosc.plot(xlim, xlim, c='k', alpha=0.25, lw=1.)
+    ax_rhosc.set_xlim(xlim)
+    ax_rhosc.set_ylim(xlim)
+    ax_rhosc.set_xlabel(r'$\rho$', labelpad=-1)
+    ax_rhosc.set_ylabel(r'$\rho_{\theta^{\ast}}$', labelpad=0)
 
     # phi in (x,y)-plane
     x = np.linspace(-x_max, x_max, grid_size)
@@ -746,7 +950,7 @@ def plot_phi(phi_nn, df_data, fname,
     ax2.set_ylim(ylim)
 
     # log(rho) in (x,y)-plane
-    p_grid = tf.random.normal(q_grid.shape)
+    #p_grid = tf.random.normal(q_grid.shape)
     _,rho_img = potential_tf.calc_phi_derivatives(phi_nn, q_grid)
     rho_img = np.reshape(rho_img.numpy(), s)
     ax3.imshow(np.log(rho_img), extent=xlim+ylim)
@@ -865,6 +1069,12 @@ def main():
         help='Potential plot filename.'
     )
     parser.add_argument(
+        '--Phi-slices',
+        type=str,
+        default='plots/potential_slices.png',
+        help='Potential slices plot filename.'
+    )
+    parser.add_argument(
         '--flows-only',
         action='store_true',
         help='Only plot results for flows. Ignore potential.'
@@ -884,25 +1094,42 @@ def main():
     print('Loading DF data ...')
     df_data = load_df_data(args.input)
 
+    print('z statistics:')
+    z90,z99 = np.percentile(np.abs(df_data['eta'][:,2]), [90., 99.])
+    z_max = np.max(np.abs(df_data['eta'][:,2]))
+    z_std = np.std(df_data['eta'][:,2])
+    print(rf'  max: {z_max:.3f}')
+    print(rf'  99%: {z99:.3f}')
+    print(rf'  90%: {z90:.3f}')
+    print(rf'  std: {z_std:.3f}')
+    print('')
+
     if not args.flows_only:
         print('Loading potential model ...')
         phi_model = potential_tf.PhiNN.load(args.potential)
 
-        print('Plotting potential ...')
-        plot_phi(phi_model, df_data, args.Phi, r_trunc=args.r_max)
+        print('Plotting force residuals ...')
+        #plot_force_residuals(phi_model, df_data, 'plots/force_residuals.png')
+        plot_force_residuals_slices(phi_model, 'plots/force_residuals_slices.png')
+
+        #print('Plotting potential ...')
+        #plot_phi(phi_model, df_data, args.Phi, r_trunc=args.r_max)
+
+        #print('Plotting slices of potential ...')
+        #plot_phi_slices(
+        #    phi_model, args.Phi_slices,
+        #    grid_size=80, z_max=1.0
+        #)
 
     if not args.potential_only:
         print('Loading flow models ...')
         flows = load_flows(args.flows)
 
-        print('Plotting DF gradients ...')
-        plot_gradients(df_data, args.grad, r_max=args.r_max)
-
         print('Plotting flow trajectories ...')
         plot_flow_trajectories_multiple(flows, args.traj)
 
         print('Plotting slices through flows ...')
-        plot_flow_slices(flows, args.slice)
+        #plot_flow_slices(flows, args.slice)
 
         print('Plotting projections and histograms of flows ...')
         plot_flow_projections_ensemble(flows, args.proj, args.hist)

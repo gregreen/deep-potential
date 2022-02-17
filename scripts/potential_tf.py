@@ -38,7 +38,7 @@ def calc_df_deta(f_func, q, p):
     return f, df_dq, df_dp
 
 
-def calc_phi_derivatives(phi_func, q):
+def calc_phi_derivatives(phi_func, q, return_phi=False):
     # Calculate derivatives of the potential.
     # We have to use an unstacking and re-stacking trick,
     # which comes from https://github.com/xuzhiqin1990/laplacian/
@@ -59,6 +59,9 @@ def calc_phi_derivatives(phi_func, q):
     for di,qi in zip(dphi_dq_unstacked, q_unstacked):
         d2phi_dq2 += gg.gradient(di, qi)
 
+    if return_phi:
+        return phi, dphi_dq, d2phi_dq2
+    
     return dphi_dq, d2phi_dq2
 
 
@@ -100,6 +103,7 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
 def get_phi_loss_gradients(phi, params, q, p,
                            f=None, df_dq=None, df_dp=None,
                            lam=1., mu=0,
+                           xi=1., delf_delt_scale=1.,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
@@ -141,6 +145,9 @@ def get_phi_loss_gradients(phi, params, q, p,
             'If f is not provided, then df_dq and df_dp must be provided.'
         )
 
+    c = xi / delf_delt_scale
+    print(f'c = {c}')
+
     with tf.GradientTape() as g:
         g.watch(params)
 
@@ -164,7 +171,7 @@ def get_phi_loss_gradients(phi, params, q, p,
             df_dt = w * df_dt
 
         # Average over sampled points in phase space
-        likelihood = tf.math.asinh(tf.math.abs(df_dt))
+        likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
 
         if lam != 0:
             prior_neg = tf.math.asinh(
@@ -293,6 +300,7 @@ def train_potential(
             checkpoint_every=None,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
+            xi=1.,   # Scale above which outliers are suppressed
             lam=1.,  # Penalty for negative matter densities
             mu=0,    # Penalty for positive matter densities
             lr_init=1.e-3,
@@ -315,6 +323,16 @@ def train_potential(
     n_variables = sum([int(tf.size(param)) for param in phi_param])
     print(f'{n_variables} variables in the gravitational potential model.')
 
+    # Estimate typical scale of flows (with constant gravitational potential)
+    delf_delt_scale = np.percentile(
+        np.abs(np.sum(
+            df_data['eta'][:,n_dim:] * df_data['df_deta'][:,:n_dim],
+            axis=1
+        )),
+        50.
+    )
+    print(f'Using del(f)/del(t) ~ {delf_delt_scale}')
+
     # Optimizer
     n_steps = n_epochs * (n_samples // batch_size)
     print(f'{n_steps} steps planned.')
@@ -331,8 +349,8 @@ def train_potential(
     )
 
     # Set up batches of data
-    batches = data.repeat(n_epochs)
-    batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = data.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.repeat(n_epochs)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     @tf.function
@@ -350,6 +368,8 @@ def train_potential(
             q_b, p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
+            xi=xi,
+            delf_delt_scale=delf_delt_scale,
             lam=lam,
             mu=mu,
             weight_samples=False

@@ -30,8 +30,8 @@ from tensorflow_probability.python import math as tfp_math
 from tensorflow_probability.python.internal import prefer_static
 
 def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
-                             kinetic_reg=None, jacobian_reg=None,
-                             dv_dt_reg=None):
+                             kinetic_reg=0, jacobian_reg=0,
+                             dv_dt_reg=0):
     """Generates a function that computes `ode_fn` and trace of the jacobian.
 
     Augments provided `ode_fn` with explicit computation of the trace of the
@@ -62,9 +62,9 @@ def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
         ode_fn_with_time = lambda x: ode_fn(time, x)
         batch_shape = [prefer_static.size0(state)]
 
-        if dv_dt_reg is not None:
+        if dv_dt_reg > 0:
             watched_vars = [time, state]
-        elif (kinetic_reg is not None) or (jacobian_reg is not None):
+        elif (kinetic_reg > 0) or (jacobian_reg > 0):
             watched_vars = [state]
         else:
             watched_vars = []
@@ -84,21 +84,24 @@ def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
         trace_value = diag_jac
 
         # Calculate regularization terms
-        if (dv_dt_reg is not None) or (jacobian_reg is not None):
+        if (dv_dt_reg > 0) or (jacobian_reg > 0):
             delv_delx = g.batch_jacobian(state_time_derivative, state)
 
-        if dv_dt_reg is not None:
+        if dv_dt_reg > 0:
+            print(f'Using dv/dt regularization: {dv_dt_reg}.')
             delv_delt = g.gradient(state_time_derivative, time)
             vnabla_v = tf.linalg.matvec(delv_delx, state_time_derivative)
             dv_dt = delv_delt + vnabla_v
             #print('dv/dt :', dv_dt)
             trace_value = trace_value - dv_dt_reg * dv_dt**2
 
-        if kinetic_reg is not None:
+        if kinetic_reg > 0:
+            print(f'Using kinetic regularization: {kinetic_reg}.')
             #print('v :', state_time_derivative.shape)
             trace_value = trace_value - kinetic_reg * state_time_derivative**2
 
-        if jacobian_reg is not None:
+        if jacobian_reg > 0:
+            print(f'Using Jacobian regularization: {jacobian_reg}.')
             jacobian_norm2 = tf.math.reduce_sum(delv_delx**2, axis=-1)
             #print('|J|^2 :', jacobian_norm2.shape)
             trace_value = trace_value - jacobian_reg * jacobian_norm2
@@ -154,25 +157,17 @@ class ForceFieldModel(snt.Module):
 
 
 class FFJORDFlow(tfd.TransformedDistribution):
-    def __init__(self, n_dim, n_hidden, hidden_size,
-                 reg_kw=dict(), atol=1.e-5, name='DF'):
+    def __init__(self, n_dim, n_hidden, hidden_size, n_bij,
+                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
+        self._n_bij = n_bij
         self._name = name
 
-        # Force field guiding transformation
-        self.dz_dt = ForceFieldModel(n_dim, n_hidden, hidden_size)
+        # ODE solver
+        self.ode_solver = tfp.math.ode.DormandPrince(rtol=rtol, atol=atol)
 
-        self.ode_solver = tfp.math.ode.DormandPrince(atol=atol)
-
-        #if exact:
-        #    trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
-        #else:
-        #    # Stochastic estimate of the Jacobian. Better scaling with
-        #    # number of dimensions, but noisy.
-        #    trace_augmentation_fn = tfb.ffjord.trace_jacobian_hutchinson
-        
         if len(reg_kw):
             print('Using regularization.')
             def trace_augmentation_fn(*args):
@@ -180,12 +175,22 @@ class FFJORDFlow(tfd.TransformedDistribution):
         else:
             trace_augmentation_fn = tfb.ffjord.trace_jacobian_exact
 
+        # Force fields guiding transformations
+        self.dz_dt = [
+            ForceFieldModel(n_dim, n_hidden, hidden_size)
+            for k in range(n_bij)
+        ]
+
         # Initialize bijector
-        bij = tfb.FFJORD(
-            state_time_derivative_fn=self.dz_dt,
-            ode_solve_fn=self.ode_solver.solve,
-            trace_augmentation_fn=trace_augmentation_fn
-        )
+        bij = [
+            tfb.FFJORD(
+                state_time_derivative_fn=self.dz_dt[k],
+                ode_solve_fn=self.ode_solver.solve,
+                trace_augmentation_fn=trace_augmentation_fn
+            )
+            for k in range(n_bij)
+        ]
+        bij = tfb.Chain(bij)
 
         # Multivariate normal base distribution
         base_dist = tfd.MultivariateNormalDiag(
@@ -205,33 +210,19 @@ class FFJORDFlow(tfd.TransformedDistribution):
         self.n_var = sum([int(tf.size(v)) for v in self.trainable_variables])
         print(f'# of trainable variables: {self.n_var}')
 
-    def calc_path_length(self, x, forward=True):
-        if forward:
-            dxs_dt = self.dz_dt.augmented_field
-        else:
-            dxs_dt = lambda t,x: -self.dz_dt.augmented_field(1.-t,x)
-
-        # Concatenate the initial path length (0) to x
-        xs0 = tf.concat([x, tf.zeros([self._n_dim,1])], 1)
-
-        # Solve the trajectory of x, keeping track of the path length
-        res = self.ode_solver.solve(
-            self.dz_dt.augmented_field,
-            0., xs0,
-            solution_times=[1.]
-        )
-
-        # Extract the final position and the path length
-        xs_T = tf.squeeze(res.states, axis=0)
-        x_T,s_T = tf.split(xs_T, [self._n_dim,1], axis=1)
-
-        return x_T, s_T
-
     def calc_trajectories(self, n_samples, t_eval):
+        if t_eval[-1] < 1.:
+            t_eval = np.hstack([t_eval, 1.])
+
         x0 = self.distribution.sample([n_samples])
-        res = self.ode_solver.solve(self.dz_dt, 0, x0, t_eval)
+
+        res = []
+        for dzdt in self.dz_dt:
+            res.append(self.ode_solver.solve(dzdt, 0, x0, t_eval))
+            x0 = res[-1].states[-1]
+
         return res
-    
+
     def save(self, fname_base):
         # Save variables
         checkpoint = tf.train.Checkpoint(flow=self)
@@ -242,6 +233,7 @@ class FFJORDFlow(tfd.TransformedDistribution):
             n_dim=self._n_dim,
             n_hidden=self._n_hidden,
             hidden_size=self._hidden_size,
+            n_bij=self._n_bij,
             name=self._name
         )
         with open(fname_out+'_spec.json', 'w') as f:
@@ -268,8 +260,12 @@ def train_flow(flow, data,
                optimizer=None,
                batch_size=32,
                n_epochs=1,
+               lr_type='step',
                lr_init=2.e-2,
                lr_final=1.e-4,
+               lr_patience=32,
+               lr_min_delta=0.01,
+               warmup_proportion=0.1,
                checkpoint_every=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
@@ -279,9 +275,10 @@ def train_flow(flow, data,
     Inputs:
       flow (NormalizingFlow): Normalizing flow to be trained.
       data (tf.Tensor): Observed points. Shape = (# of points, # of dim).
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer to use.
+      optimizer (tf.keras.optimizers.Optimizer or str): Optimizer to use.
           Defaults to the Rectified Adam implementation from
-          tensorflow_addons.
+          tensorflow_addons. If a string, will try to interpret and
+          construct optimizer.
       batch_size (int): Number of points per training batch. Defaults to 32.
       n_epochs (int): Number of training epochs. Defaults to 1.
       checkpoint_dir (str): Directory for checkpoints. Defaults to
@@ -296,37 +293,59 @@ def train_flow(flow, data,
 
     n_samples = data.shape[0]
     batches = tf.data.Dataset.from_tensor_slices(data)
-    batches = batches.repeat(n_epochs)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.repeat(n_epochs+1)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     n_steps = n_epochs * n_samples // batch_size
 
-    if optimizer is None:
-        lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-            lr_init,
-            n_steps,
-            lr_final/lr_init,
-            staircase=False
-        )
-        opt = tfa.optimizers.RectifiedAdam(
-            lr_schedule,
-            total_steps=n_steps,
-            warmup_proportion=0.1
-        )
+    if isinstance(optimizer, str):
+        if lr_type == 'exponential':
+            lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+                lr_init,
+                n_steps,
+                lr_final/lr_init,
+                staircase=False
+            )
+        elif lr_type == 'step':
+            lr_schedule = lr_init
+            steps_since_decline = 0
+        else:
+            raise ValueError(
+                f'Unknown lr_type: "{lr_type}" ("exponential" or "step")'
+            )
+        if optimizer == 'RAdam':
+            opt = tfa.optimizers.RectifiedAdam(
+                lr_schedule,
+                total_steps=n_steps,
+                warmup_proportion=warmup_proportion
+            )
+        elif optimizer == 'SGD':
+            opt = keras.optimizers.SGD(
+                learning_rate=lr_schedule,
+                momentum=0.5
+            )
+        else:
+            raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
     else:
         opt = optimizer
 
+    print(f'Optimizer: {opt}')
+
     loss_history = []
-    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+    lr_history = []
 
     t0 = time()
 
     # Set up checkpointing
     step = tf.Variable(0, name='step')
+    loss_min = tf.Variable(np.inf, name='loss_min')
     checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
     if checkpoint_every is not None:
-        checkpoint = tf.train.Checkpoint(opt=opt, flow=flow, step=step)
+        checkpoint = tf.train.Checkpoint(
+            opt=opt, flow=flow,
+            step=step, loss_min=loss_min
+        )
 
         # Look for latest extisting checkpoint
         latest = tf.train.latest_checkpoint(checkpoint_dir)
@@ -334,6 +353,12 @@ def train_flow(flow, data,
             print(f'Restoring from checkpoint {latest} ...')
             checkpoint.restore(latest)
             print(f'Beginning from step {int(step)}.')
+
+            # Try to load loss history
+            loss_fname = f'{latest}_loss.txt'
+            loss_lr = np.loadtxt(loss_fname)
+            loss_history = loss_lr[:,0].tolist()
+            lr_history = loss_lr[:,1].tolist()
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -350,13 +375,18 @@ def train_flow(flow, data,
             g.watch(variables)
             loss = -tf.reduce_mean(flow.log_prob(batch))
         grads = g.gradient(loss, variables)
-        #tf.print([(v.name,tf.norm(v)) for v in grads])
+        #tf.print([(v.name,tf.norm(dv)) for v,dv in zip(variables,grads)])
         grads,global_norm = tf.clip_by_global_norm(grads, 10.)
+        #grads,global_norm = tf.clip_by_global_norm(grads, 100.)
         #tf.print('\nglobal_norm =', global_norm)
         #tf.print([(v.name,tf.norm(v)) for v in grads])
+        #tf.print('loss =', loss)
         opt.apply_gradients(zip(grads, variables))
         return loss
 
+    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+
+    # Main training loop
     for i,y in enumerate(batches, int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
@@ -366,7 +396,33 @@ def train_flow(flow, data,
         loss = training_step(y)
 
         loss_history.append(float(loss))
+        lr_history.append(float(opt._decayed_lr(tf.float32)))
+
+        # Progress bar
         update_bar(i)
+
+        # Adjust learning rate?
+        if lr_type == 'step':
+            n_smooth = max(lr_patience//8, 1)
+            if len(loss_history) >= n_smooth:
+                loss_avg = np.mean(loss_history[-n_smooth:])
+            else:
+                loss_avg = np.inf
+
+            if loss_avg < loss_min - lr_min_delta:
+                steps_since_decline = 0
+                print(f'New minimum loss: {loss_avg}.')
+                loss_min.assign(loss_avg)
+            elif steps_since_decline >= lr_patience:
+                # Reduce learning rate
+                old_lr = float(opt.lr)
+                new_lr = 0.5 * old_lr
+                print(f'Reducing learning rate from {old_lr} to {new_lr}.')
+                print(f'   (loss threshold: {float(loss_min-lr_min_delta)})')
+                opt.lr.assign(new_lr)
+                steps_since_decline = 0
+            else:
+                steps_since_decline += 1
 
         if not traced:
             # Get time after gradients function is first traced
@@ -375,8 +431,14 @@ def train_flow(flow, data,
 
         # Checkpoint
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+            print('Checkpointing ...')
             step.assign(i+1)
-            checkpoint.save(checkpoint_prefix)
+            chkpt_fname = checkpoint.save(checkpoint_prefix)
+            print(f'  --> {chkpt_fname}')
+            loss_lr = np.stack([loss_history, lr_history], axis=1)
+            loss_fname = f'{chkpt_fname}_loss.txt'
+            header = f'{"loss": >16s} {"learning_rate": >18s}'
+            np.savetxt(loss_fname, loss_lr, header=header, fmt='%.12e')
 
     t2 = time()
     loss_avg = np.mean(loss_history[-50:])
@@ -388,14 +450,14 @@ def train_flow(flow, data,
     # Save the trained model
     #checkpoint = tf.train.Checkpoint(flow=flow)
     #checkpoint.save(checkpoint_prefix + '_final')
-    
-    return loss_history
+
+    return loss_history, lr_history
 
 
 def save_flow(flow, fname_base):
     checkpoint = tf.train.Checkpoint(flow=flow)
     fname_out = checkpoint.save(fname_base)
-    
+
     # Save the specs of the neural network
     d = dict(
         n_dim=self._n_dim,
