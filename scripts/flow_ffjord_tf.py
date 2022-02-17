@@ -222,7 +222,7 @@ class FFJORDFlow(tfd.TransformedDistribution):
             x0 = res[-1].states[-1]
 
         return res
-    
+
     def save(self, fname_base):
         # Save variables
         checkpoint = tf.train.Checkpoint(flow=self)
@@ -400,7 +400,7 @@ def train_flow(flow, data,
 
         # Progress bar
         update_bar(i)
-        
+
         # Adjust learning rate?
         if lr_type == 'step':
             n_smooth = max(lr_patience//8, 1)
@@ -450,14 +450,14 @@ def train_flow(flow, data,
     # Save the trained model
     #checkpoint = tf.train.Checkpoint(flow=flow)
     #checkpoint.save(checkpoint_prefix + '_final')
-    
-    return loss_history
+
+    return loss_history, lr_history
 
 
 def save_flow(flow, fname_base):
     checkpoint = tf.train.Checkpoint(flow=flow)
     fname_out = checkpoint.save(fname_base)
-    
+
     # Save the specs of the neural network
     d = dict(
         n_dim=self._n_dim,

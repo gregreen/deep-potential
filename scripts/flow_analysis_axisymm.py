@@ -114,7 +114,7 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
 
         ax.set_xlabel(l)
         ax.set_yticklabels([])
-    
+
     ax_arr.flat[0].legend()
 
     if loss is not None:
@@ -146,18 +146,19 @@ def plot_2d_marginal(cyl_train, cyl_sample,
                      fig_dir, dim1, dim2):
     labels = [
         '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$',
-        '$x$', '$v_x', '$y$', '$v_y$'
+        '$x$', '$y$', '$v_x$', '$v_y$'
     ]
     keys = [
         'R', 'z', 'phi', 'vR', 'vz', 'vT',
-        'x', 'y', 'vx', 'vz'
+        'x', 'y', 'vx', 'vy'
     ]
 
     def extract_dims(dim):
         if dim in keys[:-4]:
             return cyl_train[dim], cyl_sample[dim]
         elif dim in keys[-4:]:
-            return eta_train[dim], eta_sample[dim]
+            d = {'x':0, 'y':1, 'vx':3, 'vy':4}[dim]
+            return eta_train[:,d], eta_sample[:,d]
 
     x_train, x_sample = extract_dims(dim1)
     y_train, y_sample = extract_dims(dim2)
@@ -172,7 +173,7 @@ def plot_2d_marginal(cyl_train, cyl_sample,
     )
 
     lims = []
-    for i,z in enumerate([x_train,y_train]):
+    for i,(k,z) in enumerate([(dim1,x_train),(dim2,y_train)]):
         xlim = np.percentile(z, [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]

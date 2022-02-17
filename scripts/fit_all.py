@@ -67,7 +67,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
         flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, n_bij, reg_kw=reg)
         flow_list.append(flow)
-        
+
         flow_fname = fname_pattern.format(i)
 
         checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
@@ -75,7 +75,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
         lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
-        loss_history = flow_ffjord_tf.train_flow(
+        loss_history, lr_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
@@ -89,7 +89,9 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
         flow.save(flow_fname)
 
-        utils.append_to_loss_history(loss_fname, f'flow_{i}', loss_history)
+        loss_lr = np.stack([loss_history, lr_history], axis=1)
+        header = f'{"loss": >16s} {"learning_rate": >18s}'
+        np.savetxt(loss_fname.format(i), loss_lr, header=header, fmt='%.12e')
 
         fig = utils.plot_loss(loss_history)
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
@@ -400,7 +402,7 @@ def main():
     )
     parser.add_argument(
         '--loss-history',
-        type=str, default='data/loss_history.txt',
+        type=str, default='data/loss_history_{:02d}.txt',
         help='Filename for loss history data.'
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
