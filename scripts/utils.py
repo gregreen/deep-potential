@@ -29,55 +29,81 @@ def get_training_progressbar_fn(n_steps, loss_history, opt):
     return update_progressbar
 
 
-def plot_loss(loss_history, smoothing=100):
-    w = np.kaiser(2*smoothing,5)
-    w /= np.sum(w)
-    loss_conv = np.hstack([
-        np.repeat(loss_history[0], smoothing),
-        np.array(loss_history),
-        np.array(loss_history)[-smoothing:][::-1]
-    ])
-    loss_conv = np.convolve(loss_conv, w, mode='valid')
+def plot_loss(loss_hist, val_loss_hist=None, lr_hist=None, smoothing='auto'):
+    if smoothing == 'auto':
+        n_smooth = np.clip(len(loss_hist)//16, 4, 128)
+    else:
+        n_smooth = smoothing
 
-    fig,(ax0,ax1) = plt.subplots(1,2, figsize=(8,4))
+    def smooth_time_series(x):
+        w = np.kaiser(2*n_smooth,5)
+        w /= np.sum(w)
+        x_conv = np.hstack([
+            np.repeat(x[0], n_smooth),
+            np.array(x),
+            np.repeat(x[-1], n_smooth)
+        ])
+        x_conv = np.convolve(x_conv, w, mode='valid')
+        print(f'Smoothing: len(x): {len(x)} -> {len(x_conv)}')
+        x_conv = x_conv[:len(x)]
+        return x_conv
+
+    loss_conv = smooth_time_series(loss_hist)
+    if val_loss_hist is not None:
+        val_loss_conv = smooth_time_series(val_loss_hist)
+
+    n = np.arange(len(loss_hist))
+
+    # Detect discrete drops in learning rate
+    if lr_hist is not None:
+        lr_hist = np.array(lr_hist)
+        lr_ratio = lr_hist[1:] / lr_hist[:-1]
+        n_drop = np.where(lr_ratio < 0.95)[0]
+
+    fig,ax_arr = plt.subplots(1,2, figsize=(8,4))
     fig.subplots_adjust(
         left=0.14,
         right=0.98,
         wspace=0.25
     )
 
-    ax0.plot(
-        np.arange(len(loss_history)),
-        loss_history,
-        alpha=0.1,
-        label=r'$\mathrm{raw}$'
-    )
-    ax0.plot(
-        np.arange(len(loss_conv)),
-        loss_conv,
-        label=r'$\mathrm{smoothed}$'
-    )
-    ax0.grid('on', which='major', alpha=0.25)
-    ax0.grid('on', which='minor', alpha=0.05)
-    ax0.set_ylabel(r'$\mathrm{loss}$')
-    ax0.set_xlabel(r'$\mathrm{training\ step}$')
-    ax0.legend(loc='upper right')
+    for i,ax in enumerate(ax_arr):
+        if i == 1:
+            i0 = len(loss_hist) // 2
+            loss_hist = loss_hist[i0:]
+            loss_conv = loss_conv[i0:]
+            if val_loss_hist is not None:
+                val_loss_conv = val_loss_conv[i0:]
+            if lr_hist is not None:
+                lr_hist = lr_hist[i0:]
+            n = n[i0:]
 
-    i0 = len(loss_history) // 2
-    ax1.plot(
-        np.arange(i0,len(loss_history)),
-        loss_history[i0:],
-        alpha=0.1
-    )
-    ax1.plot(
-        np.arange(i0,len(loss_conv)),
-        loss_conv[i0:]
-    )
-    ax1.yaxis.set_major_locator(ticker.MaxNLocator(4))
-    ax1.yaxis.set_minor_locator(ticker.AutoMinorLocator())
-    ax1.grid('on', which='major', alpha=0.25)
-    ax1.grid('on', which='minor', alpha=0.05)
-    ax1.set_xlabel(r'$\mathrm{training\ step}$')
+        if lr_hist is not None:
+            for k in n_drop:
+                ax.axvline(k, c='k', alpha=0.1, ls='--')
+
+        l, = ax.plot(n, loss_hist, alpha=0.1, label=r'loss')
+        ax.plot(
+            n, loss_conv,
+            alpha=0.8,
+            color=l.get_color(),
+            label=r'$\mathrm{loss\ (smoothed)}$'
+        )
+        if val_loss_hist is not None:
+            ax.plot(
+                n, val_loss_conv,
+                alpha=0.8,
+                label=r'$\mathrm{validation\ loss\ (smoothed)}$'
+            )
+
+        ax.set_xlim(n[0], n[-1])
+
+        ax.grid('on', which='major', alpha=0.25)
+        ax.grid('on', which='minor', alpha=0.05)
+        ax.set_ylabel(r'$\mathrm{loss}$')
+        ax.set_xlabel(r'$\mathrm{training\ step}$')
+        if i == 0:
+            ax.legend(loc='upper right')
 
     return fig
 
@@ -112,10 +138,25 @@ def append_to_loss_history(fname, key, loss_history):
     #    f.dump(d, f)
 
 
-def save_loss_history(fname, loss_history, val_loss_history, lr_history):
-    data = np.stack([loss_history, val_loss_history, lr_history], axis=1)
-    header = f'{"loss": >16s} {"val_loss": >18s} {"learning_rate": >18s}'
+def save_loss_history(fname, loss_history, val_loss_history=None, lr_history=None):
+    data = [loss_history]
+    header = f'{"loss": >16s}'
+    if val_loss_history is not None:
+        data.append(val_loss_history)
+        header += f' {"validation_loss": >18s}'
+    if val_loss_history is not None:
+        data.append(lr_history)
+        header += f' {"learning_rate": >18s}'
+    data = np.stack(data, axis=1)
     np.savetxt(fname, data, header=header, fmt='%.12e')
+
+
+def load_loss_history(fname):
+    data = np.loadtxt(fname)
+    loss_history = data[:,0].tolist()
+    val_loss_history = data[:,1].tolist()
+    lr_history = data[:,2].tolist()
+    return loss_history, val_loss_history, lr_history
 
 
 def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):

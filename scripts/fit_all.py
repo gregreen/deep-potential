@@ -53,8 +53,8 @@ def load_data(fname):
 
 def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
-                n_epochs=128, batch_size=1024, reg={}, lr={},
-                optimizer='RAdam', warmup_proportion=0.1,
+                n_epochs=128, batch_size=1024, validation_frac=0.25,
+                reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
                 checkpoint_every=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
@@ -79,6 +79,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
+            validation_frac=validation_frac,
             optimizer=optimizer,
             warmup_proportion=warmup_proportion,
             checkpoint_every=checkpoint_every,
@@ -89,13 +90,17 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
         fn = flow.save(flow_fname)
         utils.save_loss_history(
-            f'{fn}_loss.txt'
+            f'{fn}_loss.txt',
             loss_history,
-            val_loss_history,
-            lr_history
+            val_loss_history=val_loss_history,
+            lr_history=lr_history
         )
 
-        fig = utils.plot_loss(loss_history)
+        fig = utils.plot_loss(
+            loss_history,
+            val_loss_hist=val_loss_history,
+            lr_hist=lr_history
+        )
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
         plt.close(fig)
 
@@ -124,12 +129,12 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         lam=lam
     )
 
-    phi_model.save(fname)
+    fn = phi_model.save(fname)
 
-    utils.append_to_loss_history(loss_fname, 'potential', loss_history)
+    utils.save_loss_history(f'{fn}_loss.txt', loss_history)
 
     fig = utils.plot_loss(loss_history)
-    fig.savefig('plots/potential_loss_history.png', dpi=200)
+    fig.savefig(plot_fname, dpi=200)
     plt.close(fig)
 
     return phi_model
@@ -319,6 +324,7 @@ def load_params(fname):
                 },
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':512},
+                "validation_frac": {'type':'float', 'default':0.25},
                 "optimizer": {'type':'string', 'default':'RAdam'},
                 "warmup_proportion": {'type':'float', 'default':0.1},
                 "checkpoint_every": {'type':'integer'}
@@ -385,7 +391,7 @@ def main():
     parser.add_argument(
         '--potential-loss',
         type=str, default='plots/potential_loss_history.png',
-        help='Filename for potential loss history plots.'
+        help='Filename for potential loss history plot.'
     )
     parser.add_argument(
         '--potential-only',

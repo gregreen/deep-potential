@@ -371,9 +371,7 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_lr = np.loadtxt(loss_fname)
-            loss_history = loss_lr[:,0].tolist()
-            lr_history = loss_lr[:,1].tolist()
+            loss_history, val_loss_history, lr_history = load_loss_history(loss_fname)
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -451,6 +449,8 @@ def train_flow(flow, data,
             # Get time after gradients function is first traced
             traced = True
             t1 = time()
+        else:
+            t1 = None
 
         # Checkpoint
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
@@ -459,18 +459,26 @@ def train_flow(flow, data,
             chkpt_fname = checkpoint.save(checkpoint_prefix)
             print(f'  --> {chkpt_fname}')
             save_loss_history(
-                f'{chkpt_fname}_loss.txt'
+                f'{chkpt_fname}_loss.txt',
                 loss_history,
-                val_loss_history,
-                lr_history
+                val_loss_history=val_loss_history,
+                lr_history=lr_history
             )
+            fig = plot_loss(
+                loss_history,
+                val_loss_hist=val_loss_history,
+                lr_hist=lr_history
+            )
+            fig.savefig(f'{chkpt_fname}_loss.svg')
+            plt.close(fig)
 
     t2 = time()
     loss_avg = np.mean(loss_history[-50:])
     n_steps = len(loss_history)
     print(f'<loss> = {loss_avg: >7.5f}')
-    print(f'tracing time: {t1-t0:.2f} s')
-    print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
+    if t1 is not None:
+        print(f'tracing time: {t1-t0:.2f} s')
+        print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
 
     # Save the trained model
     #checkpoint = tf.train.Checkpoint(flow=flow)
