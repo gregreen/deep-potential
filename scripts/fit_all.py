@@ -185,13 +185,15 @@ def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
 
 
 def sample_from_flows(flow_list, n_samples,
-                      return_indiv=False, batch_size=1024,
+                      return_indiv=False,
+                      grad_batch_size=1024,
+                      sample_batch_size=1024,
                       f_reduce=np.median):
     n_flows = len(flow_list)
 
     # Sample from ensemble of flows
     eta = []
-    n_batches = n_samples // (n_flows * batch_size)
+    n_batches = n_samples // (n_flows * sample_batch_size)
 
     for i,flow in enumerate(flow_list):
         print(f'Sampling from flow {i+1} of {n_flows} ...')
@@ -199,7 +201,7 @@ def sample_from_flows(flow_list, n_samples,
         @tf.function
         def sample_batch():
             print('Tracing sample_batch ...')
-            return flow.sample([batch_size])
+            return flow.sample([sample_batch_size])
 
         bar = progressbar.ProgressBar(max_value=n_batches)
         for k in range(n_batches):
@@ -218,7 +220,7 @@ def sample_from_flows(flow_list, n_samples,
 
         df_deta_indiv[i] = batch_calc_df_deta(
             flow.prob, eta,
-            batch_size=batch_size
+            batch_size=grad_batch_size
         )
         #df_deta += df_deta_i / n_flows
 
@@ -334,7 +336,8 @@ def load_params(fname):
             'type': 'dict',
             'schema': {
                 "n_samples": {'type':'integer', 'default':524288},
-                "grad_batch_size": {'type':'integer', 'default':1024},
+                "grad_batch_size": {'type':'integer', 'default':512},
+                "sample_batch_size": {'type':'integer', 'default':1024},
                 "n_hidden": {'type':'integer', 'default':3},
                 "hidden_size": {'type':'integer', 'default':256},
                 "xi": {'type':'float', 'default':1.0},
@@ -459,11 +462,13 @@ def main():
             # Sample from the flows and calculate gradients
             print('Sampling from flows ...')
             n_samples = params['Phi'].pop('n_samples')
-            batch_size = params['Phi'].pop('grad_batch_size')
+            grad_batch_size = params['Phi'].pop('grad_batch_size')
+            sample_batch_size = params['Phi'].pop('sample_batch_size')
             df_data = sample_from_flows(
                 flows, n_samples,
                 return_indiv=True,
-                batch_size=batch_size,
+                grad_batch_size=grad_batch_size,
+                sample_batch_size=sample_batch_size,
                 f_reduce=np.median if args.flow_median else clipped_vector_mean
             )
             save_df_data(df_data, args.df_grads_fname)
