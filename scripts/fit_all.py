@@ -140,7 +140,7 @@ def batch_calc_df_deta(flow, eta, batch_size):
     @tf.function
     def calc_grads(batch):
         print(f'Tracing calc_grads with shape = {batch.shape}')
-        with tf.GradientTape() as g:
+        with tf.GradientTape(watch_accessed_variables=False) as g:
             g.watch(batch)
             f = flow.prob(batch)
         df_deta = g.gradient(f, batch)
