@@ -141,7 +141,6 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
 
 
 def batch_calc_df_deta(flow, eta, batch_size):
-    df_deta = np.empty_like(eta)
     n_data = eta.shape[0]
 
     @tf.function
@@ -153,17 +152,22 @@ def batch_calc_df_deta(flow, eta, batch_size):
         df_deta = g.gradient(f, batch)
         return df_deta
 
+    eta_dataset = tf.data.Dataset.from_tensor_slices(eta).batch(batch_size)
+
+    df_deta = []
     bar = None
-    for k in range(0,n_data,batch_size):
+    n_generated = 0
+    for k,b in enumerate(eta_dataset):
         if k != 0:
             if bar is None:
                 bar = progressbar.ProgressBar(max_value=n_data)
-            bar.update(k)
-        b0,b1 = k, k+batch_size
-        eta_k = tf.constant(eta[b0:b1])
-        df_deta[b0:b1] = calc_grads(eta_k).numpy()
+            bar.update(n_generated)
+        df_deta.append(calc_grads(b))
+        n_generated += int(b.shape[0])
 
     bar.update(n_data)
+
+    df_deta = np.concatenate([b.numpy() for b in df_deta])
 
     return df_deta
 
