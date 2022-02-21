@@ -140,14 +140,18 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
     return phi_model
 
 
-def batch_calc_df_deta(f, eta, batch_size):
+def batch_calc_df_deta(flow, eta, batch_size):
     df_deta = np.empty_like(eta)
     n_data = eta.shape[0]
 
     @tf.function
     def calc_grads(batch):
         print(f'Tracing calc_grads with shape = {batch.shape}')
-        return flow_ffjord_tf.calc_f_gradients(f, batch)
+        with tf.GradientTape(watch_accessed_variables=False) as g:
+            g.watch(batch)
+            f = flow.prob(batch)
+        df_deta = g.gradient(f, batch)
+        return df_deta
 
     bar = None
     for k in range(0,n_data,batch_size):
@@ -219,7 +223,7 @@ def sample_from_flows(flow_list, n_samples,
         print(f'Calculating gradients of flow {i+1} of {n_flows} ...')
 
         df_deta_indiv[i] = batch_calc_df_deta(
-            flow.prob, eta,
+            flow, eta,
             batch_size=grad_batch_size
         )
         #df_deta += df_deta_i / n_flows
