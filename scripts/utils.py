@@ -4,6 +4,7 @@ from __future__ import print_function, division
 
 import tensorflow as tf
 import numpy as np
+import scipy.ndimage
 import progressbar
 
 import matplotlib.pyplot as plt
@@ -38,14 +39,7 @@ def plot_loss(loss_hist, val_loss_hist=None, lr_hist=None, smoothing='auto'):
     def smooth_time_series(x):
         w = np.kaiser(2*n_smooth,5)
         w /= np.sum(w)
-        x_conv = np.hstack([
-            np.repeat(x[0], n_smooth),
-            np.array(x),
-            np.repeat(x[-1], n_smooth)
-        ])
-        x_conv = np.convolve(x_conv, w, mode='valid')
-        print(f'Smoothing: len(x): {len(x)} -> {len(x_conv)}')
-        x_conv = x_conv[:len(x)]
+        x_conv = scipy.ndimage.convolve(x, w, mode='reflect')
         return x_conv
 
     loss_conv = smooth_time_series(loss_hist)
