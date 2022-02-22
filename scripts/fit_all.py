@@ -55,7 +55,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
                 n_epochs=128, batch_size=1024, validation_frac=0.25,
                 reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
-                checkpoint_every=None):
+                checkpoint_every=None, max_checkpoints=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
@@ -83,6 +83,7 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             optimizer=optimizer,
             warmup_proportion=warmup_proportion,
             checkpoint_every=checkpoint_every,
+            max_checkpoints=max_checkpoints,
             checkpoint_dir=checkpoint_dir,
             checkpoint_name=checkpoint_name,
             **lr_kw
@@ -337,7 +338,8 @@ def load_params(fname):
                 "validation_frac": {'type':'float', 'default':0.25},
                 "optimizer": {'type':'string', 'default':'RAdam'},
                 "warmup_proportion": {'type':'float', 'default':0.1},
-                "checkpoint_every": {'type':'integer'}
+                "checkpoint_every": {'type':'integer'},
+                "max_checkpoints": {'type':'integer'}
             }
         },
         "Phi": {

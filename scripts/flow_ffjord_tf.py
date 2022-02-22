@@ -268,6 +268,7 @@ def train_flow(flow, data,
                warmup_proportion=0.1,
                validation_frac=0.25,
                checkpoint_every=None,
+               max_checkpoints=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
     """
@@ -355,15 +356,21 @@ def train_flow(flow, data,
     # Set up checkpointing
     step = tf.Variable(0, name='step')
     loss_min = tf.Variable(np.inf, name='loss_min')
-    checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
+    #checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(
             opt=opt, flow=flow,
             step=step, loss_min=loss_min
         )
+        chkpt_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+            max_to_keep=max_checkpoints
+        )
 
         # Look for latest extisting checkpoint
-        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        latest = chkpt_manager.latest_checkpoint
         if latest is not None:
             print(f'Restoring from checkpoint {latest} ...')
             checkpoint.restore(latest)
@@ -456,7 +463,7 @@ def train_flow(flow, data,
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             print('Checkpointing ...')
             step.assign(i+1)
-            chkpt_fname = checkpoint.save(checkpoint_prefix)
+            chkpt_fname = chkpt_manager.save()
             print(f'  --> {chkpt_fname}')
             save_loss_history(
                 f'{chkpt_fname}_loss.txt',
