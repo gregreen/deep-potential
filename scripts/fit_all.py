@@ -53,9 +53,9 @@ def load_data(fname):
 
 def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
                 n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
-                n_epochs=128, batch_size=1024, reg={}, lr={},
-                optimizer='RAdam', warmup_proportion=0.1,
-                checkpoint_every=None):
+                n_epochs=128, batch_size=1024, validation_frac=0.25,
+                reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
+                checkpoint_every=None, max_checkpoints=None):
     n_samples = data.shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
@@ -75,25 +75,33 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
         lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
-        loss_history, lr_history = flow_ffjord_tf.train_flow(
+        loss_history, val_loss_history, lr_history = flow_ffjord_tf.train_flow(
             flow, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
+            validation_frac=validation_frac,
             optimizer=optimizer,
             warmup_proportion=warmup_proportion,
             checkpoint_every=checkpoint_every,
+            max_checkpoints=max_checkpoints,
             checkpoint_dir=checkpoint_dir,
             checkpoint_name=checkpoint_name,
             **lr_kw
         )
 
         fn = flow.save(flow_fname)
+        utils.save_loss_history(
+            f'{fn}_loss.txt',
+            loss_history,
+            val_loss_history=val_loss_history,
+            lr_history=lr_history
+        )
 
-        loss_lr = np.stack([loss_history, lr_history], axis=1)
-        header = f'{"loss": >16s} {"learning_rate": >18s}'
-        np.savetxt(fn+'_loss.txt', loss_lr, header=header, fmt='%.12e')
-
-        fig = utils.plot_loss(loss_history)
+        fig = utils.plot_loss(
+            loss_history,
+            val_loss_hist=val_loss_history,
+            lr_hist=lr_history
+        )
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
         plt.close(fig)
 
@@ -122,37 +130,45 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         lam=lam
     )
 
-    phi_model.save(fname)
+    fn = phi_model.save(fname)
 
-    utils.append_to_loss_history(loss_fname, 'potential', loss_history)
+    utils.save_loss_history(f'{fn}_loss.txt', loss_history)
 
     fig = utils.plot_loss(loss_history)
-    fig.savefig('plots/potential_loss_history.png', dpi=200)
+    fig.savefig(plot_fname, dpi=200)
     plt.close(fig)
 
     return phi_model
 
 
-def batch_calc_df_deta(f, eta, batch_size):
-    df_deta = np.empty_like(eta)
+def batch_calc_df_deta(flow, eta, batch_size):
     n_data = eta.shape[0]
 
     @tf.function
     def calc_grads(batch):
         print(f'Tracing calc_grads with shape = {batch.shape}')
-        return flow_ffjord_tf.calc_f_gradients(f, batch)
+        with tf.GradientTape(watch_accessed_variables=False) as g:
+            g.watch(batch)
+            f = flow.prob(batch)
+        df_deta = g.gradient(f, batch)
+        return df_deta
 
+    eta_dataset = tf.data.Dataset.from_tensor_slices(eta).batch(batch_size)
+
+    df_deta = []
     bar = None
-    for k in range(0,n_data,batch_size):
+    n_generated = 0
+    for k,b in enumerate(eta_dataset):
         if k != 0:
             if bar is None:
                 bar = progressbar.ProgressBar(max_value=n_data)
-            bar.update(k)
-        b0,b1 = k, k+batch_size
-        eta_k = tf.constant(eta[b0:b1])
-        df_deta[b0:b1] = calc_grads(eta_k).numpy()
+            bar.update(n_generated)
+        df_deta.append(calc_grads(b))
+        n_generated += int(b.shape[0])
 
     bar.update(n_data)
+
+    df_deta = np.concatenate([b.numpy() for b in df_deta])
 
     return df_deta
 
@@ -178,13 +194,15 @@ def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
 
 
 def sample_from_flows(flow_list, n_samples,
-                      return_indiv=False, batch_size=1024,
+                      return_indiv=False,
+                      grad_batch_size=1024,
+                      sample_batch_size=1024,
                       f_reduce=np.median):
     n_flows = len(flow_list)
 
     # Sample from ensemble of flows
     eta = []
-    n_batches = n_samples // (n_flows * batch_size)
+    n_batches = n_samples // (n_flows * sample_batch_size)
 
     for i,flow in enumerate(flow_list):
         print(f'Sampling from flow {i+1} of {n_flows} ...')
@@ -192,7 +210,7 @@ def sample_from_flows(flow_list, n_samples,
         @tf.function
         def sample_batch():
             print('Tracing sample_batch ...')
-            return flow.sample([batch_size])
+            return flow.sample([sample_batch_size])
 
         bar = progressbar.ProgressBar(max_value=n_batches)
         for k in range(n_batches):
@@ -210,8 +228,8 @@ def sample_from_flows(flow_list, n_samples,
         print(f'Calculating gradients of flow {i+1} of {n_flows} ...')
 
         df_deta_indiv[i] = batch_calc_df_deta(
-            flow.prob, eta,
-            batch_size=batch_size
+            flow, eta,
+            batch_size=grad_batch_size
         )
         #df_deta += df_deta_i / n_flows
 
@@ -317,16 +335,19 @@ def load_params(fname):
                 },
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':512},
+                "validation_frac": {'type':'float', 'default':0.25},
                 "optimizer": {'type':'string', 'default':'RAdam'},
                 "warmup_proportion": {'type':'float', 'default':0.1},
-                "checkpoint_every": {'type':'integer'}
+                "checkpoint_every": {'type':'integer'},
+                "max_checkpoints": {'type':'integer'}
             }
         },
         "Phi": {
             'type': 'dict',
             'schema': {
                 "n_samples": {'type':'integer', 'default':524288},
-                "grad_batch_size": {'type':'integer', 'default':1024},
+                "grad_batch_size": {'type':'integer', 'default':512},
+                "sample_batch_size": {'type':'integer', 'default':1024},
                 "n_hidden": {'type':'integer', 'default':3},
                 "hidden_size": {'type':'integer', 'default':256},
                 "xi": {'type':'float', 'default':1.0},
@@ -383,7 +404,7 @@ def main():
     parser.add_argument(
         '--potential-loss',
         type=str, default='plots/potential_loss_history.png',
-        help='Filename for potential loss history plots.'
+        help='Filename for potential loss history plot.'
     )
     parser.add_argument(
         '--potential-only',
@@ -451,11 +472,13 @@ def main():
             # Sample from the flows and calculate gradients
             print('Sampling from flows ...')
             n_samples = params['Phi'].pop('n_samples')
-            batch_size = params['Phi'].pop('grad_batch_size')
+            grad_batch_size = params['Phi'].pop('grad_batch_size')
+            sample_batch_size = params['Phi'].pop('sample_batch_size')
             df_data = sample_from_flows(
                 flows, n_samples,
                 return_indiv=True,
-                batch_size=batch_size,
+                grad_batch_size=grad_batch_size,
+                sample_batch_size=sample_batch_size,
                 f_reduce=np.median if args.flow_median else clipped_vector_mean
             )
             save_df_data(df_data, args.df_grads_fname)
