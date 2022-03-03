@@ -62,10 +62,19 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
     flow_list = []
 
+    data_mean = np.mean(data, axis=0)
+    data_std = np.std(data, axis=0)
+    print(f'Using mean: {data_mean}')
+    print(f'       std: {data_std}')
+
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(6, n_hidden, hidden_size, n_bij, reg_kw=reg)
+        flow = flow_ffjord_tf.FFJORDFlow(
+            6, n_hidden, hidden_size, n_bij,
+            reg_kw=reg,
+            base_mean=data_mean, base_std=data_std
+        )
         flow_list.append(flow)
 
         flow_fname = fname_pattern.format(i)
