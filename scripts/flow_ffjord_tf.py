@@ -29,6 +29,36 @@ from utils import *
 from tensorflow_probability.python import math as tfp_math
 from tensorflow_probability.python.internal import prefer_static
 
+
+class StandardizeBijector(tfb.Bijector):
+    def __init__(self, mu, ln_sigma, validate_args=False, name='standardize'):
+        super(StandardizeBijector, self).__init__(
+            validate_args=validate_args,
+            forward_min_event_ndims=0,
+            name=name
+        )
+        self._mu = mu
+        self._ln_sigma = ln_sigma
+
+    def _forward(self, x):
+        """
+        Along each dimension, y = sigma * x + mu.
+        """
+        return x * tf.expand_dims(tf.math.exp(self._ln_sigma),0) + tf.expand_dims(self._mu,0)
+
+    def _inverse(self, y):
+        """
+        Along each dimension, x = (y - mu) / sigma.
+        """
+        return (y - tf.expand_dims(self._mu,0)) / tf.expand_dims(tf.math.exp(self._ln_sigma),0)
+
+    def _forward_log_det_jacobian(self, x):
+        return tf.math.reduce_mean(self._ln_sigma)
+
+    def _inverse_log_det_jacobian(self, y):
+        return -self._forward_log_det_jacobian(self._inverse(y))
+
+
 def trace_jacobian_exact_reg(ode_fn, state_shape, dtype,
                              kinetic_reg=0, jacobian_reg=0,
                              dv_dt_reg=0):
@@ -183,31 +213,29 @@ class FFJORDFlow(tfd.TransformedDistribution):
         ]
 
         # Initialize bijector
-        bij = [
-            tfb.FFJORD(
-                state_time_derivative_fn=self.dz_dt[k],
-                ode_solve_fn=self.ode_solver.solve,
-                trace_augmentation_fn=trace_augmentation_fn
-            )
-            for k in range(n_bij)
-        ]
-        bij = tfb.Chain(bij)
-
-        # Multivariate normal base distribution
         self.base_mean = tf.Variable(
             tf.zeros([n_dim]) if base_mean is None else base_mean,
             trainable=False,
             name='base_mean'
         )
-        self.base_std = tf.Variable(
-            tf.ones([n_dim]) if base_std is None else base_std,
+        self.base_ln_std = tf.Variable(
+            tf.zeros([n_dim]) if base_std is None else np.log(base_std),
             trainable=False,
             name='base_std'
         )
-        base_dist = tfd.MultivariateNormalDiag(
-            loc=self.base_mean,
-            scale_diag=self.base_std
-        )
+        bij = [StandardizeBijector(self.base_mean, self.base_ln_std)]
+        for k in range(n_bij):
+            bij.append(
+                tfb.FFJORD(
+                    state_time_derivative_fn=self.dz_dt[k],
+                    ode_solve_fn=self.ode_solver.solve,
+                    trace_augmentation_fn=trace_augmentation_fn
+                )
+            )
+        bij = tfb.Chain(bij)
+
+        # Unit multivariate normal base distribution
+        base_dist = tfd.MultivariateNormalDiag(loc=tf.zeros([n_dim]))
 
         # Initialize FFJORD
         super(FFJORDFlow, self).__init__(
