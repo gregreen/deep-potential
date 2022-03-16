@@ -119,8 +119,9 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
 def train_potential(df_data, fname, plot_fname, loss_fname,
                     n_hidden=3, hidden_size=256, xi=1., lam=1.,
-                    n_epochs=4096, batch_size=1024,
-                    lr_init=1.e-3, lr_final=1.e-6):
+                    n_epochs=4096, batch_size=1024, validation_frac=0.25,
+                    lr={}, optimizer='RAdam', warmup_proportion=0.1,
+                    checkpoint_every=None, max_checkpoints=None):
     # Create model
     phi_model = potential_tf.PhiNN(
         n_dim=3,
@@ -128,15 +129,25 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         hidden_size=hidden_size
     )
 
+    lr_kw = {f'lr_{k}':lr[k] for k in lr}
+
+    checkpoint_dir, checkpoint_name = os.path.split(fname)
+    checkpoint_name += '_chkpt'
+
     loss_history = potential_tf.train_potential(
         df_data, phi_model,
         n_epochs=n_epochs,
         batch_size=batch_size,
-        lr_init=lr_init,
-        lr_final=lr_final,
-        checkpoint_every=None,
         xi=xi,
-        lam=lam
+        lam=lam,
+        validation_frac=validation_frac,
+        optimizer=optimizer,
+        warmup_proportion=warmup_proportion,
+        checkpoint_every=checkpoint_every,
+        max_checkpoints=max_checkpoints,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_name=checkpoint_name,
+        **lr_kw
     )
 
     fn = phi_model.save(fname)
@@ -363,9 +374,21 @@ def load_params(fname):
                 "lam": {'type':'float', 'default':1.0},
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':1024},
-                "lr_init": {'type':'float', 'default':0.001},
-                "lr_final": {'type':'float', 'default':0.000001},
-                "checkpoint_every": {'type':'integer'}
+                "lr": {
+                    'type': 'dict',
+                    'schema': {
+                        "type": {'type':'string', 'default':'step'},
+                        "init": {'type':'float', 'default':0.001},
+                        "final": {'type':'float', 'default':0.0001},
+                        "patience": {'type':'integer', 'default':32},
+                        "min_delta": {'type':'float', 'default':0.01}
+                    }
+                },
+                "validation_frac": {'type':'float', 'default':0.25},
+                "optimizer": {'type':'string', 'default':'RAdam'},
+                "warmup_proportion": {'type':'float', 'default':0.1},
+                "checkpoint_every": {'type':'integer'},
+                "max_checkpoints": {'type':'integer'}
             }
         }
     }
@@ -451,6 +474,7 @@ def main():
         df_data = load_df_data(args.df_grads_fname)
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
+        params['Phi'].pop('sample_batch_size')
     else:
         if args.use_existing_flows is None:
             # Load input phase-space positions
@@ -494,6 +518,7 @@ def main():
 
     # Fit the potential
     if not args.flows_only:
+        print(params['Phi'])
         print('Fitting the potential ...')
         phi_model = train_potential(
             df_data,

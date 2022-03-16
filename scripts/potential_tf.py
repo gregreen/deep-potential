@@ -107,7 +107,9 @@ def get_phi_loss_gradients(phi, params, q, p,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
-                           weight_samples=False):
+                           l2 = tf.constant(1.0),
+                           weight_samples=False,
+                           return_grads=True):
     """
     Calculates both the loss and the gradients of the loss w.r.t. the
     given parameters.
@@ -148,8 +150,9 @@ def get_phi_loss_gradients(phi, params, q, p,
     c = xi / delf_delt_scale
     print(f'c = {c}')
 
-    with tf.GradientTape() as g:
-        g.watch(params)
+    with tf.GradientTape(watch_accessed_variables=False) as g:
+        if return_grads:
+            g.watch(params)
 
         # Calculate derivatives of phi w.r.t. q
         dphi_dq, d2phi_dq2 = calc_phi_derivatives(phi, q)
@@ -171,13 +174,15 @@ def get_phi_loss_gradients(phi, params, q, p,
             df_dt = w * df_dt
 
         # Average over sampled points in phase space
-        likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
+        #likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
+        likelihood = tf.math.abs(df_dt)
 
         if lam != 0:
-            prior_neg = tf.math.asinh(
-                tf.clip_by_value(-d2phi_dq2, 0., np.inf)
-            )
-            print(f'prior_neg = {prior_neg}')
+            #prior_neg = tf.math.asinh(
+            #    tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            #)
+            prior_neg = tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            tf.print('prior_neg:', tf.reduce_mean(lam*prior_neg))
             #pneg_mean = tf.math.reduce_mean(prior_neg)
             #pneg_max = tf.math.reduce_max(prior_neg)
             #L_mean = tf.math.reduce_mean(likelihood)
@@ -195,7 +200,7 @@ def get_phi_loss_gradients(phi, params, q, p,
             prior_pos = tf.math.asinh(
                 tf.clip_by_value(d2phi_dq2, 0., np.inf)
             )
-            print(f'prior_pos = {prior_pos}')
+            tf.print('prior_pos:', tf.reduce_mean(mu*prior_pos))
             likelihood = likelihood + mu * prior_pos
 
         # Regularization penalty
@@ -203,17 +208,30 @@ def get_phi_loss_gradients(phi, params, q, p,
         # for p in params:
         #     penalty += tf.reduce_sum(p**2)
 
-        loss = tf.reduce_mean(likelihood)
+        tf.print('likelihood:', tf.reduce_mean(likelihood))
+        loss = tf.math.log(tf.reduce_mean(likelihood))
         #    likelihood
         #    + lam*prior_neg
         #    + mu*prior_pos
         #    # + reg*penalty
         #)
 
-    # Gradients of loss w.r.t. NN parameters
-    dloss_dparam = g.gradient(loss, params)
+        # L2 penalty on all weights (identified by "w:0" in name)
+        if l2 != 0:
+            penalty = 0
+            for p in params:
+                if 'w:0' in p.name:
+                    print(f'l2 penalty on {p}')
+                    penalty += l2 * tf.reduce_mean(p**2)
+            tf.print('\npenalty:', penalty)
+            loss += penalty
 
-    return loss, dloss_dparam
+    # Gradients of loss w.r.t. NN parameters
+    if return_grads:
+        dloss_dparam = g.gradient(loss, params)
+        return loss, dloss_dparam
+
+    return loss
 
 
 class PhiNN(snt.Module):
@@ -295,63 +313,140 @@ class PhiNN(snt.Module):
 
 def train_potential(
             df_data, phi_model,
+            optimizer=None,
             n_epochs=4096,
             batch_size=1024,
+            lr_type='step',
+            lr_init=2.e-2,
+            lr_final=1.e-4,
+            lr_patience=32,
+            lr_min_delta=0.01,
+            warmup_proportion=0.1,
+            validation_frac=0.25,
             checkpoint_every=None,
+            max_checkpoints=None,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
             xi=1.,   # Scale above which outliers are suppressed
             lam=1.,  # Penalty for negative matter densities
-            mu=0,    # Penalty for positive matter densities
-            lr_init=1.e-3,
-            lr_final=1.e-6
+            mu=0     # Penalty for positive matter densities
         ):
+
+    # Split training/validation sample
     n_samples = df_data['eta'].shape[0]
     n_dim = df_data['eta'].shape[1] // 2
-    data = tf.stack(
+    data = np.stack(
         [
-            df_data['eta'][:,:n_dim],     # q
-            df_data['eta'][:,n_dim:],     # p
-            df_data['df_deta'][:,:n_dim], # df/dq
-            df_data['df_deta'][:,n_dim:]  # df/dp
+            df_data['eta'][:,:n_dim].astype('f4'),     # q
+            df_data['eta'][:,n_dim:].astype('f4'),     # p
+            df_data['df_deta'][:,:n_dim].astype('f4'), # df/dq
+            df_data['df_deta'][:,n_dim:].astype('f4')  # df/dp
         ],
         axis=1
     )
-    data = tf.data.Dataset.from_tensor_slices(data)
+    n_val = int(validation_frac * n_samples)
+    val_batch_size = int(validation_frac * batch_size)
+    n_samples -= n_val
+    val = data[:n_val]
+    data = data[n_val:]
+
+    # Create Tensorflow datasets
+    batches = tf.data.Dataset.from_tensor_slices(data)
+    batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
+    batches = batches.repeat(n_epochs+1)
+    batches = batches.batch(batch_size, drop_remainder=True)
+
+    val_batches = tf.data.Dataset.from_tensor_slices(val)
+    val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
+    val_batches = val_batches.repeat(n_epochs+1)
+    val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
     phi_param = phi_model.trainable_variables
     n_variables = sum([int(tf.size(param)) for param in phi_param])
     print(f'{n_variables} variables in the gravitational potential model.')
 
     # Estimate typical scale of flows (with constant gravitational potential)
-    delf_delt_scale = np.percentile(
-        np.abs(np.sum(
-            df_data['eta'][:,n_dim:] * df_data['df_deta'][:,:n_dim],
-            axis=1
-        )),
-        50.
-    )
-    print(f'Using del(f)/del(t) ~ {delf_delt_scale}')
+    #delf_delt_scale = np.percentile(
+    #    np.abs(np.sum(
+    #        df_data['eta'][:,n_dim:] * df_data['df_deta'][:,:n_dim],
+    #        axis=1
+    #    )),
+    #    50.
+    #)
+    #print(f'Using del(f)/del(t) ~ {delf_delt_scale}')
 
     # Optimizer
-    n_steps = n_epochs * (n_samples // batch_size)
+    n_steps = n_epochs * n_samples // batch_size
     print(f'{n_steps} steps planned.')
-    lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-        lr_init,
-        n_steps,
-        lr_final/lr_init,
-        staircase=False
-    )
-    opt = tfa.optimizers.RectifiedAdam(
-        lr_schedule,
-        total_steps=n_steps,
-        warmup_proportion=0.1
-    )
 
-    # Set up batches of data
-    batches = data.shuffle(n_samples, reshuffle_each_iteration=True)
-    batches = batches.repeat(n_epochs)
-    batches = batches.batch(batch_size, drop_remainder=True)
+    if isinstance(optimizer, str):
+        if lr_type == 'exponential':
+            lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+                lr_init,
+                n_steps,
+                lr_final/lr_init,
+                staircase=False
+            )
+        elif lr_type == 'step':
+            lr_schedule = lr_init
+            steps_since_decline = 0
+        else:
+            raise ValueError(
+                f'Unknown lr_type: "{lr_type}" ("exponential" or "step")'
+            )
+        if optimizer == 'RAdam':
+            opt = tfa.optimizers.RectifiedAdam(
+                lr_schedule,
+                total_steps=n_steps,
+                warmup_proportion=warmup_proportion
+            )
+        elif optimizer == 'SGD':
+            opt = keras.optimizers.SGD(
+                learning_rate=lr_schedule,
+                momentum=0.5
+            )
+        else:
+            raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
+    else:
+        opt = optimizer
+
+    print(f'Optimizer: {opt}')
+
+    loss_history = []
+    val_loss_history = []
+    lr_history = []
+
+    # Set up checkpointing
+    step = tf.Variable(0, name='step')
+    loss_min = tf.Variable(np.inf, name='loss_min')
+
+    if checkpoint_every is not None:
+        checkpoint = tf.train.Checkpoint(
+            opt=opt, phi=phi_model,
+            step=step, loss_min=loss_min
+        )
+        chkpt_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+            max_to_keep=max_checkpoints
+        )
+
+        # Look for latest extisting checkpoint
+        latest = chkpt_manager.latest_checkpoint
+        if latest is not None:
+            print(f'Restoring from checkpoint {latest} ...')
+            checkpoint.restore(latest)
+            print(f'Beginning from step {int(step)}.')
+
+            # Try to load loss history
+            loss_fname = f'{latest}_loss.txt'
+            loss_history, val_loss_history, lr_history = load_loss_history(
+                loss_fname
+            )
+
+        # Convert from # of epochs to # of steps between checkpoints
+        checkpoint_steps = checkpoint_every * n_samples // batch_size
 
     @tf.function
     def training_step(batch):
@@ -369,17 +464,42 @@ def train_potential(
             df_dq=df_dq_b,
             df_dp=df_dp_b,
             xi=xi,
-            delf_delt_scale=delf_delt_scale,
+            delf_delt_scale=1,#delf_delt_scale,
             lam=lam,
             mu=mu,
             weight_samples=False
         )
 
-        #dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
-        #tf.print('\nglobal norm:', global_norm)
+        dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
+        tf.print('\nglobal norm:', global_norm)
 
         # Take step using optimizer
         opt.apply_gradients(zip(dloss_dparam, phi_param))
+
+        return loss
+
+    @tf.function
+    def validation_step(batch):
+        print(f'Tracing validation step with batch shape {batch.shape} ...')
+
+        # Unpack the data from the batch
+        q_b, p_b, df_dq_b, df_dp_b = [
+            tf.squeeze(x) for x in tf.split(batch, 4, axis=1)
+        ]
+
+        # Calculate the loss and its gradients w.r.t. the parameters
+        loss = get_phi_loss_gradients(
+            phi_model, phi_param,
+            q_b, p_b,
+            df_dq=df_dq_b,
+            df_dp=df_dp_b,
+            xi=xi,
+            delf_delt_scale=1,#delf_delt_scale,
+            lam=lam,
+            mu=mu,
+            weight_samples=False,
+            return_grads=False
+        )
 
         return loss
 
@@ -400,35 +520,83 @@ def train_potential(
     # Were it not for checkpointing, we could use i == 0.
     traced = False
 
-    loss_history = []
     update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
     t0 = time()
 
-    for i,b in enumerate(batches, int(step)):
+    # Main training loop
+    for i,(y,y_val) in enumerate(zip(batches,val_batches), int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
             # if we began from a checkpoint.
             break
 
         # Take one step
-        loss = training_step(b)
+        loss = training_step(y)
+        val_loss = validation_step(y_val)
 
         # Logging
         loss_history.append(float(loss))
+        val_loss_history.append(float(val_loss))
+        lr_history.append(float(opt._decayed_lr(tf.float32)))
         update_bar(i)
+
+        # Adjust learning rate?
+        if lr_type == 'step':
+            n_smooth = max(lr_patience//8, 1)
+            if len(loss_history) >= n_smooth:
+                loss_avg = np.mean(loss_history[-n_smooth:])
+            else:
+                loss_avg = np.inf
+
+            if loss_avg < loss_min - lr_min_delta:
+                steps_since_decline = 0
+                print(f'New minimum loss: {loss_avg}.')
+                loss_min.assign(loss_avg)
+            elif steps_since_decline >= lr_patience:
+                # Reduce learning rate
+                old_lr = float(opt.lr)
+                new_lr = 0.5 * old_lr
+                print(f'Reducing learning rate from {old_lr} to {new_lr}.')
+                print(f'   (loss threshold: {float(loss_min-lr_min_delta)})')
+                opt.lr.assign(new_lr)
+                steps_since_decline = 0
+            else:
+                steps_since_decline += 1
 
         if not traced:
             # Get time after gradients function is first traced
             traced = True
             t1 = time()
+        else:
+            t1 = None
 
         # Checkpoint
-        if (checkpoint_every is not None) and i and not (i % checkpoint_every):
+        if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+            print('Checkpointing ...')
             step.assign(i+1)
-            checkpoint.save(checkpoint_prefix)
+            chkpt_fname = chkpt_manager.save()
+            print(f'  --> {chkpt_fname}')
+            save_loss_history(
+                f'{chkpt_fname}_loss.txt',
+                loss_history,
+                val_loss_history=val_loss_history,
+                lr_history=lr_history
+            )
+            fig = plot_loss(
+                loss_history,
+                val_loss_hist=val_loss_history,
+                lr_hist=lr_history
+            )
+            fig.savefig(f'{chkpt_fname}_loss.svg')
+            plt.close(fig)
 
-    t1 = time()
-    print(f'Elapsed time: {t1-t0:.1f} s')
+    t2 = time()
+    loss_avg = np.mean(loss_history[-50:])
+    n_steps = len(loss_history)
+    print(f'<loss> = {loss_avg: >7.5f}')
+    if t1 is not None:
+        print(f'tracing time: {t1-t0:.2f} s')
+        print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
 
     return loss_history
 
