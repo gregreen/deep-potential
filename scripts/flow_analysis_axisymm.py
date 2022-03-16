@@ -183,7 +183,7 @@ def plot_2d_marginal(cyl_train, cyl_sample,
             xlim = (-np.pi, np.pi)
         lims.append(xlim)
 
-    kw = dict(range=lims, bins=40)
+    kw = dict(range=lims, bins=128)
 
     n_train = len(x_train)
     n_sample = len(x_sample)
@@ -275,6 +275,36 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     loss_mean = np.mean(loss)
 
     return loss_mean, loss_std
+
+
+def plot_slices(flow_list, eta_train, n_pix=256, batch_size=128):
+    R2 = eta_train[:,0]**2 + eta_train[:,1]**2
+    R_max = 1.2 * np.sqrt(np.percentile(R2, 99.))
+
+    x = np.linspace(-R_max, R_max, n_pix)
+    x,y = np.meshgrid(x, x)
+    s = x.shape
+    x.shape = (x.size,)
+    y.shape = (x.size,)
+
+    p = np.empty_like(x)
+
+    for flow in flow_list:
+        @tf.function
+        def p_batch(eta_batch):
+            print('Tracing p_batch ...')
+            return flow.prob(eta_batch)
+
+        for i0 in range(0,x.size,batch_size):
+            eta = np.zeros((x.size,6), dtype='f4')
+            eta[:,0] = x[i0:i0+batch_size]
+            eta[:,1] = y[i0:i0+batch_size]
+            eta = tf.constant(eta)
+            p[i0:i0+batch_size] += p_batch(eta)
+
+    p /= len(flow_list)
+
+    # Plot in (x,y)-plane
 
 
 def main():

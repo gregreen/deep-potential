@@ -158,7 +158,8 @@ class ForceFieldModel(snt.Module):
 
 class FFJORDFlow(tfd.TransformedDistribution):
     def __init__(self, n_dim, n_hidden, hidden_size, n_bij,
-                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
+                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, 
+                 base_mean=None, base_std=None, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
@@ -193,8 +194,19 @@ class FFJORDFlow(tfd.TransformedDistribution):
         bij = tfb.Chain(bij)
 
         # Multivariate normal base distribution
+        self.base_mean = tf.Variable(
+            tf.zeros([n_dim]) if base_mean is None else base_mean,
+            trainable=False,
+            name='base_mean'
+        )
+        self.base_std = tf.Variable(
+            tf.ones([n_dim]) if base_std is None else base_std,
+            trainable=False,
+            name='base_std'
+        )
         base_dist = tfd.MultivariateNormalDiag(
-            loc=np.zeros(n_dim, dtype='f4')
+            loc=self.base_mean,
+            scale_diag=self.base_std
         )
 
         # Initialize FFJORD
