@@ -356,7 +356,7 @@ def train_flow(flow, data,
     # Set up checkpointing
     step = tf.Variable(0, name='step')
     loss_min = tf.Variable(np.inf, name='loss_min')
-    #checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
+
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(
             opt=opt, flow=flow,
@@ -378,7 +378,9 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history = load_loss_history(loss_fname)
+            loss_history, val_loss_history, lr_history = load_loss_history(
+                loss_fname
+            )
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size
