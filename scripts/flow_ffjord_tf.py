@@ -158,7 +158,8 @@ class ForceFieldModel(snt.Module):
 
 class FFJORDFlow(tfd.TransformedDistribution):
     def __init__(self, n_dim, n_hidden, hidden_size, n_bij,
-                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
+                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, 
+                 base_mean=None, base_std=None, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
@@ -193,8 +194,19 @@ class FFJORDFlow(tfd.TransformedDistribution):
         bij = tfb.Chain(bij)
 
         # Multivariate normal base distribution
+        self.base_mean = tf.Variable(
+            tf.zeros([n_dim]) if base_mean is None else base_mean,
+            trainable=False,
+            name='base_mean'
+        )
+        self.base_std = tf.Variable(
+            tf.ones([n_dim]) if base_std is None else base_std,
+            trainable=False,
+            name='base_std'
+        )
         base_dist = tfd.MultivariateNormalDiag(
-            loc=np.zeros(n_dim, dtype='f4')
+            loc=self.base_mean,
+            scale_diag=self.base_std
         )
 
         # Initialize FFJORD
@@ -356,7 +368,7 @@ def train_flow(flow, data,
     # Set up checkpointing
     step = tf.Variable(0, name='step')
     loss_min = tf.Variable(np.inf, name='loss_min')
-    #checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
+
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(
             opt=opt, flow=flow,
@@ -378,7 +390,9 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history = load_loss_history(loss_fname)
+            loss_history, val_loss_history, lr_history = load_loss_history(
+                loss_fname
+            )
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size

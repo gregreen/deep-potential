@@ -20,8 +20,8 @@ print(f'Tensorflow version {tf.__version__}')
 import flow_ffjord_tf
 
 
-fig_fmt = 'png'
-dpi = 120
+fig_fmt = ('svg', 'pdf')
+dpi = 200
 
 
 def cart2cyl(eta):
@@ -97,7 +97,7 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
     labels = ['$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$']
     keys = ['R', 'z', 'phi', 'vR', 'vz', 'vT']
 
-    fig,ax_arr = plt.subplots(2,3, figsize=(12,8), dpi=120)
+    fig,ax_arr = plt.subplots(2,3, figsize=(6,4), dpi=120)
 
     for i,(ax,l,k) in enumerate(zip(ax_arr.flat,labels,keys)):
         xlim = np.percentile(cyl_train[k], [1., 99.])
@@ -109,10 +109,17 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
             xlim = (-np.pi, np.pi)
 
         kw = dict(range=xlim, bins=101, density=True)
-        ax.hist(cyl_train[k], label=r'$\mathrm{train}$', **kw)
-        ax.hist(cyl_sample[k], alpha=0.5, label=r'$\mathrm{NF}$', **kw)
+        ax.hist(cyl_train[k], label=r'$\mathrm{train}$', alpha=0.7, **kw)
+        ax.hist(
+            cyl_sample[k],
+            histtype='step',
+            alpha=0.8,
+            label=r'$\mathrm{NF}$',
+            **kw
+        )
+        ax.set_xlim(xlim)
 
-        ax.set_xlabel(l)
+        ax.set_xlabel(l, labelpad=0)
         ax.set_yticklabels([])
 
     ax_arr.flat[0].legend()
@@ -120,12 +127,10 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
     if loss is not None:
         ax = ax_arr.flat[1]
         ax.text(
-            0.02, 0.98, rf'$\left< \ln p \right> = {-loss:.4f}$',
+            0.02, 0.98, rf'$\left< \ln p \right> = {-loss:.3f}$',
             ha='left', va='top',
             transform=ax.transAxes
         )
-
-    fig.subplots_adjust(wspace=0.1)
 
     fig.subplots_adjust(
         wspace=0.1,
@@ -136,8 +141,9 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir, loss=None):
         top=0.97
     )
 
-    fname = os.path.join(fig_dir, f'DF_marginals.{fig_fmt}')
-    fig.savefig(fname, dpi=dpi)
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'DF_marginals.{fmt}')
+        fig.savefig(fname, dpi=dpi)
     plt.close(fig)
 
 
@@ -167,8 +173,8 @@ def plot_2d_marginal(cyl_train, cyl_sample,
 
     fig,(ax_t,ax_s,ax_d,cax_d) = plt.subplots(
         1,4,
-        figsize=(12,4),
-        dpi=120,
+        figsize=(6,2),
+        dpi=200,
         gridspec_kw=dict(width_ratios=[1,1,1,0.05])
     )
 
@@ -183,7 +189,7 @@ def plot_2d_marginal(cyl_train, cyl_sample,
             xlim = (-np.pi, np.pi)
         lims.append(xlim)
 
-    kw = dict(range=lims, bins=128)
+    kw = dict(range=lims, bins=128, rasterized=True)
 
     n_train = len(x_train)
     n_sample = len(x_sample)
@@ -202,7 +208,8 @@ def plot_2d_marginal(cyl_train, cyl_sample,
         extent=lims[0]+lims[1],
         cmap='coolwarm_r',
         vmin=-vmax, vmax=vmax,
-        origin='lower', aspect='auto'
+        origin='lower', aspect='auto',
+        rasterized=True
     )
 
     cb = fig.colorbar(
@@ -215,23 +222,25 @@ def plot_2d_marginal(cyl_train, cyl_sample,
     ax_d.set_yticklabels([])
 
     for ax in (ax_s,ax_t,ax_d):
-        ax.set_xlabel(labels[dim1])
+        ax.set_xlabel(labels[dim1], labelpad=0)
 
-    ax_t.set_ylabel(labels[dim2])
+    ax_t.set_ylabel(labels[dim2], labelpad=2)
 
-    ax_t.set_title(r'$\mathrm{training\ data}$')
-    ax_s.set_title(r'$\mathrm{normalizing\ flow}$')
-    ax_d.set_title(r'$\mathrm{NF - training}$')
+    ax_t.set_title(r'$\mathrm{training\ data}$', fontsize=10)
+    ax_s.set_title(r'$\mathrm{normalizing\ flow\ (NF)}$', fontsize=10)
+    ax_d.set_title(r'$\mathrm{NF - training}$', fontsize=10)
 
     fig.subplots_adjust(
-        left=0.07,
-        right=0.92,
-        bottom=0.15,
-        top=0.88
+        left=0.11,
+        right=0.88,
+        bottom=0.22,
+        top=0.88,
+        wspace=0.16
     )
 
-    fname = os.path.join(fig_dir, f'DF_marginal_{dim1}_{dim2}.{fig_fmt}')
-    fig.savefig(fname, dpi=dpi)
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'DF_marginal_{dim1}_{dim2}.{fmt}')
+        fig.savefig(fname, dpi=dpi)
     plt.close(fig)
 
 
@@ -325,6 +334,18 @@ def main():
         help='Flow model filename pattern(s).'
     )
     parser.add_argument(
+        '--save-samples',
+        type=str,
+        metavar='*.h5',
+        help='Save samples to this filename after generating them.'
+    )
+    parser.add_argument(
+        '--load-samples',
+        type=str,
+        metavar='*.h5',
+        help='Load samples, instead of generating them.'
+    )
+    parser.add_argument(
         '--fig-dir',
         type=str,
         default='plots',
@@ -351,8 +372,23 @@ def main():
     loss_mean, loss_std = evaluate_loss(flows, eta_train)
     print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
 
-    print('Sampling from flows ...')
-    eta_sample = sample_from_flows(flows, args.oversample*n_train)
+    if args.load_samples is None:
+        print('Sampling from flows ...')
+        eta_sample = sample_from_flows(flows, args.oversample*n_train)
+        print('  --> Saving samples ...')
+        if args.save_samples is not None:
+            with h5py.File(args.save_samples, 'w') as f:
+                f.create_dataset(
+                    'eta',
+                    data=eta_sample,
+                    chunks=True,
+                    compression='lzf'
+                )
+    else:
+        print('Loading pre-generated samples ...')
+        with h5py.File(args.load_samples, 'r') as f:
+            eta_sample = f['eta'][:]
+        print(f'  --> {len(eta_sample)} samples')
     print(f'  --> {np.count_nonzero(np.isnan(eta_sample))} NaN values')
 
     print('Converting to cylindrical coordinates ...')

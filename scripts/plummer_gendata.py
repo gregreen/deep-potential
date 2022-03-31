@@ -3,7 +3,7 @@
 from __future__ import print_function, division
 
 import numpy as np
-import json
+import h5py
 
 import toy_systems
 
@@ -46,9 +46,8 @@ def sample_df(n_samples, max_dist=None):
 
 
 def save_data(data, fname):
-    o = {'eta': data.tolist()}
-    with open(fname, 'w') as f:
-        json.dump(o, f)
+    with h5py.File(fname, 'w') as f:
+        f.create_dataset('eta', data=data, compression='lzf', chunks=True)
 
 
 def main():
@@ -57,25 +56,40 @@ def main():
         description='Deep Potential: Generate Plummer-sphere data.',
         add_help=True
     )
-    parser.add_argument('-n', type=int, required=True, help='# of points.')
-    parser.add_argument('-o', type=str, required=True, help='Output filename.')
-    parser.add_argument('-d', type=float, default=10., help='Max. distance.')
+    parser.add_argument(
+        '-n',
+        type=int,
+        required=True,
+        help='# of points.'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        required=True,
+        help='Output filename.'
+    )
+    parser.add_argument(
+        '-d', '--max-dist',
+        type=float,
+        default=10.,
+        help='Max. distance.'
+    )
     args = parser.parse_args()
 
     n_tot = 0
     data = []
     while n_tot < args.n:
-        data.append(sample_df(int(1.2 * args.n), max_dist=args.d))
+        data.append(sample_df(int(1.2 * args.n), max_dist=args.max_dist))
         n = data[-1].shape[0]
         n_tot += n
-        print(f'Drew {n} samples.')
+        print(f'Drew {n} samples within maximum distance.')
     data = np.concatenate(data, axis=0)[:args.n]
 
     loss = calc_ideal_loss(data)
     print(f'Ideal loss: {loss:.6f}')
-    
+
     print('Saving data.')
-    save_data(data, args.o)
+    save_data(data, args.output)
 
     return 0
 
