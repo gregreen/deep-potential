@@ -118,15 +118,19 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
 
 
 def train_potential(df_data, fname, plot_fname, loss_fname,
-                    n_hidden=3, hidden_size=256, xi=1., lam=1.,
+                    n_hidden=3, hidden_size=256, xi=1., lam=1., l2=0,
                     n_epochs=4096, batch_size=1024, validation_frac=0.25,
                     lr={}, optimizer='RAdam', warmup_proportion=0.1,
                     checkpoint_every=None, max_checkpoints=None):
+    # Estimate typical spatial scale of DF data along each dimension
+    q_scale = np.std(df_data['eta'][:,:3], axis=0)
+
     # Create model
     phi_model = potential_tf.PhiNN(
         n_dim=3,
         n_hidden=n_hidden,
-        hidden_size=hidden_size
+        hidden_size=hidden_size,
+        scale=q_scale
     )
 
     lr_kw = {f'lr_{k}':lr[k] for k in lr}
@@ -140,6 +144,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         batch_size=batch_size,
         xi=xi,
         lam=lam,
+        l2=l2,
         validation_frac=validation_frac,
         optimizer=optimizer,
         warmup_proportion=warmup_proportion,
@@ -372,6 +377,7 @@ def load_params(fname):
                 "hidden_size": {'type':'integer', 'default':256},
                 "xi": {'type':'float', 'default':1.0},
                 "lam": {'type':'float', 'default':1.0},
+                "l2": {'type':'float', 'default':0.01},
                 "n_epochs": {'type':'integer', 'default':64},
                 "batch_size": {'type':'integer', 'default':1024},
                 "lr": {

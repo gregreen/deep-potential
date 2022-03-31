@@ -107,7 +107,7 @@ def get_phi_loss_gradients(phi, params, q, p,
                            sigma_q=tf.constant(1.0),
                            sigma_p=tf.constant(1.0),
                            eps_w=tf.constant(0.1),
-                           l2 = tf.constant(1.0),
+                           l2=tf.constant(0.01),
                            weight_samples=False,
                            return_grads=True):
     """
@@ -175,13 +175,14 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # Average over sampled points in phase space
         #likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
-        likelihood = tf.math.abs(df_dt)
+        likelihood = tf.math.asinh(tf.math.abs(df_dt))
+        tf.print('likelihood:', tf.reduce_mean(likelihood))
 
         if lam != 0:
-            #prior_neg = tf.math.asinh(
-            #    tf.clip_by_value(-d2phi_dq2, 0., np.inf)
-            #)
-            prior_neg = tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            prior_neg = tf.math.asinh(
+                tf.clip_by_value(-d2phi_dq2, 0., np.inf)
+            )
+            #prior_neg = tf.clip_by_value(-d2phi_dq2, 0., np.inf)
             tf.print('prior_neg:', tf.reduce_mean(lam*prior_neg))
             #pneg_mean = tf.math.reduce_mean(prior_neg)
             #pneg_max = tf.math.reduce_max(prior_neg)
@@ -208,8 +209,9 @@ def get_phi_loss_gradients(phi, params, q, p,
         # for p in params:
         #     penalty += tf.reduce_sum(p**2)
 
-        tf.print('likelihood:', tf.reduce_mean(likelihood))
+        #tf.print('likelihood:', tf.reduce_mean(likelihood))
         loss = tf.math.log(tf.reduce_mean(likelihood))
+        tf.print('loss (before penalty):', loss)
         #    likelihood
         #    + lam*prior_neg
         #    + mu*prior_pos
@@ -218,12 +220,13 @@ def get_phi_loss_gradients(phi, params, q, p,
 
         # L2 penalty on all weights (identified by "w:0" in name)
         if l2 != 0:
+            print(f'l2 = {l2}')
             penalty = 0
             for p in params:
                 if 'w:0' in p.name:
-                    print(f'l2 penalty on {p}')
+                    print(f'L2 penalty on {p}')
                     penalty += l2 * tf.reduce_mean(p**2)
-            tf.print('\npenalty:', penalty)
+            tf.print('L2 penalty:', penalty)
             loss += penalty
 
     # Gradients of loss w.r.t. NN parameters
@@ -240,18 +243,19 @@ class PhiNN(snt.Module):
     potential.
     """
 
-    def __init__(self, n_dim=3, n_hidden=3, hidden_size=32, name='Phi'):
+    def __init__(self, n_dim=3, n_hidden=3, hidden_size=32,
+                       scale=None, name='Phi'):
         """
         Constructor for PhiNN.
 
         Inputs:
             n_dim (int): Dimensionality of space.
             n_hidden (int): Number of hidden layers.
-            n_features (int): Number of neurons in each hidden layer.
-            build (bool): Whether to create the weights and biases.
-                Defaults to True. This option exists so that the
-                deserializer can set the weights and biases on its
-                own.
+            hidden_size (int): Number of neurons in each hidden layer.
+            scale (float-array-like): Typical scale of coordinates along
+                each dimension. This will be used to rescale the
+                coordinates, before passing them into the neural network.
+                Defaults to None, in which case the scales are 1.
         """
         super(PhiNN, self).__init__(name=name)
 
@@ -259,6 +263,18 @@ class PhiNN(snt.Module):
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
         self._name = name
+
+        # Coordinate scaling
+        if scale is None:
+            coord_scale = np.ones((1,n_dim), dtype='f4')
+        else:
+            print(f'Using coordinate scale: {scale}')
+            coord_scale = np.reshape(scale, (1,n_dim)).astype('f4')
+        self._scale = tf.Variable(
+            1/coord_scale,
+            trainable=False,
+            name='coord_scaling'
+        )
 
         self._layers = [
             snt.Linear(hidden_size, name=f'hidden_{i}')
@@ -272,12 +288,16 @@ class PhiNN(snt.Module):
         self.__call__(tf.zeros([1,n_dim]))
 
     def __call__(self, x):
+        # Transform coordinates to standard frame
+        x = self._scale * x
+        # Run the coordinates through the neural net
         for layer in self._layers[:-1]:
             x = layer(x)
             x = self._activation(x)
+        # No activation on the final layer
         x = self._layers[-1](x)
         return x
-    
+
     def save(self, fname_base):
         # Save variables
         checkpoint = tf.train.Checkpoint(phi=self)
@@ -329,7 +349,8 @@ def train_potential(
             checkpoint_name='Phi',
             xi=1.,   # Scale above which outliers are suppressed
             lam=1.,  # Penalty for negative matter densities
-            mu=0     # Penalty for positive matter densities
+            mu=0,    # Penalty for positive matter densities
+            l2=0     # L2 penalty on weights in the model
         ):
 
     # Split training/validation sample
@@ -467,6 +488,7 @@ def train_potential(
             delf_delt_scale=1,#delf_delt_scale,
             lam=lam,
             mu=mu,
+            l2=l2,
             weight_samples=False
         )
 
@@ -497,6 +519,7 @@ def train_potential(
             delf_delt_scale=1,#delf_delt_scale,
             lam=lam,
             mu=mu,
+            l2=l2,
             weight_samples=False,
             return_grads=False
         )
