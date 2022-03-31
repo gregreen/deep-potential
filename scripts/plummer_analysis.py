@@ -18,7 +18,7 @@ print(f'Tensorflow version {tf.__version__}')
 
 import progressbar
 from glob import glob
-import json
+import h5py
 import os
 import os.path
 
@@ -63,15 +63,17 @@ def df_ideal(eta, r_max=None):
     f = tf.clip_by_value(-E, 0, np.inf)**(7/2)
 
     A = 24 * np.sqrt(2.) / (7. * np.pi**3)
-    
+
     if r_max is not None:
-        A /= plummer_mass(r_max)
+        norm = plummer_mass(r_max)
+        print(f'Mass normalization: {norm}')
+        A /= norm
 
     return A * f
 
 
 def plummer_mass(r_max):
-    return r_max**3 / (1. + r_max)**1.5
+    return r_max**3 / (1. + r_max**2)**1.5
 
 
 def plot_gradients(df_data, fname, batch_size=1024, r_max=None):
@@ -357,7 +359,7 @@ def plot_flow_slices(flows, fname):
 
     # Slices through distribution
     x_max = 2.2
-    n_bins = 200
+    n_bins = 50
     q = np.linspace(-x_max, x_max, n_bins).astype('f4')
 
     x,y = np.meshgrid(q,q)
@@ -777,12 +779,15 @@ def plot_phi(phi_nn, df_data, fname,
 
 
 def load_df_data(fname):
-    with open(fname, 'r') as f:
-        o = json.load(f)
+    with h5py.File(fname, 'r') as f:
+        d = {k:f[k][:] for k in ('eta', 'df_deta')}
 
-    d = {}
-    for key in o:
-        d[key] = np.array(o[key], dtype='f4')
+    #with open(fname, 'r') as f:
+    #    o = json.load(f)
+
+    #d = {}
+    #for key in o:
+    #    d[key] = np.array(o[key], dtype='f4')
 
     return d
 
@@ -895,11 +900,18 @@ def main():
         print('Loading flow models ...')
         flows = load_flows(args.flows)
 
+        print('Plotting projections and histograms of stored samples ...')
+        fname_base_proj, ext_proj = os.path.splitext(args.proj)
+        ext_proj = ext_proj.lstrip('.')
+        fig = plot_flow_projections(df_data['eta'])
+        fig.savefig(f'{fname_base_proj}.{ext_proj}', dpi=150)
+        plt.close(fig)
+
         print('Plotting DF gradients ...')
         plot_gradients(df_data, args.grad, r_max=args.r_max)
 
-        print('Plotting flow trajectories ...')
-        plot_flow_trajectories_multiple(flows, args.traj)
+        #print('Plotting flow trajectories ...')
+        #plot_flow_trajectories_multiple(flows, args.traj)
 
         print('Plotting slices through flows ...')
         plot_flow_slices(flows, args.slice)
