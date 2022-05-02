@@ -153,7 +153,10 @@ def load_loss_history(fname):
     return loss_history, val_loss_history, lr_history
 
 
-def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
+def plot_corr(ax, x, y,
+              x_lim=None, d_max=None,
+              bins=(50,31), pct=(16,50,84),
+              normalization='balanced'):
     if x_lim is None:
         x_min, x_max = np.min(x), np.max(x)
         # w = x_max - x_min
@@ -170,8 +173,21 @@ def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
     d = y - x
     n,x_edges,_ = np.histogram2d(x, d, range=(xlim, dlim), bins=bins)
 
-    norm = np.sum(n, axis=1) + 1.e-10
+    if normalization == None:
+        norm = np.ones(n.shape[0])
+    elif normalization == 'sum':
+        norm = np.sum(n, axis=1) + 1.e-10
+    elif normalization == 'max':
+        norm = np.max(n, axis=1) + 1.e-10
+    elif normalization == 'balanced':
+        norm0 = np.sum(n, axis=1)
+        norm1 = np.max(n, axis=1)
+        norm = np.sqrt(norm0*norm1) + 1.e-10
+    else:
+        raise ValueError(f'Unrecognized normalization: "{normalization}"')
     n /= norm[:,None]
+
+    #n = n**gamma
 
     ax.imshow(
       n.T,
@@ -204,7 +220,57 @@ def plot_corr(ax, x, y, x_lim=None, d_max=None, bins=(50,31), pct=(16,50,84)):
     ax.set_ylim(dlim)
 
 
+def hist2d_mean(ax, x, y, c,
+                vmin=None, vmax=None, cmap=None,
+                bins=10, range=None):
+    kw = dict(bins=bins, range=range, density=False)
+    nc,xedges,yedges = np.histogram2d(x, y, weights=c, **kw)
+    n,_,_ = np.histogram2d(x, y, **kw)
+    img = nc / n
+
+    extent = (
+        xedges[0], xedges[-1],
+        yedges[0], yedges[-1]
+    )
+
+    im = ax.imshow(
+        img.T,
+        extent=extent,
+        origin='lower',
+        aspect='auto',
+        interpolation='nearest',
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap
+    )
+
+    return im
+
+
 def main():
+    rng = np.random.default_rng()
+
+    x = [rng.uniform(0., 0.1, 1000), rng.uniform(0., 1.0, 1000)]
+    y = [rng.uniform(0., 1.0, 1000), rng.uniform(0., 0.1, 1000)]
+    c = [np.ones(1000), -1 * np.ones(1000)]
+
+    x = np.hstack(x)
+    y = np.hstack(y)
+    c = np.hstack(c)
+
+    fig,ax = plt.subplots(1,1, figsize=(4,3), dpi=200)
+
+    im = hist2d_mean(
+        ax, x, y, c,
+        vmin=-1, vmax=1,
+        cmap='coolwarm_r',
+        bins=10, range=[(0,1),(0,1)]
+    )
+
+    fig.colorbar(im, ax=ax)
+
+    fig.savefig('hist2d_mean_example.png', dpi=200)
+
     return 0
 
 if __name__ == '__main__':
