@@ -1,34 +1,56 @@
 {
   "df": {
     "n_flows": 1,
-    "n_hidden": 2,
-    "hidden_size": 16,
-    "n_bij": 2,
+    "n_hidden": 3,
+    "hidden_size": 128,
+    "n_bij": 3,
     "reg": {
       "dv_dt_reg": 0,
-      "kinetic_reg": 1e-05,
-      "jacobian_reg": 1e-05
+      "kinetic_reg": 1e-04,
+      "jacobian_reg": 1e-04
     },
-    "n_epochs": 128,
-    "batch_size": 64,
+    "n_epochs": 32768,
+    "batch_size": 8192,
     "lr": {
-			"type": "step",
-			"init": 0.02,
-			"patience": 1024,
-			"min_delta": 0.01
-		},
+      "type": "step",
+      "init": 0.005,
+      "patience": 2048,
+      "min_delta": 0.01
+    },
     "optimizer": "RAdam",
+    "warmup_proportion": 0.0009765625,
+    "max_checkpoints": 128,
     "checkpoint_every": 1
   },
   "Phi": {
-    "n_samples": 524288,
+    "n_samples": 65536,
+    "sample_batch_size": 2048,
+    "grad_batch_size": 128,
     "n_hidden": 4,
-    "hidden_size": 32,
+    "hidden_size": 512,
     "xi": 1.0,
     "lam": 1.0,
-    "n_epochs": 2048,
-    "batch_size": 16384,
-    "lr_init": 0.001,
-    "lr_final": 0.00001
+    "l2": 0.1,
+    "n_epochs": 4096,
+    "batch_size": 32768,
+    "lr": {
+      "type": "step",
+      "init": 0.001,
+      "patience": 2048,
+      "min_delta": 0.005
+    },
+    "optimizer": "RAdam",
+    "warmup_proportion": 0.015625,
+    "max_checkpoints": 128,
+    "checkpoint_every": 16,
+    "frameshift": {
+      "omega0": 0.0,
+      "r_c0": 0.0,
+      "theta_c0": 0.0,
+      "phi_c0": 0.0,
+      "u_LSRx0": 0.0,
+      "u_LSRy0": 0.0,
+      "u_LSRz0": 0.0
+    }
   }
 }

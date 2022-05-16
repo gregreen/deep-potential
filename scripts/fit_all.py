@@ -31,6 +31,7 @@ import os.path
 
 import serializers_tf
 import potential_tf
+import potential_frameshift_tf
 import toy_systems
 import flow_ffjord_tf
 import utils
@@ -121,25 +122,33 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
                     n_hidden=3, hidden_size=256, xi=1., lam=1., l2=0,
                     n_epochs=4096, batch_size=1024, validation_frac=0.25,
                     lr={}, optimizer='RAdam', warmup_proportion=0.1,
-                    checkpoint_every=None, max_checkpoints=None):
+                    checkpoint_every=None, max_checkpoints=None, include_frameshift=False, frameshift={}):
     # Estimate typical spatial scale of DF data along each dimension
     q_scale = np.std(df_data['eta'][:,:3], axis=0)
 
     # Create model
-    phi_model = potential_tf.PhiNN(
+    phi_model = potential_frameshift_tf.PhiNN(
         n_dim=3,
         n_hidden=n_hidden,
         hidden_size=hidden_size,
         scale=q_scale
     )
 
+    frameshift_model = None
+    if include_frameshift:
+        frameshift_model = potential_frameshift_tf.FrameShift(
+            n_dim=3,
+            **frameshift
+        )
+
     lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
     checkpoint_dir, checkpoint_name = os.path.split(fname)
     checkpoint_name += '_chkpt'
 
-    loss_history = potential_tf.train_potential(
+    loss_history = potential_frameshift_tf.train_potential(
         df_data, phi_model,
+        frameshift_model=frameshift_model,
         n_epochs=n_epochs,
         batch_size=batch_size,
         xi=xi,
@@ -155,7 +164,11 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         **lr_kw
     )
 
-    fn = phi_model.save(fname)
+    fn = potential_frameshift_tf.save_models(fname, phi_model, frameshift_model)
+    """fn = phi_model.save(fname)
+    if frameshift_model is not None: # TODO: This overwrites checkpoint for phi_model...
+        frameshift_model.save(fname)"""
+
 
     utils.save_loss_history(f'{fn}_loss.txt', loss_history)
 
@@ -163,6 +176,8 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
     fig.savefig(plot_fname, dpi=200)
     plt.close(fig)
 
+    if include_frameshift:
+        return phi_model, frameshift_model
     return phi_model
 
 
@@ -394,7 +409,19 @@ def load_params(fname):
                 "optimizer": {'type':'string', 'default':'RAdam'},
                 "warmup_proportion": {'type':'float', 'default':0.1},
                 "checkpoint_every": {'type':'integer'},
-                "max_checkpoints": {'type':'integer'}
+                "max_checkpoints": {'type':'integer'},
+                "frameshift": {
+                    'type': 'dict',
+                    'schema': {
+                        "omega0": {'type':'float', 'default':0.0},
+                        "r_c0": {'type':'float', 'default':0.0},
+                        "theta_c0": {'type':'float', 'default':0.0},
+                        "phi_c0": {'type':'float', 'default':0.0},
+                        "u_LSRy0": {'type':'float', 'default':0.0},
+                        "u_LSRz0": {'type':'float', 'default':0.0},
+                        "u_LSRx0": {'type':'float', 'default':0.0},
+                    }
+                }
             }
         }
     }
@@ -411,7 +438,7 @@ def main():
     )
     parser.add_argument(
         '--input', '-i',
-        type=str, required=True,
+        type=str, required=False,
         help='Input data.'
     )
     parser.add_argument(
@@ -448,6 +475,11 @@ def main():
         '--potential-only',
         action='store_true',
         help='Skip fitting of distribution function. Assume DF model exists.'
+    )
+    parser.add_argument(
+        '--potential-frameshift',
+        action='store_true',
+        help='Fit potential assuming stationarity in a non-laboratory frame of reference.'
     )
     parser.add_argument(
         '--flows-only',
@@ -526,11 +558,13 @@ def main():
     if not args.flows_only:
         print(params['Phi'])
         print('Fitting the potential ...')
+
         phi_model = train_potential(
             df_data,
             args.potential_fname,
             args.potential_loss,
             args.loss_history,
+            include_frameshift=args.potential_frameshift,
             **params['Phi']
         )
     
