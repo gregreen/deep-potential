@@ -16,6 +16,7 @@ import sonnet as snt
 import numpy as np
 import matplotlib.pyplot as plt
 
+import math
 import json
 import os
 from time import time
@@ -100,7 +101,7 @@ def calc_loss_terms(phi_func, q, p, df_dq, df_dp):
     return df_dt, d2phi_dq2
 
 
-def get_phi_loss_gradients(phi, params, q, p,
+def get_phi_loss_gradients(phi, frameshift, params, q, p,
                            f=None, df_dq=None, df_dp=None,
                            lam=1., mu=0,
                            xi=1., delf_delt_scale=1.,
@@ -122,7 +123,12 @@ def get_phi_loss_gradients(phi, params, q, p,
             (n,d) tensors, and returns a (n,) tensor.
         phi (callable): The gravitational potential. Takes q, a
             (n,d) tensor, and returns a (n,) tensor.
-        params (list of tf.Variable): The gradients will be taken
+        frameshift (callable): Frameshift container for indicating which
+            frame stationarity is enforced in. Takes q, p, both (n,d)
+            tensors, and returns two (n, d) tensors, corresponding
+            to u and w defined by the frameshift. If set to None,
+            stationarity is enforced in lab frame.
+        params (tuple of tf.Variable): The gradients will be taken
             w.r.t these parameters.
         q (tf.Tensor): Spatial coordinates at which to compute the
             loss and gradients.
@@ -131,6 +137,8 @@ def get_phi_loss_gradients(phi, params, q, p,
         lam (scalar): Constant that determines how strongly to
             penalize negative matter densities. Larger values
             translate to stronger penalties. Defaults to 1.
+
+        NOTE: weight_samples, sigma_q, sigma_p, eps_w aren't implemented
     
     Outputs:
         loss (tf.Tensor): Scalar tensor.
@@ -157,25 +165,21 @@ def get_phi_loss_gradients(phi, params, q, p,
         # Calculate derivatives of phi w.r.t. q
         dphi_dq, d2phi_dq2 = calc_phi_derivatives(phi, q)
 
-        # partial f / partial t = {H,f}
-        df_dt = tf.reduce_sum(df_dp * dphi_dq - df_dq * p, axis=1)
+        if frameshift is None:
+            # partial f / partial t = {H,f}
+            df_dt = tf.reduce_sum(df_dp * dphi_dq - df_dq * p, axis=1)
 
-        # Weight each point differently
-        if weight_samples:
-            print('Re-weighting samples.')
-            w = tf.stop_gradient(
-                tf.reduce_sum(
-                    dphi_dq**2 / sigma_p**2 + p**2 / sigma_q**2,
-                    axis=1
-                )
-            )
-            w = 1 / (w + eps_w)
-            #w = w / tf.reduce_mean(w)
-            df_dt = w * df_dt
+            null_hyp = df_dt
+        else: 
+            u, w = frameshift(q, p)
 
+            # TODO: add weighing
+            
+            null_hyp = tf.reduce_sum((p - u) * df_dq - (dphi_dq + w) * df_dp, axis=1)
+            
         # Average over sampled points in phase space
         #likelihood = tf.math.asinh(c * tf.math.abs(df_dt)) / c
-        likelihood = tf.math.asinh(tf.math.abs(df_dt))
+        likelihood = tf.math.asinh(tf.math.abs(null_hyp))
         tf.print('likelihood:', tf.reduce_mean(likelihood))
 
         if lam != 0:
@@ -228,6 +232,8 @@ def get_phi_loss_gradients(phi, params, q, p,
                     penalty += l2 * tf.reduce_mean(p**2)
             tf.print('L2 penalty:', penalty)
             loss += penalty
+
+            # TODO: Penalize FrameShift weights as well
 
     # Gradients of loss w.r.t. NN parameters
     if return_grads:
@@ -317,11 +323,13 @@ class PhiNN(snt.Module):
 
     @classmethod
     def load(cls, fname):
+        print(fname)
         # Load network specs
         with open(fname+'_spec.json', 'r') as f:
             kw = json.load(f)
         phi_nn = cls(**kw)
 
+        print(phi_nn)
         # Restore variables
         checkpoint = tf.train.Checkpoint(phi=phi_nn)
         #latest = tf.train.latest_checkpoint(fname_base)
@@ -330,9 +338,115 @@ class PhiNN(snt.Module):
 
         return phi_nn
 
+class FrameShift(tf.Module):
+    """
+    A 5-parameter model to represent the rotating frame in which f is stationary.
+    The rotation axis is (0, 0, \Omega) and passes through a point at position
+    (r_c, 0, 0). LSR moves with speed (u_LSRx, u_LSRy, u_LSRz).
+    """
+
+    def __init__(self, n_dim=3, omega0=0., r_c0=0.,
+                u_LSRx0=0., u_LSRy0=0., u_LSRz0=0., name='FrameShift'):
+        """
+        Constructor for FrameShift.
+
+        Inputs:
+            n_dim (int): Dimensionality of space.
+            omega0, ..., u_LSRz0: default values of the parameters that defined the frame shift.
+        """
+        super(FrameShift, self).__init__(name=name)
+
+        self._n_dim = n_dim
+        self._name = name
+
+        # Set the variables.
+        self._omega = tf.Variable(omega0, trainable=True, name='omega', dtype=tf.float32)
+        self._r_c = tf.Variable(r_c0, trainable=False, name='r_c', dtype=tf.float32)
+        self._u_LSRx = tf.Variable(u_LSRx0, trainable=True, name='u_LSRx', dtype=tf.float32)
+        self._u_LSRy = tf.Variable(u_LSRy0, trainable=True, name='u_LSRy', dtype=tf.float32)
+        self._u_LSRz = tf.Variable(u_LSRz0, trainable=True, name='u_LSRz', dtype=tf.float32)
+
+    def __call__(self, q, p):
+        # Returns u and w, the flows defined by the frame shift
+        n = q.shape[0]
+
+        # Add rotation and LSR vel to u (while shifting q by -r_c)
+        ux = tf.add(tf.multiply(q[:, 1], -self._omega), self._u_LSRx)
+        uy = tf.add(tf.multiply(tf.subtract(q[:, 0], self._r_c), self._omega), self._u_LSRy)
+        uz = tf.repeat(self._u_LSRz, n)
+        u = tf.stack((ux, uy, uz), axis=1)
+
+        # Add rotation to w
+        w = tf.stack((tf.multiply(p[:, 1], -self._omega), tf.multiply(p[:, 0], self._omega), tf.zeros(n)), axis=1)
+
+        return u, w
+
+    def save(self, fname_base):
+        # Save variables
+        checkpoint = tf.train.Checkpoint(frameshift=self)
+        fname_out = checkpoint.save(fname_base)
+
+        # Save the specs of the model
+        d = dict(
+            n_dim=self._n_dim,
+            name=self._name
+        )
+        with open(fname_out+'_fspec.json', 'w') as f:
+            json.dump(d, f)
+
+        return fname_out
+
+    @classmethod
+    def load(cls, fname):
+        print(fname)
+        # Load network specs
+        with open(fname+'_fspec.json', 'r') as f:
+            kw = json.load(f)
+        fs = cls(**kw)
+
+        # Restore variables
+        checkpoint = tf.train.Checkpoint(frameshift=fs)
+        checkpoint.restore(fname)
+
+        return fs
+
+    def debug(self):
+        print(f'name={self.name}\n\
+  u_LSR=({self._u_LSRx.numpy():.4f}, {self._u_LSRy.numpy():.4f}, {self._u_LSRz.numpy():.4f})\n\
+  omega={self._omega.numpy():.4f}, r_c={self._r_c.numpy():.4f}')
+
+
+def save_models(fname_base, phi, frameshift):
+    checkpoint = tf.train.Checkpoint(phi=phi)
+    if frameshift is not None:
+        checkpoint = tf.train.Checkpoint(phi=phi, frameshift=frameshift)
+    
+    fname_out = checkpoint.save(fname_base)
+
+    # Save the specs of phi
+    d = dict(
+        n_dim=phi._n_dim,
+        n_hidden=phi._n_hidden,
+        hidden_size=phi._hidden_size,
+        name=phi._name
+    )
+    with open(fname_out+'_spec.json', 'w') as f:
+        json.dump(d, f)
+
+    # Save the specs of frameshift
+    d = dict(
+        n_dim=frameshift._n_dim,
+        name=frameshift._name
+    )
+    with open(fname_out+'_fspec.json', 'w') as f:
+        json.dump(d, f)
+
+    return fname_out
+
 
 def train_potential(
             df_data, phi_model,
+            frameshift_model=None, # If set to None, train phi in lab frame
             optimizer=None,
             n_epochs=4096,
             batch_size=1024,
@@ -382,9 +496,15 @@ def train_potential(
     val_batches = val_batches.repeat(n_epochs+1)
     val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
-    phi_param = phi_model.trainable_variables
-    n_variables = sum([int(tf.size(param)) for param in phi_param])
-    print(f'{n_variables} variables in the gravitational potential model.')
+    phi_param = phi_model.trainable_variables # Returns a tuple
+    n_variables_phi = sum([int(tf.size(param)) for param in phi_param])
+    print(f'{n_variables_phi} variables in the gravitational potential model.')
+
+    frameshift_param = ()
+    if frameshift_model is not None:
+        frameshift_param = frameshift_model.trainable_variables
+        n_variables_frameshift = sum([int(tf.size(param)) for param in frameshift_param])
+        print(f'{n_variables_frameshift} variables in the frameshift model.')
 
     # Estimate typical scale of flows (with constant gravitational potential)
     #delf_delt_scale = np.percentile(
@@ -442,10 +562,16 @@ def train_potential(
     loss_min = tf.Variable(np.inf, name='loss_min')
 
     if checkpoint_every is not None:
-        checkpoint = tf.train.Checkpoint(
-            opt=opt, phi=phi_model,
-            step=step, loss_min=loss_min
-        )
+        if frameshift_model is None:
+            checkpoint = tf.train.Checkpoint(
+                opt=opt, phi=phi_model,
+                step=step, loss_min=loss_min
+            )
+        else:
+            checkpoint = tf.train.Checkpoint(
+                opt=opt, phi=phi_model, frameshift=frameshift_model,
+                step=step, loss_min=loss_min
+            )
         chkpt_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=checkpoint_dir,
@@ -467,7 +593,9 @@ def train_potential(
             )
 
         # Convert from # of epochs to # of steps between checkpoints
-        checkpoint_steps = checkpoint_every * n_samples // batch_size
+        checkpoint_steps = math.ceil(checkpoint_every * n_samples / batch_size)
+        #print(n_samples, batch_size, n_epochs)
+        #print(checkpoint_steps, (checkpoint_every * n_samples) // batch_size, n_epochs, n_steps)
 
     @tf.function
     def training_step(batch):
@@ -480,7 +608,8 @@ def train_potential(
 
         # Calculate the loss and its gradients w.r.t. the parameters
         loss, dloss_dparam = get_phi_loss_gradients(
-            phi_model, phi_param,
+            phi_model, frameshift_model,
+            phi_param + frameshift_param,
             q_b, p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
@@ -496,7 +625,8 @@ def train_potential(
         tf.print('\nglobal norm:', global_norm)
 
         # Take step using optimizer
-        opt.apply_gradients(zip(dloss_dparam, phi_param))
+        opt.apply_gradients(zip(dloss_dparam, phi_param + frameshift_param))
+
 
         return loss
 
@@ -511,7 +641,8 @@ def train_potential(
 
         # Calculate the loss and its gradients w.r.t. the parameters
         loss = get_phi_loss_gradients(
-            phi_model, phi_param,
+            phi_model, frameshift_model,
+            phi_param + frameshift_param,
             q_b, p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
@@ -530,7 +661,10 @@ def train_potential(
     step = tf.Variable(0, name='step')
     checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
     if checkpoint_every is not None:
-        checkpoint = tf.train.Checkpoint(opt=opt, phi=phi_model, step=step)
+        if frameshift_model is None:
+            checkpoint = tf.train.Checkpoint(opt=opt, phi=phi_model, step=step)
+        else:
+            checkpoint = tf.train.Checkpoint(opt=opt, phi=phi_model, frameshift=frameshift_model, step=step)
 
         # Look for latest extisting checkpoint
         latest = tf.train.latest_checkpoint(checkpoint_dir)

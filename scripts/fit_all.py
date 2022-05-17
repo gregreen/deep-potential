@@ -31,7 +31,6 @@ import os.path
 
 import serializers_tf
 import potential_tf
-import potential_frameshift_tf
 import toy_systems
 import flow_ffjord_tf
 import utils
@@ -127,7 +126,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
     q_scale = np.std(df_data['eta'][:,:3], axis=0)
 
     # Create model
-    phi_model = potential_frameshift_tf.PhiNN(
+    phi_model = potential_tf.PhiNN(
         n_dim=3,
         n_hidden=n_hidden,
         hidden_size=hidden_size,
@@ -136,7 +135,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
 
     frameshift_model = None
     if include_frameshift:
-        frameshift_model = potential_frameshift_tf.FrameShift(
+        frameshift_model = potential_tf.FrameShift(
             n_dim=3,
             **frameshift
         )
@@ -146,7 +145,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
     checkpoint_dir, checkpoint_name = os.path.split(fname)
     checkpoint_name += '_chkpt'
 
-    loss_history = potential_frameshift_tf.train_potential(
+    loss_history = potential_tf.train_potential(
         df_data, phi_model,
         frameshift_model=frameshift_model,
         n_epochs=n_epochs,
@@ -164,7 +163,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         **lr_kw
     )
 
-    fn = potential_frameshift_tf.save_models(fname, phi_model, frameshift_model)
+    fn = potential_tf.save_models(fname, phi_model, frameshift_model)
     """fn = phi_model.save(fname)
     if frameshift_model is not None: # TODO: This overwrites checkpoint for phi_model...
         frameshift_model.save(fname)"""
@@ -415,8 +414,6 @@ def load_params(fname):
                     'schema': {
                         "omega0": {'type':'float', 'default':0.0},
                         "r_c0": {'type':'float', 'default':0.0},
-                        "theta_c0": {'type':'float', 'default':0.0},
-                        "phi_c0": {'type':'float', 'default':0.0},
                         "u_LSRy0": {'type':'float', 'default':0.0},
                         "u_LSRz0": {'type':'float', 'default':0.0},
                         "u_LSRx0": {'type':'float', 'default':0.0},
