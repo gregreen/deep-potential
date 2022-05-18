@@ -42,7 +42,7 @@
     "optimizer": "RAdam",
     "warmup_proportion": 0.015625,
     "max_checkpoints": 128,
-    "checkpoint_every": 64,
+    "checkpoint_every": 16,
     "frameshift": {
       "omega0": 0.03,
       "r_c0": 0.03,

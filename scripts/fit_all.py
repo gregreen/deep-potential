@@ -20,7 +20,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from matplotlib.gridspec import GridSpec
 
 from time import time, sleep
-import re
+from pathlib import Path
 import json
 import h5py
 import progressbar
@@ -132,6 +132,9 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         hidden_size=hidden_size,
         scale=q_scale
     )
+    checkpoint_dir, checkpoint_name = os.path.split(fname)
+    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    phi_model.save_specs(fname)
 
     frameshift_model = None
     if include_frameshift:
@@ -139,11 +142,10 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
             n_dim=3,
             **frameshift
         )
+        frameshift_model.save_specs(fname)
 
     lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
-    checkpoint_dir, checkpoint_name = os.path.split(fname)
-    checkpoint_name += '_chkpt'
 
     loss_history = potential_tf.train_potential(
         df_data, phi_model,
@@ -163,13 +165,13 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         **lr_kw
     )
 
-    fn = potential_tf.save_models(fname, phi_model, frameshift_model)
+    #fn = potential_tf.save_models(fname, phi_model, frameshift_model)
     """fn = phi_model.save(fname)
     if frameshift_model is not None: # TODO: This overwrites checkpoint for phi_model...
         frameshift_model.save(fname)"""
 
 
-    utils.save_loss_history(f'{fn}_loss.txt', loss_history)
+    utils.save_loss_history(f'{fname}_loss.txt', loss_history)
 
     fig = utils.plot_loss(loss_history)
     fig.savefig(plot_fname, dpi=200)
