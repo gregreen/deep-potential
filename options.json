@@ -45,7 +45,7 @@
     "checkpoint_every": 16,
     "frameshift": {
       "omega0": 0.03,
-      "r_c0": 0.03,
+      "r_c0": 0.032,
       "u_LSRx0": 0.10,
       "u_LSRy0": -0.13,
       "u_LSRz0": 0.00

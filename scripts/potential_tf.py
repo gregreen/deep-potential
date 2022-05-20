@@ -26,9 +26,7 @@ from utils import *
 
 
 def calc_df_deta(f_func, q, p):
-    #print('Tracing calc_df_deta ...')
-
-    # Calculate gradients of distribution function
+    """Calculates gradients of distribution function at q and p"""
     with tf.GradientTape(persistent=True) as g:
         g.watch([q, p])
         f = f_func(q, p)
@@ -40,7 +38,7 @@ def calc_df_deta(f_func, q, p):
 
 
 def calc_phi_derivatives(phi_func, q, return_phi=False):
-    # Calculate derivatives of the potential.
+    """Calculates derivatives of the potential at q."""
     # We have to use an unstacking and re-stacking trick,
     # which comes from https://github.com/xuzhiqin1990/laplacian/
     with tf.GradientTape(persistent=True) as gg:
@@ -206,7 +204,7 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
             penalty = 0
             for p in params:
                 if ('l2penalty' in p.name) and (not 'b:0' in p.name) :
-                    #tf.print(f'L2 penalty on {p}')
+                    print(f'L2 penalty on {p}')
                     penalty += l2 * tf.reduce_mean(p**2)
             tf.print('L2 penalty:', penalty)
             loss += penalty
@@ -223,6 +221,12 @@ class PhiNN(snt.Module):
     """
     Feed-forward neural network to represent the gravitational
     potential.
+
+    Note on checkpointing: Both PhiNN and FrameShift rely on a combination of
+    tf.Checkpoint and a custom spec saving system. This is caused by
+    restoration from a tf Checkpoint requiring an already initialized instance
+    of the object. Initializing the object can't use data stored in the
+    checkpoint, and must find its metadata elsewhere, hence from the spec file.
     """
 
     def __init__(self, n_dim=3, n_hidden=3, hidden_size=32,
@@ -248,7 +252,7 @@ class PhiNN(snt.Module):
 
         # Coordinate scaling
         if scale is None:
-            coord_scale = np.ones((1,n_dim), dtype='f4')
+            coord_scale = np.ones((1, n_dim), dtype='f4')
         else:
             print(f'Using coordinate scale: {scale}')
             coord_scale = np.reshape(scale, (1,n_dim)).astype('f4')
@@ -269,36 +273,37 @@ class PhiNN(snt.Module):
         # Initialize
         self.__call__(tf.zeros([1,n_dim]))
 
-    def __call__(self, x):
+    def __call__(self, q):
+        """Returns the gravitational potential"""
         # Transform coordinates to standard frame
-        x = self._scale * x
+        q = self._scale * q
         # Run the coordinates through the neural net
         for layer in self._layers[:-1]:
-            x = layer(x)
-            x = self._activation(x)
+            q = layer(q)
+            q = self._activation(q)
         # No activation on the final layer
-        x = self._layers[-1](x)
-        return x
+        q = self._layers[-1](q)
+        return q
 
-    def save_specs(self, fname):
-        # Save the specs of the neural network
+    def save_specs(self, spec_name_base):
+        """Saves the specs of the model that are required for initialization to a json"""
         d = dict(
             n_dim=self._n_dim,
             n_hidden=self._n_hidden,
             hidden_size=self._hidden_size,
             name=self._name
         )
-        with open(fname + '_spec.json', 'w') as f:
+        with open(spec_name_base + '_spec.json', 'w') as f:
             json.dump(d, f)
 
-        return fname
+        return spec_name_base
 
     @classmethod
     def load(cls, checkpoint_name):
+        """Load PhiNN from a checkpoint and a spec file"""
         # Get spec file name
         if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
-            print("PhiNN checkpoint name doesn't follow the correct syntax.")
-            return None
+            raise ValueError("PhiNN checkpoint name doesn't follow the correct syntax.")
         spec_name = checkpoint_name.rsplit('-', 1)[0] + "_spec.json"
         
         # Load network specs
@@ -315,14 +320,21 @@ class PhiNN(snt.Module):
 
     @classmethod
     def load_latest(cls, checkpoint_dir):
+        """Load the latest PhiNN from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         return PhiNN.load(latest)
+
 
 class FrameShift(tf.Module):
     """
     A 5-parameter model to represent the rotating frame in which f is stationary.
-    The rotation axis is (0, 0, \Omega) and passes through a point at position
-    (r_c, 0, 0). LSR moves with speed (u_LSRx, u_LSRy, u_LSRz).
+    The rotation axis is (0, 0, Omega) and passes through a point at position
+    x_c = (r_c, 0, 0). LSR moves with speed (u_LSRx, u_LSRy, u_LSRz).
+    Note that there is a degeneracy between r_c, u_LSRy and Omega
+    
+    The infinitesimal flow is given by
+        x -> x + dt*u = x + dt*Omega x (x - x_c),
+        v -> v + dt*w = v + dt*Omega x v.
     """
 
     def __init__(self, n_dim=3, omega0=0., r_c0=0.,
@@ -347,37 +359,39 @@ class FrameShift(tf.Module):
         self._u_LSRz = tf.Variable(u_LSRz0, trainable=True, name='u_LSRz', dtype=tf.float32)
 
     def __call__(self, q, p):
-        # Returns u and w, the flows defined by the frame shift
+        """Returns u and w, the flows defined by the frame shift""" 
         n = q.shape[0]
 
+        qx, qy, _ = tf.unstack(q, axis=1)
+        px, py, _ = tf.unstack(p, axis=1)
         # Add rotation and LSR vel to u (while shifting q by -r_c)
-        ux = tf.add(tf.multiply(q[:, 1], -self._omega), self._u_LSRx)
-        uy = tf.add(tf.multiply(tf.subtract(q[:, 0], self._r_c), self._omega), self._u_LSRy)
+        ux = tf.add(tf.multiply(qy, -self._omega), self._u_LSRx)
+        uy = tf.add(tf.multiply(tf.subtract(qx, self._r_c), self._omega), self._u_LSRy)
         uz = tf.repeat(self._u_LSRz, n)
         u = tf.stack((ux, uy, uz), axis=1)
 
         # Add rotation to w
-        w = tf.stack((tf.multiply(p[:, 1], -self._omega), tf.multiply(p[:, 0], self._omega), tf.zeros(n)), axis=1)
+        w = tf.stack((tf.multiply(py, -self._omega), tf.multiply(px, self._omega), tf.zeros(n)), axis=1)
 
         return u, w
 
-    def save_specs(self, fname):
-        # Save the specs of the model
+    def save_specs(self, spec_name_base):
+        """Saves the specs of the model that are required for initialization to a json"""
         d = dict(
             n_dim=self._n_dim,
             name=self._name
         )
-        with open(fname + '_fspec.json', 'w') as f:
+        with open(spec_name_base + '_fspec.json', 'w') as f:
             json.dump(d, f)
 
-        return fname
+        return spec_name_base
 
     @classmethod
     def load(cls, checkpoint_name):
+        """Load FrameShift from a checkpoint and a spec file"""
         # Get spec file name
         if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
-            print("FrameShift checkpoint name doesn't follow the correct syntax.")
-            return None
+            raise ValueError("FrameShift checkpoint name doesn't follow the correct syntax.")
         spec_name = checkpoint_name.rsplit('-', 1)[0] + "_fspec.json"
         
         # Load network specs
@@ -394,6 +408,7 @@ class FrameShift(tf.Module):
 
     @classmethod
     def load_latest(cls, checkpoint_dir):
+        """Load the latest FrameShift from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         return FrameShift.load(latest)
 
@@ -404,8 +419,7 @@ class FrameShift(tf.Module):
 
 
 def train_potential(
-            df_data, phi_model,
-            frameshift_model=None, # If set to None, train phi in lab frame
+            df_data, phi_model, frameshift_model=None,
             optimizer=None,
             n_epochs=4096,
             batch_size=1024,
@@ -420,12 +434,53 @@ def train_potential(
             max_checkpoints=None,
             checkpoint_dir=r'checkpoints/Phi',
             checkpoint_name='Phi',
-            xi=1.,   # Scale above which outliers are suppressed
-            lam=1.,  # Penalty for negative matter densities
-            mu=0,    # Penalty for positive matter densities
-            l2=0     # L2 penalty on weights in the model
+            xi=1., lam=1., mu=0, l2=0
         ):
+    """
+    Fits a gravitational potential and a optionally a frameshift based on the 
+    given data. Potential is fit to satisfy CBE and frameshift represents the
+    frame at which stationarity is best enforced in.
 
+    Let
+        n := # of points at which to evaluate loss terms,
+        d := # of spatial dimensions.
+
+    Inputs:
+        df_data (dict of np.Array): The data to train the models on.
+            'eta' contains 2*d columns, 0,...,d-1 corresponding to q and
+            d,...,2*d to p. 'df_deta' contains 2*d columns, 0,...,d-1 are
+            df/dq and d,...2*d are df/dp. The data is in Cartesian coordinates
+            with q = x and p = v (mass = 1)
+        phi_model (callable): The gravitational potential. Takes q, a
+            (n,d) tensor, and returns a (n,) tensor.
+        frameshift_model (callable): an object for indicating which
+            frame stationarity is enforced in. Takes q, p, both (n,d)
+            tensors, and returns two (n,d) tensors, corresponding
+            to u and w defined by the frameshift. If set to None,
+            stationarity is enforced in lab frame.
+        Batch settings: Self-explanatory, the data is split into a training/
+            validation set given by validation_frac.
+        Optimizer settings: Self-explanatory, The optimizer
+            currently uses a step-wise decreasing learning rate which halves
+            every time the change in loss goes below lr_min_delta (with some
+            inertia given by lr_patience), and stops when lr goes below lr_final.
+            There is also a warm-up period for the lr given by warmup_proportion.
+        Checkpointing settings: Self-explanatory, the checkpoints are saved to
+            checkpoint_dir with a filename base given by checkpoint name.
+            TODO: CheckpointManager currently doesn't clean all the auxilliary
+            files when checkpoint number exceeds max_checkpoints. 
+        Loss settings: These influence how loss is calculated.
+            xi: Scale above which outliers are suppressed,
+            lam: Penalty for negative matter densities,
+            mu: Penalty for positive matter densities,
+            l2: L2 penalty on weights in the models.
+    
+    Outputs:
+        loss_history (list of floats): Records losses at every training step.
+    """
+
+    print("df_data type:", type(df_data))
+    print(type(optimizer))
     # Split training/validation sample
     n_samples = df_data['eta'].shape[0]
     n_dim = df_data['eta'].shape[1] // 2
