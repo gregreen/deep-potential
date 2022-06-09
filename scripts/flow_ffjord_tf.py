@@ -280,6 +280,7 @@ def train_flow(flow, data,
                warmup_proportion=0.1,
                validation_frac=0.25,
                checkpoint_every=None,
+               checkpoint_hours=None,
                max_checkpoints=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
@@ -378,7 +379,8 @@ def train_flow(flow, data,
             checkpoint,
             directory=checkpoint_dir,
             checkpoint_name=checkpoint_name,
-            max_to_keep=max_checkpoints
+            max_to_keep=max_checkpoints,
+            keep_checkpoint_every_n_hours=checkpoint_hours
         )
 
         # Look for latest extisting checkpoint
