@@ -70,22 +70,24 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
     for i in range(n_flows):
         print(f'Training flow {i+1} of {n_flows} ...')
 
-        flow = flow_ffjord_tf.FFJORDFlow(
+        flow_model = flow_ffjord_tf.FFJORDFlow(
             6, n_hidden, hidden_size, n_bij,
             reg_kw=reg,
             base_mean=data_mean, base_std=data_std
         )
-        flow_list.append(flow)
+        flow_list.append(flow_model)
 
         flow_fname = fname_pattern.format(i)
 
         checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
-        checkpoint_name += '_chkpt'
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        flow_model.save_specs(flow_fname)
+
 
         lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
         loss_history, val_loss_history, lr_history = flow_ffjord_tf.train_flow(
-            flow, data,
+            flow_model, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
             validation_frac=validation_frac,
@@ -98,9 +100,8 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             **lr_kw
         )
 
-        fn = flow.save(flow_fname)
         utils.save_loss_history(
-            f'{fn}_loss.txt',
+            f'{flow_fname}_loss.txt',
             loss_history,
             val_loss_history=val_loss_history,
             lr_history=lr_history
@@ -164,11 +165,6 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         checkpoint_name=checkpoint_name,
         **lr_kw
     )
-
-    #fn = potential_tf.save_models(fname, phi_model, frameshift_model)
-    """fn = phi_model.save(fname)
-    if frameshift_model is not None: # TODO: This overwrites checkpoint for phi_model...
-        frameshift_model.save(fname)"""
 
 
     utils.save_loss_history(f'{fname}_loss.txt', loss_history)
@@ -291,39 +287,34 @@ def sample_from_flows(flow_list, n_samples,
     return ret
 
 
-def load_flows(fname_patterns, is_fstring=True):
+def load_flows(fname_patterns):
     # Determine filenames
-    fnames = []
+    checkpoint_dirs = []
 
-    if is_fstring: # Filename pattern is f-string
-        n_max = 9999
-        for i in range(n_max):
-            fn = glob(fname_patterns.format(i)+'-1.index')
-            if len(fn):
-                fnames.append(fn[0][:-6])
-            else:
-                break
-    else: # Multiple shell globbing patterns
-        for fn in fname_patterns:
-            fnames += glob(fn)
-        fnames = sorted(fnames)
-        fnames = [fn[:-6] for fn in fnames]
-
-    print(f'Found {len(fnames)} flows.')
+    n_max = 9999
+    for i in range(n_max):
+        flow_dir = os.path.split(fname_patterns.format(i))[0]
+        if os.path.isdir(flow_dir):
+            checkpoint_dirs.append(flow_dir)
+    
+    print(f'Found {len(checkpoint_dirs)} flows.')
 
     # Load flows
     flow_list = []
 
-    for i,fn in enumerate(fnames):
-        print(f'Loading flow {i+1} of {len(fnames)} ...')
-        print(fn)
-        flow = flow_ffjord_tf.FFJORDFlow.load(fname=fn)
+    for i, checkpoint_dir in enumerate(checkpoint_dirs):
+        print(f'Loading flow {i+1} of {len(checkpoint_dirs)} ...')
+        print(checkpoint_dir)
+        flow = flow_ffjord_tf.FFJORDFlow.load_latest(checkpoint_dir=checkpoint_dir)
         flow_list.append(flow)
 
     return flow_list
 
 
 def save_df_data(df_data, fname):
+    # Make the directory if it doesn't exist
+    Path(os.path.split(fname)[0]).mkdir(parents=True, exist_ok=True)
+
     kw = dict(compression='lzf', chunks=True)
     with h5py.File(fname, 'w') as f:
         for key in df_data:
@@ -442,48 +433,48 @@ def main():
     )
     parser.add_argument(
         '--df-grads-fname',
-        type=str, default='data/df_gradients.h5',
-        help='Directory in which to store data.'
+        type=str, default='test_run/data/df_gradients.h5',
+        help='Directory in which to store the flow samples (positions and f gradients).'
     )
     parser.add_argument(
-        '--flow-save-fname',
-        type=str, default='models/df/flow_{:02d}',
+        '--flow-fname',
+        type=str, default='test_run/models/df/flow_{:02d}/flow',
         help='Filename pattern to store flows in.'
     )
     parser.add_argument(
-        '--use-existing-flows',
-        type=str, nargs='+',
-        help='Assume that flows are already trained.'
-    )
-    parser.add_argument(
         '--flow-loss',
-        type=str, default='plots/flow_loss_history_{:02d}.png',
+        type=str, default='test_run/plots/flow_loss_history_{:02d}.png',
         help='Filename pattern for flow loss history plots.'
     )
     parser.add_argument(
         '--potential-fname',
-        type=str, default='models/Phi/Phi',
+        type=str, default='test_run/models/Phi/Phi',
         help='Filename to store potential in.'
     )
     parser.add_argument(
         '--potential-loss',
-        type=str, default='plots/potential_loss_history.png',
+        type=str, default='test_run/plots/potential_loss_history.png',
         help='Filename for potential loss history plot.'
-    )
-    parser.add_argument(
-        '--potential-only',
-        action='store_true',
-        help='Skip fitting of distribution function. Assume DF model exists.'
     )
     parser.add_argument(
         '--potential-frameshift',
         action='store_true',
-        help='Fit potential assuming stationarity in a non-laboratory frame of reference.'
+        help='Fit potential assuming stationarity in a rotating frame of reference.'
     )
     parser.add_argument(
-        '--flows-only',
+        '--no-potential-training',
         action='store_true',
-        help='Train only the normalizing flows. Do not fit the potential.'
+        help='Do not train the potential.'
+    )
+    parser.add_argument(
+        '--no-flow-training',
+        action='store_true',
+        help='Do not train the flow, load the trained flows in instead.'
+    )
+    parser.add_argument(
+        '--no-flow-sampling',
+        action='store_true',
+        help='Do not sample the flow, load the samples in instead.'
     )
     parser.add_argument(
         '--flow-median',
@@ -498,63 +489,55 @@ def main():
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
 
-    if args.potential_only and args.flows_only:
-        print('--potential-only and --flows-only are incompatible.')
-        return 1
-
     params = load_params(args.params)
     print('Options:')
     print(json.dumps(params, indent=2))
 
-    if args.potential_only:
+
+    # ================= Training/loading the flow =================
+    if not args.no_flow_training:
+        # Load input phase-space positions to train the flow on
+        data = load_data(args.input)
+        print(f'Loaded {data.shape[0]} phase-space positions.')
+
+        # Train and save normalizing flows
+        print('Training normalizing flows ...')
+        flows = train_flows(
+            data,
+            args.flow_fname,
+            args.flow_loss,
+            args.loss_history,
+            **params['df']
+        )
+    # Re-load the flows (this removes the regularization terms)
+    flows = load_flows(args.flow_fname)
+
+
+    # ================= Sampling the flow/loading samples =================
+    if args.no_flow_sampling:
         print('Loading DF gradients ...')
         df_data = load_df_data(args.df_grads_fname)
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
         params['Phi'].pop('sample_batch_size')
     else:
-        if args.use_existing_flows is None:
-            # Load input phase-space positions
-            data = load_data(args.input)
-            print(f'Loaded {data.shape[0]} phase-space positions.')
+        # Sample from the flows and calculate gradients
+        print('Sampling from flows ...')
+        n_samples = params['Phi'].pop('n_samples')
+        grad_batch_size = params['Phi'].pop('grad_batch_size')
+        sample_batch_size = params['Phi'].pop('sample_batch_size')
+        df_data = sample_from_flows(
+            flows, n_samples,
+            return_indiv=True,
+            grad_batch_size=grad_batch_size,
+            sample_batch_size=sample_batch_size,
+            f_reduce=np.median if args.flow_median else clipped_vector_mean
+        )
+        save_df_data(df_data, args.df_grads_fname)
 
-            # Train normalizing flows
-            print('Training normalizing flows ...')
-            flows = train_flows(
-                data,
-                args.flow_save_fname,
-                args.flow_loss,
-                args.loss_history,
-                **params['df']
-            )
 
-        if not args.flows_only:
-            # Re-load the flows (this removes the regularization terms)
-            if args.use_existing_flows is None:
-                flows = load_flows(args.flow_save_fname, is_fstring=True)
-            else:
-                flows = load_flows(args.use_existing_flows, is_fstring=False)
-
-            if not len(flows):
-                print('No trained flows were found! Aborting.')
-                return 1
-
-            # Sample from the flows and calculate gradients
-            print('Sampling from flows ...')
-            n_samples = params['Phi'].pop('n_samples')
-            grad_batch_size = params['Phi'].pop('grad_batch_size')
-            sample_batch_size = params['Phi'].pop('sample_batch_size')
-            df_data = sample_from_flows(
-                flows, n_samples,
-                return_indiv=True,
-                grad_batch_size=grad_batch_size,
-                sample_batch_size=sample_batch_size,
-                f_reduce=np.median if args.flow_median else clipped_vector_mean
-            )
-            save_df_data(df_data, args.df_grads_fname)
-
-    # Fit the potential
-    if not args.flows_only:
+    # ================= Training the potential =================
+    if not args.no_potential_training:
         print(params['Phi'])
         print('Fitting the potential ...')
 
