@@ -173,6 +173,7 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
 
     utils.save_loss_history(f'{fname}_loss.txt', loss_history)
 
+    Path(os.path.split(plot_fname)[0]).mkdir(parents=True, exist_ok=True)
     fig = utils.plot_loss(loss_history)
     fig.savefig(plot_fname, dpi=200)
     plt.close(fig)
@@ -412,10 +413,15 @@ def load_params(fname):
                     'type': 'dict',
                     'schema': {
                         "omega0": {'type':'float', 'default':0.0},
+                        "omega0_trainable": {'type':'boolean', 'default':True},
                         "r_c0": {'type':'float', 'default':0.0},
-                        "u_LSRy0": {'type':'float', 'default':0.0},
-                        "u_LSRz0": {'type':'float', 'default':0.0},
-                        "u_LSRx0": {'type':'float', 'default':0.0},
+                        "r_c0_trainable": {'type':'boolean', 'default':False},
+                        "u_x0": {'type':'float', 'default':0.0},
+                        "u_x0_trainable": {'type':'boolean', 'default':True},
+                        "u_y0": {'type':'float', 'default':0.0},
+                        "u_y0_trainable": {'type':'boolean', 'default':True},
+                        "u_z0": {'type':'float', 'default':0.0},
+                        "u_z0_trainable": {'type':'boolean', 'default':True}
                     }
                 }
             }

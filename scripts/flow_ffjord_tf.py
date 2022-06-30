@@ -274,7 +274,8 @@ class FFJORDFlow(tfd.TransformedDistribution):
     def load_latest(cls, checkpoint_dir):
         """Load the latest FFJORDFlow from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
-        print(latest)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid FFJORDFlow from {repr(checkpoint_dir)}")
         return FFJORDFlow.load(latest)
 
 
