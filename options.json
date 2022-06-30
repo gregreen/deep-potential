@@ -23,7 +23,7 @@
     "checkpoint_every": 1
   },
   "Phi": {
-    "n_samples": 65536,
+    "n_samples": 2097152,
     "sample_batch_size": 2048,
     "grad_batch_size": 128,
     "n_hidden": 4,
@@ -44,11 +44,16 @@
     "max_checkpoints": 128,
     "checkpoint_every": 16,
     "frameshift": {
-      "omega0": 0.03,
-      "r_c0": 0.032,
-      "u_LSRx0": 0.10,
-      "u_LSRy0": -0.13,
-      "u_LSRz0": 0.00
+      "omega0": 0.4,
+      "omega0_trainable": true,
+      "r_c0": 8.3,
+      "r_c0_trainable": false,
+      "u_Sunx0": 0.093,
+      "u_Sunx0_trainable": true,
+      "u_Suny0": 2.515,
+      "u_Suny0_trainable": true,
+      "u_Sunz0": 0.0859,
+      "u_Sunz0_trainable": true
     }
   }
 }
