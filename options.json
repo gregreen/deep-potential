@@ -48,12 +48,12 @@
       "omega0_trainable": true,
       "r_c0": 8.3,
       "r_c0_trainable": false,
-      "u_Sunx0": 0.093,
-      "u_Sunx0_trainable": true,
-      "u_Suny0": 2.515,
-      "u_Suny0_trainable": true,
-      "u_Sunz0": 0.0859,
-      "u_Sunz0_trainable": true
+      "u_x0": 0.093,
+      "u_x0_trainable": true,
+      "u_y0": 2.515,
+      "u_y0_trainable": true,
+      "u_z0": 0.0859,
+      "u_z0_trainable": true
     }
   }
 }
