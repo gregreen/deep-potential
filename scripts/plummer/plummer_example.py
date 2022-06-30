@@ -526,8 +526,7 @@ def train_potential(df_data, n_epochs=4096, batch_size=1024):
             df_dq=df_dq_b,
             df_dp=df_dp_b,
             lam=lam,
-            mu=mu,
-            weight_samples=False
+            mu=mu
         )
 
         # Take step using optimizer

@@ -21,6 +21,7 @@ import sonnet as snt
 from time import time
 import os
 import json
+import math
 
 # Custom libraries
 from utils import *
@@ -235,12 +236,8 @@ class FFJORDFlow(tfd.TransformedDistribution):
 
         return res
 
-    def save(self, fname_base):
-        # Save variables
-        checkpoint = tf.train.Checkpoint(flow=self)
-        fname_out = checkpoint.save(fname_base)
-
-        # Save the specs of the neural network
+    def save_specs(self, spec_name_base):
+        """Saves the specs of the model that are required for initialization to a json"""
         d = dict(
             n_dim=self._n_dim,
             n_hidden=self._n_hidden,
@@ -248,24 +245,37 @@ class FFJORDFlow(tfd.TransformedDistribution):
             n_bij=self._n_bij,
             name=self._name
         )
-        with open(fname_out+'_spec.json', 'w') as f:
+        with open(spec_name_base + '_spec.json', 'w') as f:
             json.dump(d, f)
 
-        return fname_out
+        return spec_name_base
 
     @classmethod
-    def load(cls, fname, **kwargs):
+    def load(cls, checkpoint_name):
+        """Load FFJORDFlow from a checkpoint and a spec file"""
+        # Get spec file name
+        if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
+            raise ValueError("FFJORDFlow checkpoint name doesn't follow the correct syntax.")
+        spec_name = checkpoint_name.rsplit('-', 1)[0] + "_spec.json"
+        
         # Load network specs
-        with open(fname+'_spec.json', 'r') as f:
+        with open(spec_name, 'r') as f:
             kw = json.load(f)
-        kw.update(kwargs)
         flow = cls(**kw)
 
         # Restore variables
         checkpoint = tf.train.Checkpoint(flow=flow)
-        checkpoint.restore(fname)
+        checkpoint.restore(checkpoint_name).expect_partial() 
 
+        print(f'loaded {flow} from {checkpoint_name}')
         return flow
+
+    @classmethod
+    def load_latest(cls, checkpoint_dir):
+        """Load the latest FFJORDFlow from a specified checkpoint directory"""
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        print(latest)
+        return FFJORDFlow.load(latest)
 
 
 def train_flow(flow, data,
@@ -397,7 +407,8 @@ def train_flow(flow, data,
             )
 
         # Convert from # of epochs to # of steps between checkpoints
-        checkpoint_steps = checkpoint_every * n_samples // batch_size
+        #checkpoint_steps = checkpoint_every * n_samples // batch_size
+        checkpoint_steps = math.ceil(checkpoint_every * n_samples / batch_size)
 
     # Keep track of whether this is the first step.
     # Were it not for checkpointing, we could use i == 0.

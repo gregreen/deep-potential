@@ -414,8 +414,8 @@ class FrameShift(tf.Module):
 
     def debug(self):
         print(f'name={self.name}\n\
-  u_LSR=({self._u_LSRx.numpy():.4f}, {self._u_LSRy.numpy():.4f}, {self._u_LSRz.numpy():.4f})\n\
-  omega={self._omega.numpy():.4f}, r_c={self._r_c.numpy():.4f}')
+  u_LSR=({self._u_LSRx.numpy():.8f}, {self._u_LSRy.numpy():.8f}, {self._u_LSRz.numpy():.8f})\n\
+  omega={self._omega.numpy():.8f}, r_c={self._r_c.numpy():.8f}')
 
 
 def train_potential(
