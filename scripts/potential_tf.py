@@ -322,6 +322,17 @@ class PhiNN(snt.Module):
     def load_latest(cls, checkpoint_dir):
         """Load the latest PhiNN from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid PhiNN from {repr(checkpoint_dir)}")
+        return PhiNN.load(latest)
+
+    @classmethod
+    def load_checkpoint_with_id(cls, checkpoint_dir, id):
+        """Load the PhiNN with a specified id from a specified checkpoint directory"""
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid PhiNN from {repr(checkpoint_dir)}")
+        latest = latest[:latest.rfind('-')] + f'-{id}'
         return PhiNN.load(latest)
 
 
@@ -329,22 +340,26 @@ class FrameShift(tf.Module):
     """
     A 5-parameter model to represent the rotating frame in which f is stationary.
     The rotation axis is (0, 0, Omega) and passes through a point at position
-    x_c = (r_c, 0, 0). LSR moves with speed (u_LSRx, u_LSRy, u_LSRz).
-    Note that there is a degeneracy between r_c, u_LSRy and Omega
+    x_c = (r_c, 0, 0). LSR moves with speed (u_x, u_y, u_z).
+    Note that there is a degeneracy between r_c, u_y and Omega
     
     The infinitesimal flow is given by
         x -> x + dt*u = x + dt*Omega x (x - x_c),
         v -> v + dt*w = v + dt*Omega x v.
     """
 
-    def __init__(self, n_dim=3, omega0=0., r_c0=0.,
-                u_LSRx0=0., u_LSRy0=0., u_LSRz0=0., name='FrameShift'):
+    def __init__(self, n_dim=3, omega0=0., omega0_trainable=True,
+                                r_c0=0., r_c0_trainable=False,
+                                u_x0=0., u_x0_trainable=True,
+                                u_y0=0., u_y0_trainable=True,
+                                u_z0=0., u_z0_trainable=True,
+                                name='FrameShift'):
         """
         Constructor for FrameShift.
 
         Inputs:
             n_dim (int): Dimensionality of space.
-            omega0, ..., u_LSRz0: default values of the parameters that defined the frame shift.
+            omega0, ..., u_z0: default values of the parameters that defined the frame shift.
         """
         super(FrameShift, self).__init__(name=name)
 
@@ -352,11 +367,11 @@ class FrameShift(tf.Module):
         self._name = name
 
         # Set the variables.
-        self._omega = tf.Variable(omega0, trainable=True, name='omega', dtype=tf.float32)
-        self._r_c = tf.Variable(r_c0, trainable=False, name='r_c', dtype=tf.float32)
-        self._u_LSRx = tf.Variable(u_LSRx0, trainable=True, name='u_LSRx', dtype=tf.float32)
-        self._u_LSRy = tf.Variable(u_LSRy0, trainable=True, name='u_LSRy', dtype=tf.float32)
-        self._u_LSRz = tf.Variable(u_LSRz0, trainable=True, name='u_LSRz', dtype=tf.float32)
+        self._omega = tf.Variable(omega0, trainable=omega0_trainable, name='omega', dtype=tf.float32)
+        self._r_c = tf.Variable(r_c0, trainable=r_c0_trainable, name='r_c', dtype=tf.float32)
+        self._u_x = tf.Variable(u_x0, trainable=u_x0_trainable, name='u_x', dtype=tf.float32)
+        self._u_y = tf.Variable(u_y0, trainable=u_y0_trainable, name='u_y', dtype=tf.float32)
+        self._u_z = tf.Variable(u_z0, trainable=u_z0_trainable, name='u_z', dtype=tf.float32)
 
     def __call__(self, q, p):
         """Returns u and w, the flows defined by the frame shift""" 
@@ -365,9 +380,9 @@ class FrameShift(tf.Module):
         qx, qy, _ = tf.unstack(q, axis=1)
         px, py, _ = tf.unstack(p, axis=1)
         # Add rotation and LSR vel to u (while shifting q by -r_c)
-        ux = tf.add(tf.multiply(qy, -self._omega), self._u_LSRx)
-        uy = tf.add(tf.multiply(tf.subtract(qx, self._r_c), self._omega), self._u_LSRy)
-        uz = tf.repeat(self._u_LSRz, n)
+        ux = tf.add(tf.multiply(qy, -self._omega), self._u_x)
+        uy = tf.add(tf.multiply(tf.subtract(qx, self._r_c), self._omega), self._u_y)
+        uz = tf.repeat(self._u_z, n)
         u = tf.stack((ux, uy, uz), axis=1)
 
         # Add rotation to w
@@ -410,11 +425,22 @@ class FrameShift(tf.Module):
     def load_latest(cls, checkpoint_dir):
         """Load the latest FrameShift from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
+        return FrameShift.load(latest)
+
+    @classmethod
+    def load_checkpoint_with_id(cls, checkpoint_dir, id):
+        """Load the FrameShift with a specified id from a specified checkpoint directory"""
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
+        latest = latest[:latest.rfind('-')] + f'-{id}'
         return FrameShift.load(latest)
 
     def debug(self):
         print(f'name={self.name}\n\
-  u_LSR=({self._u_LSRx.numpy():.8f}, {self._u_LSRy.numpy():.8f}, {self._u_LSRz.numpy():.8f})\n\
+  u_=({self._u_x.numpy():.8f}, {self._u_y.numpy():.8f}, {self._u_z.numpy():.8f})\n\
   omega={self._omega.numpy():.8f}, r_c={self._r_c.numpy():.8f}')
 
 
