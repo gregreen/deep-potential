@@ -433,10 +433,11 @@ def load_params(fname):
 
 
 def main():
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
     parser = ArgumentParser(
         description='Deep Potential: Fit potential from phase-space samples.',
-        add_help=True
+        add_help=True,
+        formatter_class=ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
         '--input', '-i',
