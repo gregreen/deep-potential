@@ -134,10 +134,14 @@ class ForceFieldModel(snt.Module):
           x (tf.Tensor): Spatial coordinates at which to evaluate
             dx/dt. Shape = (n_points, n_dim).
         """
+        # Calculate the radius in position and velocity
+        q,p = tf.split(x, 2, axis=1)
+        q2 = tf.reduce_sum(q**2, axis=1, keepdims=True)
+        p2 = tf.reduce_sum(p**2, axis=1, keepdims=True)
         # Concatenate time and position vectors
-        tx = tf.concat([tf.broadcast_to(t, [x.shape[0],1]), x], 1)
-        # Return dz_dt(t,x)
-        return self._nn(tx)
+        txq2p2 = tf.concat([tf.broadcast_to(t, [x.shape[0],1]), x, q2, p2], 1)
+        # Return dz_dt(t,x,q^2,p^2)
+        return self._nn(txq2p2)
 
     def augmented_field(self, t, y):
         """
