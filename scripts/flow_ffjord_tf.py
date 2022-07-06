@@ -138,10 +138,14 @@ class ForceFieldModel(snt.Module):
         q,p = tf.split(x, 2, axis=1)
         q2 = tf.reduce_sum(q**2, axis=1, keepdims=True)
         p2 = tf.reduce_sum(p**2, axis=1, keepdims=True)
-        # Concatenate time and position vectors
-        txq2p2 = tf.concat([tf.broadcast_to(t, [x.shape[0],1]), x, q2, p2], 1)
-        # Return dz_dt(t,x,q^2,p^2)
-        return self._nn(txq2p2)
+        # Calculate the position unit vector
+        q2_eps = 1e-3 # Add in a small constant to remove singularity at q=0
+        qhat = q / tf.math.sqrt(q2+q2_eps)#tf.math.l2_normalize(q, axis=1, eps=1e-3)
+        # Concatenate time and position vectors, as well
+        # as auxiliary info (q^2, p^2, \hat{q})
+        tx_aux = tf.concat([tf.broadcast_to(t, [x.shape[0],1]), x, q2, p2, qhat], 1)
+        # Return dz_dt(t,x,q^2,p^2,...)
+        return self._nn(tx_aux)
 
     def augmented_field(self, t, y):
         """
@@ -261,7 +265,7 @@ class FFJORDFlow(tfd.TransformedDistribution):
         if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
             raise ValueError("FFJORDFlow checkpoint name doesn't follow the correct syntax.")
         spec_name = checkpoint_name.rsplit('-', 1)[0] + "_spec.json"
-        
+
         # Load network specs
         with open(spec_name, 'r') as f:
             kw = json.load(f)
