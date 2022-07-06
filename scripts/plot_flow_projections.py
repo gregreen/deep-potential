@@ -23,7 +23,8 @@ import flow_ffjord_tf
 dpi = 200
 
 
-def cart2cyl(eta):
+def calc_coords(eta):
+    # Cylindrical
     R = np.linalg.norm(eta[:,:2], axis=1)
     z = eta[:,2]
     phi = np.arctan2(eta[:,1], eta[:,0])
@@ -33,12 +34,18 @@ def cart2cyl(eta):
     vT = -eta[:,3] * sin_phi + eta[:,4] * cos_phi
     vz = eta[:,5]
     cyl = {'R':R, 'z':z, 'phi':phi, 'vR':vR, 'vz':vz, 'vT':vT}
-    # Include missing Cartesian coordinates, for good measure
-    cyl['x'] = eta[:,0]
-    cyl['y'] = eta[:,1]
-    cyl['vx'] = eta[:,3]
-    cyl['vy'] = eta[:,4]
-    return cyl
+
+    # Cartesian (z is already in cylindrical)
+    cart = {'x':eta[:,0], 'y':eta[:,1], 'vx':eta[:,3], 'vy':eta[:,4]}
+
+    # Spherical (phi is already in cylindrical)
+    r = np.linalg.norm(eta[:,:3], axis=1)
+    vr = np.sum(eta[:,:3]*eta[:,3:], axis=1) / r
+    costheta = z / r
+    vth = vz - vr*costheta
+    sph = {'r':r, 'cth':costheta, 'vr':vr, 'vth':vth}
+
+    return dict(**cart, **cyl, **sph)
 
 
 def load_training_data(fname):
@@ -54,14 +61,18 @@ def load_flows(fname_patterns):
     for fn in fname_patterns:
         fnames += glob(fn)
     fnames = sorted(fnames)
-    fnames = [fn[:-6] for fn in fnames]
+    #fnames = [fn[:-6] for fn in fnames]
 
     print(f'Found {len(fnames)} flows.')
 
     for i,fn in enumerate(fnames):
         print(f'Loading flow {i+1} of {len(fnames)} ...')
-        print(fn)
-        flow = flow_ffjord_tf.FFJORDFlow.load(fname=fn)
+        if os.path.isdir(fn):
+            print(f'  Loading latest checkpoint from directory {fn} ...')
+            flow = flow_ffjord_tf.FFJORDFlow.load_latest(fn)
+        else:
+            print(f'  Loading {fn} ...')
+            flow = flow_ffjord_tf.FFJORDFlow.load(fn[:-6])
         flow_list.append(flow)
 
     return flow_list
@@ -98,30 +109,37 @@ def sample_from_flows(flow_list, n_samples, batch_size=1024):
     return eta
 
 
-def plot_1d_marginals(cyl_train, cyl_sample, fig_dir,
-                      loss=None, cartesian=False, fig_fmt=('svg',)):
-    if cartesian:
+def plot_1d_marginals(coords_train, coords_sample, fig_dir,
+                      loss=None, coordsys='cart', fig_fmt=('svg',)):
+    if coordsys == 'cart':
         labels = ['$x$', '$y$', r'$z$', '$v_x$', '$v_y$', '$v_z$']
         keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
-    else:
+    elif coordsys == 'cyl':
         labels = ['$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$']
         keys = ['R', 'z', 'phi', 'vR', 'vz', 'vT']
+    elif coordsys == 'sph':
+        labels = ['$r$', r'$\cos \theta$', r'$\phi$', '$v_r$', r'$v_{\theta}$', r'$v_{\phi}$']
+        keys = ['r', 'cth', 'phi', 'vr', 'vth', 'vT']
+    else:
+        raise ValueError(f'Unknown coordsys: {coordsys}.')
 
     fig,ax_arr = plt.subplots(2,3, figsize=(6,4), dpi=120)
 
     for i,(ax,l,k) in enumerate(zip(ax_arr.flat,labels,keys)):
-        xlim = np.percentile(cyl_train[k], [1., 99.])
+        xlim = np.percentile(coords_train[k], [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
         if k == 'R':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = (-np.pi, np.pi)
+            xlim = [-np.pi, np.pi]
+        elif k == 'cth':
+            xlim = [-1, 1]
 
         kw = dict(range=xlim, bins=101, density=True)
-        ax.hist(cyl_train[k], label=r'$\mathrm{train}$', alpha=0.7, **kw)
+        ax.hist(coords_train[k], label=r'$\mathrm{train}$', alpha=0.7, **kw)
         ax.hist(
-            cyl_sample[k],
+            coords_sample[k],
             histtype='step',
             alpha=0.8,
             label=r'$\mathrm{NF}$',
@@ -152,31 +170,33 @@ def plot_1d_marginals(cyl_train, cyl_sample, fig_dir,
     )
 
     for fmt in fig_fmt:
-        coordsys = 'cart' if cartesian else 'cyl'
         fname = os.path.join(fig_dir, f'DF_marginals_{coordsys}.{fmt}')
         fig.savefig(fname, dpi=dpi)
     plt.close(fig)
 
 
-def plot_2d_marginal(cyl_train, cyl_sample,
+def plot_2d_marginal(coords_train, coords_sample,
                      eta_train, eta_sample,
                      fig_dir, dim1, dim2,
                      fig_fmt=('svg',)):
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$',
-        '$x$', '$y$', '$v_x$', '$v_y$'
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
+        '$x$', '$y$', '$v_x$', '$v_y$',
+        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
     ]
     keys = [
         'R', 'z', 'phi', 'vR', 'vz', 'vT',
-        'x', 'y', 'vx', 'vy'
+        'x', 'y', 'vx', 'vy',
+        'r', 'cth', 'vr', 'vth'
     ]
 
     def extract_dims(dim):
-        if dim in keys[:-4]:
-            return cyl_train[dim], cyl_sample[dim]
-        elif dim in keys[-4:]:
-            d = {'x':0, 'y':1, 'vx':3, 'vy':4}[dim]
-            return eta_train[:,d], eta_sample[:,d]
+        return coords_train[dim], coords_sample[dim]
+        #if dim in keys[:-4]:
+        #    return coords_train[dim], coords_sample[dim]
+        #elif dim in keys[-4:]:
+        #    d = {'x':0, 'y':1, 'vx':3, 'vy':4}[dim]
+        #    return eta_train[:,d], eta_sample[:,d]
 
     x_train, x_sample = extract_dims(dim1)
     y_train, y_sample = extract_dims(dim2)
@@ -198,7 +218,9 @@ def plot_2d_marginal(cyl_train, cyl_sample,
         if k == 'R':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = (-np.pi, np.pi)
+            xlim = [-np.pi, np.pi]
+        elif k == 'cth':
+            xlim = [-1, 1]
         lims.append(xlim)
 
     kw = dict(range=lims, bins=128, rasterized=True)
@@ -401,26 +423,30 @@ def main():
     print('Loading flows ...')
     flows = load_flows(args.flows)
 
-    print('Evaluating loss ...')
-    loss_mean, loss_std = evaluate_loss(flows, eta_train)
-    print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
-
     if args.load_samples is None:
+        print('Evaluating loss ...')
+        loss_mean, loss_std = evaluate_loss(flows, eta_train)
+        print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
         print('Sampling from flows ...')
         eta_sample = sample_from_flows(flows, args.oversample*n_train)
         print('  --> Saving samples ...')
         if args.save_samples is not None:
             with h5py.File(args.save_samples, 'w') as f:
-                f.create_dataset(
+                dset = f.create_dataset(
                     'eta',
                     data=eta_sample,
                     chunks=True,
                     compression='lzf'
                 )
+                dset.attrs['loss_training'] = loss_mean
+                dset.attrs['loss_std_training'] = loss_std
     else:
         print('Loading pre-generated samples ...')
         with h5py.File(args.load_samples, 'r') as f:
             eta_sample = f['eta'][:]
+            loss_mean = f['eta'].attrs['loss_training']
+            loss_std = f['eta'].attrs['loss_std_training']
+        print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
         print(f'  --> {len(eta_sample)} samples')
     print(f'  --> {np.count_nonzero(np.isnan(eta_sample))} NaN values')
 
@@ -429,21 +455,24 @@ def main():
         eta_train[:,k] -= x0
         eta_sample[:,k] -= x0
 
-    print('Converting to cylindrical coordinates ...')
-    cyl_train = cart2cyl(eta_train)
-    cyl_sample = cart2cyl(eta_sample)
+    print('Calculating cylindrical & spherical coordinates ...')
+    coords_train = calc_coords(eta_train)
+    coords_sample = calc_coords(eta_sample)
 
     print('Plotting 1D marginal distributions ...')
-    for cart in [True, False]:
+    for coordsys in ['cart', 'cyl', 'sph']:
         plot_1d_marginals(
-            cyl_train, cyl_sample, args.fig_dir,
-            loss=loss_mean, cartesian=cart,
+            coords_train, coords_sample, args.fig_dir,
+            loss=loss_mean, coordsys=coordsys,
             fig_fmt=args.fig_fmt
         )
 
     print('Plotting 2D marginal distributions ...')
 
     dims = [
+        ('r', 'vr'),
+        ('phi', 'cth'),
+        ('vT', 'vth'),
         ('R', 'z'),
         ('R', 'vz'),
         ('R', 'vR'),
@@ -463,7 +492,7 @@ def main():
     for dim1,dim2 in dims:
         print(f'  --> ({dim1}, {dim2})')
         plot_2d_marginal(
-            cyl_train, cyl_sample,
+            coords_train, coords_sample,
             eta_train, eta_sample,
             args.fig_dir, dim1, dim2,
             fig_fmt=args.fig_fmt
