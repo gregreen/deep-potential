@@ -42,7 +42,7 @@ def calc_coords(eta):
     r = np.linalg.norm(eta[:,:3], axis=1)
     vr = np.sum(eta[:,:3]*eta[:,3:], axis=1) / r
     costheta = z / r
-    vth = vz - vr*costheta
+    vth = (z*vr - r*vz) / R
     sph = {'r':r, 'cth':costheta, 'vr':vr, 'vth':vth}
 
     return dict(**cart, **cyl, **sph)
