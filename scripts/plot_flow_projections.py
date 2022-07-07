@@ -13,6 +13,7 @@ import h5py
 import progressbar
 import os
 from glob import glob
+from pathlib import Path
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
@@ -48,9 +49,12 @@ def calc_coords(eta):
     return dict(**cart, **cyl, **sph)
 
 
-def load_training_data(fname):
+def load_training_data(fname, load_attrs=False):
     with h5py.File(fname, 'r') as f:
         eta = f['eta'][:]
+        if load_attrs:
+            attrs = dict(f['eta'].attrs.items())
+            return eta, attrs
     return eta
 
 
@@ -169,6 +173,8 @@ def plot_1d_marginals(coords_train, coords_sample, fig_dir,
         top=0.97
     )
 
+    # Make sure fig_dir exists
+    Path(fig_dir).mkdir(parents=True, exist_ok=True)
     for fmt in fig_fmt:
         fname = os.path.join(fig_dir, f'DF_marginals_{coordsys}.{fmt}')
         fig.savefig(fname, dpi=dpi)
@@ -278,6 +284,137 @@ def plot_2d_marginal(coords_train, coords_sample,
     plt.close(fig)
 
 
+def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
+    labels = [
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
+        '$x$', '$y$', '$v_x$', '$v_y$',
+        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
+    ]
+    
+    keys = [
+        'R', 'z', 'phi', 'vR', 'vz', 'vT',
+        'x', 'y', 'vx', 'vy',
+        'r', 'cth', 'vr', 'vth'
+    ]
+    
+    idx_train = (coords_train[dimz] > z - dz) & (coords_train[dimz] < z + dz)
+    idx_sample = (coords_sample[dimz] > z - dz) & (coords_sample[dimz] < z + dz)
+    x_train, x_sample = coords_train[dim1][idx_train], coords_sample[dim1][idx_sample]
+    y_train, y_sample = coords_train[dim2][idx_train], coords_sample[dim2][idx_sample]
+
+    labels = {k:l for k,l in zip(keys,labels)}
+
+    fig,(ax_t,ax_s,ax_d,cax_d) = plt.subplots(
+        1,4,
+        figsize=(6,2),
+        dpi=200,
+        gridspec_kw=dict(width_ratios=[1,1,1,0.05])
+    )
+
+    lims = []
+    for i,(k,val) in enumerate([(dim1,x_train),(dim2,y_train)]):
+        xlim = np.percentile(val, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
+        if k == 'R':
+            xlim[0] = max(xlim[0], 0.)
+        elif k == 'phi':
+            xlim = [-np.pi, np.pi]
+        elif k == 'cth':
+            xlim = [-1, 1]
+        lims.append(xlim)
+
+    kw = dict(range=lims, bins=64, rasterized=True)
+
+    n_train = len(x_train)
+    n_sample = len(x_sample)
+
+    nt,_,_,_ = ax_t.hist2d(x_train, y_train, **kw)
+    norm = Normalize(vmin=0, vmax=np.max(nt)*n_sample/n_train)
+    ns,_,_,_ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
+
+    if attrs is not None:
+        # Visualise the boundaries of the population
+        cartesian_keys = ['x', 'y', 'z']
+        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
+        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='white')
+        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
+            # Plot circles
+            for ax in [ax_t, ax_s, ax_d]:
+                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
+                ax.add_patch(circ)
+                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
+                ax.add_patch(circ)
+        if dim1 in ['R']:
+            for ax in [ax_t, ax_s, ax_d]:
+                ax.axvline(r_inner, **kw)
+                ax.axvline(r_outer, **kw)
+        if dim2 in ['R']:
+            for ax in [ax_t, ax_s, ax_d]:
+                ax.axhline(r_inner, **kw)
+                ax.axhline(r_outer, **kw)
+
+    dn = ns/n_sample - nt/n_train
+    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    vmax = 5.
+    #dn /= np.max(nt)/n_train
+    #vmax = 0.2
+    im = ax_d.imshow(
+        dn.T,
+        extent=lims[0]+lims[1],
+        cmap='coolwarm_r',
+        vmin=-vmax, vmax=vmax,
+        origin='lower', aspect='auto',
+        rasterized=True
+    )
+
+    cb = fig.colorbar(
+        im, cax=cax_d,
+        label=r'$\mathrm{Poisson\ significance} \ \left( \sigma \right)$'
+        #label=r'$\mathrm{fraction\ of\ max\ density}$'
+    )
+
+    ax_s.set_yticklabels([])
+    ax_d.set_yticklabels([])
+
+    for ax in (ax_s,ax_t,ax_d):
+        ax.set_xlabel(labels[dim1], labelpad=0)
+
+    ax_t.set_ylabel(labels[dim2], labelpad=2)
+
+
+    ax_d.set_title(r'$\mathrm{NF - training}$', fontsize=10)
+    if verbose:
+        ax_t.set_title(f'$\mathrm{{training\ data}}$\n$n={len(x_train)}$', fontsize=10)
+        ax_s.set_title(f'$\mathrm{{normalizing\ flow\ (NF)}}$\n$n={len(x_sample)}$', fontsize=10)
+        # Print additional info on the subplots
+        fig.suptitle(f'${z-dz:.2f}\leq${labels[dimz]}$\leq{z+dz:.2f}$', fontsize=10)
+
+        fig.subplots_adjust(
+            left=0.16,
+            right=0.83,
+            bottom=0.18,
+            top=0.74,
+            wspace=0.16
+        )
+    else:
+        ax_t.set_title(r'$\mathrm{training\ data}$', fontsize=10)
+        ax_s.set_title(r'$\mathrm{normalizing\ flow\ (NF)}$', fontsize=10)
+        
+        fig.subplots_adjust(
+            left=0.11,
+            right=0.88,
+            bottom=0.22,
+            top=0.88,
+            wspace=0.16
+        )
+
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'DF_slice_{dim1}_{dim2}.{fmt}')
+        fig.savefig(fname, dpi=dpi)
+    plt.close(fig)
+
+
 def evaluate_loss(flow_list, eta_train, batch_size=1024):
     n_flows = len(flow_list)
     n_samples = eta_train.shape[0]
@@ -318,6 +455,113 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     loss_mean = np.mean(loss)
 
     return loss_mean, loss_std
+
+
+def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
+    labels = [
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
+        '$x$', '$y$', '$v_x$', '$v_y$',
+        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
+    ]
+    
+    keys = [
+        'R', 'z', 'phi', 'vR', 'vz', 'vT',
+        'x', 'y', 'vx', 'vy',
+        'r', 'cth', 'vr', 'vth'
+    ]
+    
+    idx_train = (coords_train[dimz] > z - dz) & (coords_train[dimz] < z + dz) &\
+                (coords_train[dimy] > y - dy) & (coords_train[dimy] < y + dy)
+    idx_sample = (coords_sample[dimz] > z - dz) & (coords_sample[dimz] < z + dz) &\
+                 (coords_sample[dimy] > y - dy) & (coords_sample[dimy] < y + dy)
+    x_train, x_sample = coords_train[dim1][idx_train], coords_sample[dim1][idx_sample]
+
+    labels = {k:l for k,l in zip(keys,labels)}
+
+    fig,(ax_h, ax_r) = plt.subplots(
+        1,2,
+        figsize=(6,3),
+        dpi=200,
+        gridspec_kw=dict(width_ratios=[1,1])
+    )
+
+    lim_min, lim_max = 99999., -99999.
+    for i,(k,val) in enumerate([(dim1,x_train)]):
+        xlim = np.percentile(val, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-0.05*w, xlim[1]+0.05*w]
+        if k == 'R':
+            xlim[0] = max(xlim[0], 0.)
+        elif k == 'phi':
+            xlim = [-np.pi, np.pi]
+        elif k == 'cth':
+            xlim = [-1, 1]
+        lim_min = min(lim_min, xlim[0])
+        lim_max = max(lim_max, xlim[1])
+
+    kw = dict(range=(lim_min, lim_max), bins=64)
+
+    n_train = len(x_train)
+    n_sample = len(x_sample)
+    
+    nt,bins,_ = ax_h.hist(x_train, histtype='step', **kw, label='train')
+    ns,*_ = ax_h.hist(x_sample, histtype='step', **kw, weights=np.ones_like(x_sample)*n_train/n_sample, label='sample')
+    ns *= n_sample/n_train
+    ax_h.legend(loc='lower right', frameon=False, fontsize=8)
+    ax_h.set_ylabel('frequency')
+
+    if attrs is not None:
+        # Visualise the boundaries of the population
+        valid_keys = ['x', 'y', 'z', 'R']
+        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
+        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
+        if (dim1 in valid_keys):
+            for ax in [ax_h, ax_r]:
+                ax.axvline(r_inner, **kw)
+                ax.axvline(r_outer, **kw)
+                if dim1 != 'R':
+                    ax.axvline(-r_inner, **kw)
+                    ax.axvline(-r_outer, **kw)
+
+    dn = ns/n_sample - nt/n_train
+    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    ax_r.plot(bins[:-1], dn, label=r"gaia_vr, $\varpi$ > 0.2 mas", drawstyle='steps-post')
+    ax_r.yaxis.tick_right()
+    ax_r.yaxis.set_label_position("right")
+    ax_r.set_ylabel(r'$\mathrm{Poisson\ significance} \ \left( \sigma \right)$')
+    ax_r.axhline(0, ls='--', lw=1., color='black', zorder=0)
+
+    for ax in (ax_h,ax_r):
+        ax.set_xlabel(labels[dim1], labelpad=0)
+
+    ax_r.set_title(r'$\mathrm{NF - training}$', fontsize=10)
+    
+    if verbose:
+        ax_h.set_title(f'$n_\mathrm{{train}}={len(x_train)},\quad n_\mathrm{{sample}}={len(x_sample)}$', fontsize=10)
+        # Print additional info on the subplots
+        fig.suptitle(f'${y-dy:.2f}\leq${labels[dimy]}$\leq{y+dy:.2f},\quad\
+                       {z-dz:.2f}\leq${labels[dimz]}$\leq{z+dz:.2f}$', fontsize=10)
+
+        fig.subplots_adjust(
+            left=0.11,
+            right=0.88,
+            bottom=0.18,
+            top=0.84,
+            wspace=0.16
+        )
+    else:
+        fig.subplots_adjust(
+            left=0.11,
+            right=0.88,
+            bottom=0.22,
+            top=0.88,
+            wspace=0.16
+        )
+
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'DF_slice_{dim1}.{fmt}')
+        fig.savefig(fname, dpi=dpi)
+    plt.close(fig)
 
 
 def plot_slices(flow_list, eta_train, n_pix=256, batch_size=128):
@@ -410,14 +654,24 @@ def main():
         action='store_true',
         help='Use dark background for figures.'
     )
+    parser.add_argument(
+        '--load-attrs',
+        action='store_true',
+        help='Load attributes of the training data for visualisation (e.g. cut boundaries).'
+    )
     args = parser.parse_args()
 
     if args.dark:
         plt.style.use('dark_background')
 
     print('Loading training data ...')
-    eta_train = load_training_data(args.input)
+    if args.load_attrs:
+        eta_train, attrs_train = load_training_data(args.input, load_attrs=True)
+    else:
+        eta_train, attrs_train = load_training_data(args.input, load_attrs=False), None
     n_train = eta_train.shape[0]
+
+    print(attrs_train, args.load_attrs)
     print(f'  --> Training data shape = {eta_train.shape}')
 
     print('Loading flows ...')
@@ -431,6 +685,7 @@ def main():
         eta_sample = sample_from_flows(flows, args.oversample*n_train)
         print('  --> Saving samples ...')
         if args.save_samples is not None:
+            Path(os.path.split(args.save_samples)[0]).mkdir(parents=True, exist_ok=True)
             with h5py.File(args.save_samples, 'w') as f:
                 dset = f.create_dataset(
                     'eta',
@@ -498,6 +753,40 @@ def main():
             fig_fmt=args.fig_fmt
         )
 
+    dims = [
+        ('phi', 'cth', 'R', np.mean(coords_train['R']), 0.05),
+        ('R', 'phi', 'z', 0., 0.05),
+        ('x', 'y', 'z', 0., 0.05),
+        ('y', 'z', 'x', 0., 0.05),
+        ('x', 'z', 'y', 0., 0.05),
+    ]
+
+    for dim1, dim2, dimz, z, dz in dims:
+        print(f'  --> ({dim1}, {dim2}, {dimz}={z:.2f}+-{dz:.2f})')
+        plot_2d_slice(
+            coords_train, coords_sample,
+            args.fig_dir, dim1, dim2,
+            dimz, z, dz, attrs=attrs_train,
+            fig_fmt=args.fig_fmt,
+            verbose=True
+        )
+
+
+    dims = [
+        ('x', 'y', 'z', 0., 0.05, 0., 0.05),
+        ('y', 'x', 'z', 0., 0.05, 0., 0.05),
+        ('x', 'y', 'z', 0., 0.05, 0., 0.05),
+    ]
+
+    for dim1, dimy, dimz, y, dy, z, dz in dims:
+        print(f'  --> ({dim1}, {dimy}={y}+-{dy}, {dimz}={z}+-{dz})')
+        plot_1d_slice(
+            coords_train, coords_sample,
+            args.fig_dir, dim1, dimy,
+            dimz, y, dy, z, dz, attrs=attrs_train,
+            fig_fmt=args.fig_fmt,
+            verbose=True
+        )
     return 0
 
 
