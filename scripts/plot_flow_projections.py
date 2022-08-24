@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 
 from __future__ import print_function, division
+from genericpath import isfile
+from re import X
 
 import numpy as np
 
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams['text.usetex'] = True
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, Normalize
 
@@ -14,6 +17,7 @@ import progressbar
 import os
 from glob import glob
 from pathlib import Path
+import shutil
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
@@ -24,27 +28,49 @@ import flow_ffjord_tf
 dpi = 200
 
 
-def calc_coords(eta):
+def calc_coords(eta, spherical_origin, cylindrical_origin):
+    """ Calculate coordinates in different coordinate systems.
+        Both Cartesian and spherical share the same origin, cylindrical is separate.
+
+        Cartesian coordinates: x, y, z, vx, vy, vz
+        Spherical coordiantes: r, cos(theta), phi, v_radial, v_theta (v_phi is missing)
+        Cylindrical coordinates: cyl_R, cyl_z, cyl_phi, cyl_vR, cyl_vz, cyl_vT
+    """
+
+    sph_x0 = np.array(spherical_origin)
+    cyl_x0 = np.array(cylindrical_origin)
+
     # Cylindrical
-    R = np.linalg.norm(eta[:,:2], axis=1)
-    z = eta[:,2]
-    phi = np.arctan2(eta[:,1], eta[:,0])
-    cos_phi = eta[:,0] / R
-    sin_phi = eta[:,1] / R
-    vR =  eta[:,3] * cos_phi + eta[:,4] * sin_phi
-    vT = -eta[:,3] * sin_phi + eta[:,4] * cos_phi
+    cyl_R = np.linalg.norm(eta[:,:2] - cyl_x0[:2], axis=1)
+    cyl_z = eta[:,2] - cyl_x0[2]
+    cyl_phi = np.arctan2(eta[:,1] - cyl_x0[1], eta[:,0] - cyl_x0[0])
+    cyl_cos_phi = (eta[:,0] - cyl_x0[0]) / cyl_R
+    cyl_sin_phi = (eta[:,1] - cyl_x0[1]) / cyl_R
+    cyl_vR =  eta[:,3] * cyl_cos_phi + eta[:,4] * cyl_sin_phi
+    cyl_vT = -eta[:,3] * cyl_sin_phi + eta[:,4] * cyl_cos_phi
     vz = eta[:,5]
-    cyl = {'R':R, 'z':z, 'phi':phi, 'vR':vR, 'vz':vz, 'vT':vT}
 
-    # Cartesian (z is already in cylindrical)
-    cart = {'x':eta[:,0], 'y':eta[:,1], 'vx':eta[:,3], 'vy':eta[:,4]}
+    cyl = {'cylR':cyl_R, 'cylz':cyl_z, 'cylphi':cyl_phi, 'cylvR':cyl_vR, 'cylvz':vz, 'cylvT':cyl_vT}
 
-    # Spherical (phi is already in cylindrical)
-    r = np.linalg.norm(eta[:,:3], axis=1)
-    vr = np.sum(eta[:,:3]*eta[:,3:], axis=1) / r
+    # Cartesian (vz is already in cylindrical)
+    x = eta[:,0] - sph_x0[0]
+    y = eta[:,1] - sph_x0[1]
+    z = eta[:,2] - sph_x0[2]
+
+    cart = {'x':x, 'y':y, 'z':z, 'vx':eta[:,3], 'vy':eta[:,4], 'vz':vz}
+
+    # Spherical
+    r = np.linalg.norm(eta[:,:3] - sph_x0, axis=1)
+    vr = np.sum((eta[:,:3] - sph_x0)*eta[:,3:], axis=1) / r
     costheta = z / r
-    vth = (z*vr - r*vz) / R
-    sph = {'r':r, 'cth':costheta, 'vr':vr, 'vth':vth}
+    sph_R = np.linalg.norm(eta[:,:2] - sph_x0[:2], axis=1)
+    phi = np.arctan2(eta[:,1] - sph_x0[1], eta[:,0] - sph_x0[0])
+    vth = (z*vr - r*vz) / sph_R
+    cos_phi = (eta[:,0] - sph_x0[0]) / cyl_R
+    sin_phi = (eta[:,1] - sph_x0[1]) / cyl_R
+    vT = -eta[:,3] * sin_phi + eta[:,4] * cos_phi
+
+    sph = {'r':r, 'cth':costheta, 'phi':phi, 'vr':vr, 'vth':vth, 'vT':vT}
 
     return dict(**cart, **cyl, **sph)
 
@@ -55,19 +81,17 @@ def load_training_data(fname, load_attrs=False):
         if load_attrs:
             attrs = dict(f['eta'].attrs.items())
             return eta, attrs
-    return eta
+    return eta, None
 
 
 def load_flows(fname_patterns):
     flow_list = []
 
     fnames = []
+    print(fname_patterns)
     for fn in fname_patterns:
         fnames += glob(fn)
     fnames = sorted(fnames)
-    #fnames = [fn[:-6] for fn in fnames]
-
-    print(f'Found {len(fnames)} flows.')
 
     for i,fn in enumerate(fnames):
         print(f'Loading flow {i+1} of {len(fnames)} ...')
@@ -119,8 +143,8 @@ def plot_1d_marginals(coords_train, coords_sample, fig_dir,
         labels = ['$x$', '$y$', r'$z$', '$v_x$', '$v_y$', '$v_z$']
         keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
     elif coordsys == 'cyl':
-        labels = ['$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_T$']
-        keys = ['R', 'z', 'phi', 'vR', 'vz', 'vT']
+        labels = ['$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$']
+        keys = ['cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT']
     elif coordsys == 'sph':
         labels = ['$r$', r'$\cos \theta$', r'$\phi$', '$v_r$', r'$v_{\theta}$', r'$v_{\phi}$']
         keys = ['r', 'cth', 'phi', 'vr', 'vth', 'vT']
@@ -133,10 +157,10 @@ def plot_1d_marginals(coords_train, coords_sample, fig_dir,
         xlim = np.percentile(coords_train[k], [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
-        if k == 'R':
+        if k == 'cylR':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = [-np.pi, np.pi]
+            xlim = [np.pi, -np.pi]
         elif k == 'cth':
             xlim = [-1, 1]
 
@@ -173,11 +197,11 @@ def plot_1d_marginals(coords_train, coords_sample, fig_dir,
         top=0.97
     )
 
-    # Make sure fig_dir exists
-    Path(fig_dir).mkdir(parents=True, exist_ok=True)
     for fmt in fig_fmt:
         fname = os.path.join(fig_dir, f'DF_marginals_{coordsys}.{fmt}')
         fig.savefig(fname, dpi=dpi)
+    if len(fig_fmt) == 0:
+        plt.show()
     plt.close(fig)
 
 
@@ -186,14 +210,14 @@ def plot_2d_marginal(coords_train, coords_sample,
                      fig_dir, dim1, dim2,
                      fig_fmt=('svg',)):
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
-        '$x$', '$y$', '$v_x$', '$v_y$',
-        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
+        '$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$',
+        '$r$', r'$\phi$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$', r'$v_{\phi}$'
     ]
     keys = [
-        'R', 'z', 'phi', 'vR', 'vz', 'vT',
-        'x', 'y', 'vx', 'vy',
-        'r', 'cth', 'vr', 'vth'
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
 
     def extract_dims(dim):
@@ -221,10 +245,10 @@ def plot_2d_marginal(coords_train, coords_sample,
         xlim = np.percentile(z, [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
-        if k == 'R':
+        if k == 'cylR':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = [-np.pi, np.pi]
+            xlim = [np.pi, -np.pi]
         elif k == 'cth':
             xlim = [-1, 1]
         lims.append(xlim)
@@ -239,7 +263,8 @@ def plot_2d_marginal(coords_train, coords_sample,
     ns,_,_,_ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
 
     dn = ns/n_sample - nt/n_train
-    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    with np.errstate(divide='ignore', invalid='ignore'):
+        dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
     vmax = 5.
     #dn /= np.max(nt)/n_train
     #vmax = 0.2
@@ -281,20 +306,21 @@ def plot_2d_marginal(coords_train, coords_sample,
     for fmt in fig_fmt:
         fname = os.path.join(fig_dir, f'DF_marginal_{dim1}_{dim2}.{fmt}')
         fig.savefig(fname, dpi=dpi)
+    if len(fig_fmt) == 0:
+        plt.show()
     plt.close(fig)
 
 
 def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
-        '$x$', '$y$', '$v_x$', '$v_y$',
-        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
+        '$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$',
+        '$r$', r'$\phi$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$', r'$v_{\phi}$'
     ]
-    
     keys = [
-        'R', 'z', 'phi', 'vR', 'vz', 'vT',
-        'x', 'y', 'vx', 'vy',
-        'r', 'cth', 'vr', 'vth'
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
     
     idx_train = (coords_train[dimz] > z - dz) & (coords_train[dimz] < z + dz)
@@ -316,10 +342,10 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
         xlim = np.percentile(val, [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
-        if k == 'R':
+        if k == 'cylR':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = [-np.pi, np.pi]
+            xlim = [np.pi, -np.pi]
         elif k == 'cth':
             xlim = [-1, 1]
         lims.append(xlim)
@@ -345,17 +371,18 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
                 ax.add_patch(circ)
                 circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
                 ax.add_patch(circ)
-        if dim1 in ['R']:
+        if dim1 in ['cylR']:
             for ax in [ax_t, ax_s, ax_d]:
                 ax.axvline(r_inner, **kw)
                 ax.axvline(r_outer, **kw)
-        if dim2 in ['R']:
+        if dim2 in ['cylR']:
             for ax in [ax_t, ax_s, ax_d]:
                 ax.axhline(r_inner, **kw)
                 ax.axhline(r_outer, **kw)
 
     dn = ns/n_sample - nt/n_train
-    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    with np.errstate(divide='ignore', invalid='ignore'):
+        dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
     vmax = 5.
     #dn /= np.max(nt)/n_train
     #vmax = 0.2
@@ -412,6 +439,8 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
     for fmt in fig_fmt:
         fname = os.path.join(fig_dir, f'DF_slice_{dim1}_{dim2}.{fmt}')
         fig.savefig(fname, dpi=dpi)
+    if len(fig_fmt) == 0:
+        plt.show()
     plt.close(fig)
 
 
@@ -459,15 +488,14 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
 
 def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', '$v_{\phi}$',
-        '$x$', '$y$', '$v_x$', '$v_y$',
-        '$r$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$'
+        '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
+        '$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$',
+        '$r$', r'$\phi$', r'$\cos \theta$', '$v_r$', r'$v_{\theta}$', r'$v_{\phi}$'
     ]
-    
     keys = [
-        'R', 'z', 'phi', 'vR', 'vz', 'vT',
-        'x', 'y', 'vx', 'vy',
-        'r', 'cth', 'vr', 'vth'
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
     
     idx_train = (coords_train[dimz] > z - dz) & (coords_train[dimz] < z + dz) &\
@@ -490,10 +518,10 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
         xlim = np.percentile(val, [1., 99.])
         w = xlim[1] - xlim[0]
         xlim = [xlim[0]-0.05*w, xlim[1]+0.05*w]
-        if k == 'R':
+        if k == 'cylR':
             xlim[0] = max(xlim[0], 0.)
         elif k == 'phi':
-            xlim = [-np.pi, np.pi]
+            xlim = [np.pi, -np.pi]
         elif k == 'cth':
             xlim = [-1, 1]
         lim_min = min(lim_min, xlim[0])
@@ -512,19 +540,20 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
 
     if attrs is not None:
         # Visualise the boundaries of the population
-        valid_keys = ['x', 'y', 'z', 'R']
+        valid_keys = ['x', 'y', 'z', 'cylR']
         r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
         kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
         if (dim1 in valid_keys):
             for ax in [ax_h, ax_r]:
                 ax.axvline(r_inner, **kw)
                 ax.axvline(r_outer, **kw)
-                if dim1 != 'R':
+                if dim1 != 'cylR':
                     ax.axvline(-r_inner, **kw)
                     ax.axvline(-r_outer, **kw)
 
     dn = ns/n_sample - nt/n_train
-    dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
+    with np.errstate(divide='ignore', invalid='ignore'):
+        dn /= np.sqrt(ns * (n_train/n_sample)) / n_train
     ax_r.plot(bins[:-1], dn, label=r"gaia_vr, $\varpi$ > 0.2 mas", drawstyle='steps-post')
     ax_r.yaxis.tick_right()
     ax_r.yaxis.set_label_position("right")
@@ -561,43 +590,19 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
     for fmt in fig_fmt:
         fname = os.path.join(fig_dir, f'DF_slice_{dim1}.{fmt}')
         fig.savefig(fname, dpi=dpi)
+    if len(fig_fmt) == 0:
+        plt.show()
     plt.close(fig)
 
 
-def plot_slices(flow_list, eta_train, n_pix=256, batch_size=128):
-    R2 = eta_train[:,0]**2 + eta_train[:,1]**2
-    R_max = 1.2 * np.sqrt(np.percentile(R2, 99.))
-
-    x = np.linspace(-R_max, R_max, n_pix)
-    x,y = np.meshgrid(x, x)
-    s = x.shape
-    x.shape = (x.size,)
-    y.shape = (x.size,)
-
-    p = np.empty_like(x)
-
-    for flow in flow_list:
-        @tf.function
-        def p_batch(eta_batch):
-            print('Tracing p_batch ...')
-            return flow.prob(eta_batch)
-
-        for i0 in range(0,x.size,batch_size):
-            eta = np.zeros((x.size,6), dtype='f4')
-            eta[:,0] = x[i0:i0+batch_size]
-            eta[:,1] = y[i0:i0+batch_size]
-            eta = tf.constant(eta)
-            p[i0:i0+batch_size] += p_batch(eta)
-
-    p /= len(flow_list)
-
-    # Plot in (x,y)-plane
-
-
 def main():
+    """
+    Plots different diagnostics for the flow and the training data.
+    TODO: Currently some of the functions require attributes from the training data, remove this dependancy.
+    """
     from argparse import ArgumentParser
     parser = ArgumentParser(
-        description='Deep Potential: Plot results for Plummer sphere.',
+        description='Deep Potential: Plot different diagnostics for a normalizing flow.',
         add_help=True
     )
     parser.add_argument(
@@ -609,19 +614,13 @@ def main():
         '--flows',
         type=str, nargs='+',
         required=True,
-        help='Flow model filename pattern(s).'
+        help='Flow model filename pattern(s). Can be either checkpoint dir or *.index in that checkpoint dir.'
     )
     parser.add_argument(
-        '--save-samples',
+        '--store-samples',
         type=str,
         metavar='*.h5',
-        help='Save samples to this filename after generating them.'
-    )
-    parser.add_argument(
-        '--load-samples',
-        type=str,
-        metavar='*.h5',
-        help='Load samples, instead of generating them.'
+        help='Save generated samples or load them from this filename.'
     )
     parser.add_argument(
         '--fig-dir',
@@ -636,11 +635,18 @@ def main():
         help='Draw oversample*(# of training samples) samples from flows.'
     )
     parser.add_argument(
-        '--origin',
+        '--spherical-origin',
         type=float,
         nargs=3,
         default=(0.,0.,0.),
-        help='Origin of coordinate system in (x,y,z) to subtract from coords.'
+        help='Origin of coordinate system for spherical coordinates in (x,y,z) to subtract from coords.'
+    )
+    parser.add_argument(
+        '--cylindrical-origin',
+        type=float,
+        nargs=3,
+        default=(8.3,0.,0.),
+        help='Origin of coordinate system for cylindrical coordinates in (x,y,z) to subtract from coords.'
     )
     parser.add_argument(
         '--fig-fmt',
@@ -659,16 +665,43 @@ def main():
         action='store_true',
         help='Load attributes of the training data for visualisation (e.g. cut boundaries).'
     )
+    parser.add_argument(
+        '--autosave',
+        action='store_true',
+        help='Automatically saves/loads samples and chooses fig dir. Incompatible with save samples, load samples, and fig-dir.\
+            The saving location is in plots/ in a subdir deduced from the flows directory. Currently only supports one flow.'
+    )
     args = parser.parse_args()
 
+    # Load in the custom style sheet for scientific plotting
+    plt.style.use('scientific')
     if args.dark:
         plt.style.use('dark_background')
 
+    if args.autosave:
+        # Infer the place to store the samples and figures
+        fname_flow = args.flows[0]
+        fname_loss_pdf = ''
+        if os.path.isdir(fname_flow):
+            fname_index = tf.train.latest_checkpoint(fname_flow)
+            fname_loss_pdf = fname_index + '_loss.pdf'
+            fig_dir = 'plots/' + fname_index[fname_index.find('df/') + 3:] + '/'
+        else:
+            fname_loss_pdf = fname_flow[:-6] + '_loss.pdf'
+            fig_dir = 'plots/' + fname_flow[fname_flow.find('df/') + 3:fname_flow.rfind('.index')] + '/'
+        
+        sample_fname = fig_dir + 'samples.h5'
+        print(fname_loss_pdf, os.path.isfile(fname_loss_pdf))
+        if os.path.isfile(fname_loss_pdf):
+            # Copy the latest loss over to the plots dir
+            Path(fig_dir).mkdir(parents=True, exist_ok=True)
+            shutil.copy(fname_loss_pdf, fig_dir)
+
+        args.store_samples = sample_fname
+        args.fig_dir = fig_dir
+
     print('Loading training data ...')
-    if args.load_attrs:
-        eta_train, attrs_train = load_training_data(args.input, load_attrs=True)
-    else:
-        eta_train, attrs_train = load_training_data(args.input, load_attrs=False), None
+    eta_train, attrs_train = load_training_data(args.input, load_attrs=args.load_attrs)
     n_train = eta_train.shape[0]
 
     print(attrs_train, args.load_attrs)
@@ -677,16 +710,24 @@ def main():
     print('Loading flows ...')
     flows = load_flows(args.flows)
 
-    if args.load_samples is None:
+    if args.store_samples is not None and os.path.isfile(args.store_samples):
+        print('Loading pre-generated samples ...')
+        with h5py.File(args.store_samples, 'r') as f:
+            eta_sample = f['eta'][:]
+            loss_mean = f['eta'].attrs['loss_training']
+            loss_std = f['eta'].attrs['loss_std_training']
+        print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
+        print(f'  --> {len(eta_sample)} samples')
+    else:
         print('Evaluating loss ...')
         loss_mean, loss_std = evaluate_loss(flows, eta_train)
         print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
         print('Sampling from flows ...')
         eta_sample = sample_from_flows(flows, args.oversample*n_train)
         print('  --> Saving samples ...')
-        if args.save_samples is not None:
-            Path(os.path.split(args.save_samples)[0]).mkdir(parents=True, exist_ok=True)
-            with h5py.File(args.save_samples, 'w') as f:
+        if args.store_samples is not None:
+            Path(os.path.split(args.store_samples)[0]).mkdir(parents=True, exist_ok=True)
+            with h5py.File(args.store_samples, 'w') as f:
                 dset = f.create_dataset(
                     'eta',
                     data=eta_sample,
@@ -695,24 +736,15 @@ def main():
                 )
                 dset.attrs['loss_training'] = loss_mean
                 dset.attrs['loss_std_training'] = loss_std
-    else:
-        print('Loading pre-generated samples ...')
-        with h5py.File(args.load_samples, 'r') as f:
-            eta_sample = f['eta'][:]
-            loss_mean = f['eta'].attrs['loss_training']
-            loss_std = f['eta'].attrs['loss_std_training']
-        print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
-        print(f'  --> {len(eta_sample)} samples')
+
     print(f'  --> {np.count_nonzero(np.isnan(eta_sample))} NaN values')
 
-    # Subtract off origin position
-    for k,x0 in enumerate(args.origin):
-        eta_train[:,k] -= x0
-        eta_sample[:,k] -= x0
+    # Make sure fig_dir exists
+    Path(args.fig_dir).mkdir(parents=True, exist_ok=True)
 
     print('Calculating cylindrical & spherical coordinates ...')
-    coords_train = calc_coords(eta_train)
-    coords_sample = calc_coords(eta_sample)
+    coords_train = calc_coords(eta_train, args.spherical_origin, args.cylindrical_origin)
+    coords_sample = calc_coords(eta_sample, args.spherical_origin, args.cylindrical_origin)
 
     print('Plotting 1D marginal distributions ...')
     for coordsys in ['cart', 'cyl', 'sph']:
@@ -728,14 +760,14 @@ def main():
         ('r', 'vr'),
         ('phi', 'cth'),
         ('vT', 'vth'),
-        ('R', 'z'),
-        ('R', 'vz'),
-        ('R', 'vR'),
-        ('R', 'vT'),
+        ('cylR', 'cylz'),
+        ('cylR', 'cylvz'),
+        ('cylR', 'cylvR'),
+        ('cylR', 'cylvT'),
         ('z', 'vz'),
-        ('vz', 'vT'),
-        ('vR', 'vz'),
-        ('vR', 'vT'),
+        ('cylvz', 'cylvT'),
+        ('cylvR', 'cylvz'),
+        ('cylvR', 'cylvT'),
         ('x', 'y'),
         ('x', 'z'),
         ('y', 'z'),
@@ -753,9 +785,12 @@ def main():
             fig_fmt=args.fig_fmt
         )
 
+
+    print('Plotting 2d slices of the flow ...')
+
     dims = [
-        ('phi', 'cth', 'R', np.mean(coords_train['R']), 0.05),
-        ('R', 'phi', 'z', 0., 0.05),
+        ('phi', 'cth', 'r', np.mean(coords_train['r']), 0.05),
+        ('cylR', 'cylphi', 'cylz', 0., 0.05),
         ('x', 'y', 'z', 0., 0.05),
         ('y', 'z', 'x', 0., 0.05),
         ('x', 'z', 'y', 0., 0.05),
@@ -772,10 +807,12 @@ def main():
         )
 
 
+    print('Plotting 1d slices of the flow ...')
+    
     dims = [
         ('x', 'y', 'z', 0., 0.05, 0., 0.05),
         ('y', 'x', 'z', 0., 0.05, 0., 0.05),
-        ('x', 'y', 'z', 0., 0.05, 0., 0.05),
+        ('z', 'x', 'y', 0., 0.05, 0., 0.05),
     ]
 
     for dim1, dimy, dimz, y, dy, z, dz in dims:
