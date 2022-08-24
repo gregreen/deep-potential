@@ -403,7 +403,7 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history = load_loss_history(
+            loss_history, val_loss_history, lr_history, _, _ = load_loss_history(
                 loss_fname
             )
 
@@ -504,7 +504,7 @@ def train_flow(flow, data,
                 val_loss_hist=val_loss_history,
                 lr_hist=lr_history
             )
-            fig.savefig(f'{chkpt_fname}_loss.svg')
+            fig.savefig(f'{chkpt_fname}_loss.pdf')
             plt.close(fig)
 
     t2 = time()

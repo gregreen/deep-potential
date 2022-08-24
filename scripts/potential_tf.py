@@ -69,7 +69,7 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
                            lam=1., mu=0,
                            xi=1., delf_delt_scale=1.,
                            l2=tf.constant(0.01),
-                           return_grads=True):
+                           return_grads=True, return_loss_noreg=False):
     """
     Calculates both the loss and the gradients of the loss w.r.t. the
     given parameters.
@@ -192,6 +192,7 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
         #tf.print('likelihood:', tf.reduce_mean(likelihood))
         loss = tf.math.log(tf.reduce_mean(likelihood))
         tf.print('loss (before penalty):', loss)
+        loss_noreg = tf.identity(loss)
         #    likelihood
         #    + lam*prior_neg
         #    + mu*prior_pos
@@ -212,8 +213,12 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
     # Gradients of loss w.r.t. NN parameters
     if return_grads:
         dloss_dparam = g.gradient(loss, params)
+        if return_loss_noreg:
+            return loss, loss_noreg, dloss_dparam
         return loss, dloss_dparam
 
+    if return_loss_noreg:
+        return loss, loss_noreg
     return loss
 
 
@@ -386,7 +391,7 @@ class FrameShift(tf.Module):
         u = tf.stack((ux, uy, uz), axis=1)
 
         # Add rotation to w
-        w = tf.stack((tf.multiply(py, -self._omega), tf.multiply(px, self._omega), tf.zeros(n)), axis=1)
+        w = tf.stack((tf.multiply(tf.subtract(py, self._u_y), -self._omega), tf.multiply(tf.subtract(px, self._u_x), self._omega), tf.zeros(n)), axis=1)
 
         return u, w
 
@@ -402,7 +407,7 @@ class FrameShift(tf.Module):
         return spec_name_base
 
     @classmethod
-    def load(cls, checkpoint_name):
+    def load(cls, checkpoint_name, verbose=True):
         """Load FrameShift from a checkpoint and a spec file"""
         # Get spec file name
         if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
@@ -418,25 +423,26 @@ class FrameShift(tf.Module):
         checkpoint = tf.train.Checkpoint(frameshift=fs)
         checkpoint.restore(checkpoint_name).expect_partial() 
 
-        print(f'loaded {kw} from {checkpoint_name}')
+        if verbose:
+            print(f'loaded {kw} from {checkpoint_name}')
         return fs
 
     @classmethod
-    def load_latest(cls, checkpoint_dir):
+    def load_latest(cls, checkpoint_dir, verbose=True):
         """Load the latest FrameShift from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         if latest is None:
             raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
-        return FrameShift.load(latest)
+        return FrameShift.load(latest, verbose)
 
     @classmethod
-    def load_checkpoint_with_id(cls, checkpoint_dir, id):
+    def load_checkpoint_with_id(cls, checkpoint_dir, id, verbose=True):
         """Load the FrameShift with a specified id from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         if latest is None:
             raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
         latest = latest[:latest.rfind('-')] + f'-{id}'
-        return FrameShift.load(latest)
+        return FrameShift.load(latest, verbose)
 
     def debug(self):
         print(f'name={self.name}\n\
@@ -595,7 +601,9 @@ def train_potential(
     print(f'Optimizer: {opt}')
 
     loss_history = []
+    loss_noreg_history = []
     val_loss_history = []
+    val_loss_noreg_history = []
     lr_history = []
 
     # Set up checkpointing
@@ -631,7 +639,7 @@ def train_potential(
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history = load_loss_history(
+            loss_history, val_loss_history, lr_history, loss_noreg_history, val_loss_noreg_history = load_loss_history(
                 loss_fname
             )
 
@@ -650,7 +658,7 @@ def train_potential(
         ]
 
         # Calculate the loss and its gradients w.r.t. the parameters
-        loss, dloss_dparam = get_phi_loss_gradients(
+        loss, loss_noreg, dloss_dparam = get_phi_loss_gradients(
             phi_model, frameshift_model,
             phi_param + frameshift_param,
             q_b, p_b,
@@ -660,7 +668,8 @@ def train_potential(
             delf_delt_scale=1,#delf_delt_scale,
             lam=lam,
             mu=mu,
-            l2=l2
+            l2=l2,
+            return_loss_noreg=True
         )
 
         dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
@@ -670,7 +679,7 @@ def train_potential(
         opt.apply_gradients(zip(dloss_dparam, phi_param + frameshift_param))
 
 
-        return loss
+        return loss, loss_noreg
 
     @tf.function
     def validation_step(batch):
@@ -682,7 +691,7 @@ def train_potential(
         ]
 
         # Calculate the loss and its gradients w.r.t. the parameters
-        loss = get_phi_loss_gradients(
+        loss, loss_noreg = get_phi_loss_gradients(
             phi_model, frameshift_model,
             phi_param + frameshift_param,
             q_b, p_b,
@@ -693,10 +702,11 @@ def train_potential(
             lam=lam,
             mu=mu,
             l2=l2,
-            return_grads=False
+            return_grads=False,
+            return_loss_noreg=True
         )
 
-        return loss
+        return loss, loss_noreg
 
     # Set up checkpointing
     step = tf.Variable(0, name='step')
@@ -729,12 +739,14 @@ def train_potential(
             break
 
         # Take one step
-        loss = training_step(y)
-        val_loss = validation_step(y_val)
+        loss, loss_noreg = training_step(y)
+        val_loss, val_loss_noreg = validation_step(y_val)
 
         # Logging
         loss_history.append(float(loss))
+        loss_noreg_history.append(float(loss_noreg))
         val_loss_history.append(float(val_loss))
+        val_loss_noreg_history.append(float(val_loss_noreg))
         lr_history.append(float(opt._decayed_lr(tf.float32)))
         update_bar(i)
 
@@ -778,14 +790,24 @@ def train_potential(
                 f'{chkpt_fname}_loss.txt',
                 loss_history,
                 val_loss_history=val_loss_history,
-                lr_history=lr_history
+                lr_history=lr_history,
+                loss_noreg_history=loss_noreg_history,
+                val_loss_noreg_history=val_loss_noreg_history
             )
             fig = plot_loss(
                 loss_history,
                 val_loss_hist=val_loss_history,
                 lr_hist=lr_history
             )
-            fig.savefig(f'{chkpt_fname}_loss.svg')
+            fig.savefig(f'{chkpt_fname}_loss.pdf')
+            plt.close(fig)
+
+            fig = plot_loss(
+                loss_noreg_history,
+                val_loss_hist=val_loss_noreg_history,
+                lr_hist=lr_history
+            )
+            fig.savefig(f'{chkpt_fname}_loss_noreg.pdf')
             plt.close(fig)
 
     t2 = time()

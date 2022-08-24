@@ -33,11 +33,13 @@ import serializers_tf
 import potential_tf
 import toy_systems
 import flow_ffjord_tf
+import flow_sampling
 import utils
 
 
 def load_data(fname):
     _,ext = os.path.splitext(fname)
+    attrs = {}
     if ext == '.json':
         with open(fname, 'r') as f:
             o = json.load(f)
@@ -45,13 +47,15 @@ def load_data(fname):
     elif ext in ('.h5', '.hdf5'):
         with h5py.File(fname, 'r') as f:
             o = f['eta'][:].astype('f4')
+            attrs = dict(f['eta'].attrs.items())
+            attrs['n'] = len(o)
         d = tf.constant(o)
     else:
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
-    return d
+    return d, attrs
 
 
-def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
+def train_flows(data, fname_pattern,
                 n_flows=1, n_hidden=4, hidden_size=32, n_bij=1,
                 n_epochs=128, batch_size=1024, validation_frac=0.25,
                 reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
@@ -102,7 +106,8 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             **lr_kw
         )
 
-        utils.save_loss_history(
+        # TODO: This part in practice doesn't get executed, as training is terminated manually
+        """utils.save_loss_history(
             f'{flow_fname}_loss.txt',
             loss_history,
             val_loss_history=val_loss_history,
@@ -115,12 +120,12 @@ def train_flows(data, fname_pattern, plot_fname_pattern, loss_fname,
             lr_hist=lr_history
         )
         fig.savefig(plot_fname_pattern.format(i), dpi=200)
-        plt.close(fig)
+        plt.close(fig)"""
 
     return flow_list
 
 
-def train_potential(df_data, fname, plot_fname, loss_fname,
+def train_potential(df_data, fname,
                     n_hidden=3, hidden_size=256, xi=1., lam=1., l2=0,
                     n_epochs=4096, batch_size=1024, validation_frac=0.25,
                     lr={}, optimizer='RAdam', warmup_proportion=0.1,
@@ -170,13 +175,13 @@ def train_potential(df_data, fname, plot_fname, loss_fname,
         **lr_kw
     )
 
-
-    utils.save_loss_history(f'{fname}_loss.txt', loss_history)
+    # TODO: This part in practice doesn't get executed, as training is terminated manually
+    """utils.save_loss_history(f'{fname}_loss.txt', loss_history)
 
     Path(os.path.split(plot_fname)[0]).mkdir(parents=True, exist_ok=True)
     fig = utils.plot_loss(loss_history)
     fig.savefig(plot_fname, dpi=200)
-    plt.close(fig)
+    plt.close(fig)"""
 
     if include_frameshift:
         return phi_model, frameshift_model
@@ -299,7 +304,7 @@ def load_flows(fname_patterns):
     n_max = 9999
     for i in range(n_max):
         flow_dir = os.path.split(fname_patterns.format(i))[0]
-        if os.path.isdir(flow_dir):
+        if os.path.isdir(flow_dir) and flow_dir not in checkpoint_dirs:
             checkpoint_dirs.append(flow_dir)
     
     print(f'Found {len(checkpoint_dirs)} flows.')
@@ -446,28 +451,18 @@ def main():
     )
     parser.add_argument(
         '--df-grads-fname',
-        type=str, default='test_run/data/df_gradients.h5',
+        type=str, default='data/df_gradients.h5',
         help='Directory in which to store the flow samples (positions and f gradients).'
     )
     parser.add_argument(
         '--flow-fname',
-        type=str, default='test_run/models/df/flow_{:02d}/flow',
+        type=str, default='models/df/flow_{:02d}/flow',
         help='Filename pattern to store flows in.'
     )
     parser.add_argument(
-        '--flow-loss',
-        type=str, default='test_run/plots/flow_loss_history_{:02d}.png',
-        help='Filename pattern for flow loss history plots.'
-    )
-    parser.add_argument(
         '--potential-fname',
-        type=str, default='test_run/models/Phi/Phi',
+        type=str, default='models/Phi/Phi',
         help='Filename to store potential in.'
-    )
-    parser.add_argument(
-        '--potential-loss',
-        type=str, default='test_run/plots/potential_loss_history.png',
-        help='Filename for potential loss history plot.'
     )
     parser.add_argument(
         '--potential-frameshift',
@@ -490,14 +485,14 @@ def main():
         help='Do not sample the flow, load the samples in instead.'
     )
     parser.add_argument(
+        '--flow-sampling-cut',
+        action='store_true',
+        help='Perform cuts on the flow samples based on the attrs of the input data.'
+    )
+    parser.add_argument(
         '--flow-median',
         action='store_true',
         help='Use the median of the flow gradients (default: use the mean).'
-    )
-    parser.add_argument(
-        '--loss-history',
-        type=str, default='data/loss_history_{:02d}.txt',
-        help='Filename for loss history data.'
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
@@ -510,16 +505,13 @@ def main():
     # ================= Training/loading the flow =================
     if not args.no_flow_training:
         # Load input phase-space positions to train the flow on
-        data = load_data(args.input)
+        data, attrs = load_data(args.input)
         print(f'Loaded {data.shape[0]} phase-space positions.')
 
         # Train and save normalizing flows
         print('Training normalizing flows ...')
         flows = train_flows(
-            data,
-            args.flow_fname,
-            args.flow_loss,
-            args.loss_history,
+            data, args.flow_fname,
             **params['df']
         )
     # Re-load the flows (this removes the regularization terms)
@@ -539,13 +531,23 @@ def main():
         n_samples = params['Phi'].pop('n_samples')
         grad_batch_size = params['Phi'].pop('grad_batch_size')
         sample_batch_size = params['Phi'].pop('sample_batch_size')
-        df_data = sample_from_flows(
-            flows, n_samples,
-            return_indiv=True,
-            grad_batch_size=grad_batch_size,
-            sample_batch_size=sample_batch_size,
-            f_reduce=np.median if args.flow_median else clipped_vector_mean
-        )
+        if args.flow_sampling_cut:
+            # Cut the flow samples to the limits specified by the attributes in training data. Supports one flow
+            _, attrs = load_data(args.input)
+            df_data = flow_sampling.sample_from_different_flows(
+                flows, [attrs], n_samples,
+                return_indiv=True,
+                grad_batch_size=grad_batch_size,
+                sample_batch_size=sample_batch_size
+            )
+        else:
+            df_data = sample_from_flows(
+                flows, n_samples,
+                return_indiv=True,
+                grad_batch_size=grad_batch_size,
+                sample_batch_size=sample_batch_size,
+                f_reduce=np.median if args.flow_median else clipped_vector_mean
+            )
         save_df_data(df_data, args.df_grads_fname)
 
 
@@ -557,8 +559,6 @@ def main():
         phi_model = train_potential(
             df_data,
             args.potential_fname,
-            args.potential_loss,
-            args.loss_history,
             include_frameshift=args.potential_frameshift,
             **params['Phi']
         )
