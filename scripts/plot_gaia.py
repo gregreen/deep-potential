@@ -170,21 +170,21 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
         sigma_z = 68*x_plot/1.1
         #sigma_z = 2*xs/np.abs(xs)*rho0*z0*(1 - np.exp(-np.abs(xs)*1000/z0))
         #print(az)
-        plt.plot(x_plot[~mask_ & (x_plot > 0)], sigma_z[~mask_ & (x_plot > 0)], color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
-        plt.plot(x_plot[~mask_ & (x_plot < 0)], sigma_z[~mask_ & (x_plot < 0)], color="tab:red")
-        plt.fill_between(x_plot, 64*x_plot/1.1, 72*x_plot/1.1, alpha=0.3, color="tab:red")
-        plt.axhline(0, color="black", lw=0.5)
-        plt.axvline(0, color="black", lw=0.5)
+        ax.plot(x_plot[~mask_ & (x_plot > 0)], sigma_z[~mask_ & (x_plot > 0)], color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
+        ax.plot(x_plot[~mask_ & (x_plot < 0)], sigma_z[~mask_ & (x_plot < 0)], color="tab:red")
+        ax.fill_between(x_plot, 64*x_plot/1.1, 72*x_plot/1.1, alpha=0.3, color="tab:red")
+        ax.axhline(0, color="black", lw=0.5)
+        ax.axvline(0, color="black", lw=0.5)
     if dim1 == 'x' and dimforce == 'x':
         u = 2.2 # Approximate rotation curve in MW [100 km/s]
         r0 = 8.3 # Distance to MW centre [kpc]
         # Plot the forces assuming constant velocity profile
-        plt.plot(x_plot, u**2/r0*(1 + x_plot/r0), color='tab:red', label='ideal constant rotation curve')
+        ax.plot(x_plot, u**2/r0*(1 + x_plot/r0), color='tab:red', label='ideal constant rotation curve')
     if dim1 == 'y' and dimforce == 'y':
         u = 2.2 # Approximate rotation curve in MW [100 km/s]
         r0 = 8.3 # Distance to MW centre [kpc]
         # Plot the forces assuming constant velocity profile
-        plt.plot(x_plot, -u**2/r0**2*x_plot, color='tab:red', label='ideal constant rotation curve')
+        ax.plot(x_plot, -u**2/r0**2*x_plot, color='tab:red', label='ideal constant rotation curve')
 
     ax.legend()
     for fmt in fig_fmt:
@@ -466,6 +466,96 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
     return
 
 
+def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0.95, attrs=None, fig_fmt=('svg',)): 
+    labels = [
+        '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
+    ]
+
+    keys = [
+        'x', 'y', 'z'
+    ]
+
+    labels = {k:l for k,l in zip(keys,labels)}
+    ikeys = {k:i for i, k in enumerate(keys)}
+
+    for dim in [dim1]:
+        if dim not in keys:
+            raise ValueError(f'dimension {dim} not supported')
+
+    fig,ax = plt.subplots(figsize=(3,3), dpi=200)
+
+    r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
+
+    n = 256000
+    nbins = 64
+    xbins = np.linspace(-r_outer*padding, r_outer*padding, nbins)
+    xcenters = 0.5*(xbins[1:] + xbins[:-1])
+    q = []
+    for x in xcenters:
+        n_x = n//len(xcenters)
+        y = (r_outer**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
+        z = (r_outer**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
+        idx = (x*x+y*y+z*z < r_outer**2*padding**2) & ((x*x+y*y+z*z > r_inner**2/padding**2))
+        
+        new_q = np.full((np.sum(idx), 3), x, dtype='f4')
+        iy = (ikeys[dim1] + 1) % 3
+        iz = (ikeys[dim1] + 2) % 3
+        new_q[:, iy] = y[idx]
+        new_q[:, iz] = z[idx]
+        q.append(new_q)
+    q = np.concatenate(q, axis=0)
+
+
+    if attrs is not None:
+
+        # Visualise the boundaries
+        cartesian_keys = ['x', 'y', 'z']
+        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
+        if dim1 in keys:
+            ax.axvline(r_inner, **kw)
+            ax.axvline(r_outer, **kw)
+            ax.axvline(-r_inner, **kw)
+            ax.axvline(-r_outer, **kw)
+
+    phi,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+        phi_model['phi'], q, return_phi=True
+    )
+
+    if quantity == 'rho':
+        y = 2.309*d2phi_dq2.numpy()/(4*np.pi)
+        ax.set_ylabel(r'$\rho^*\mathrm{\ [M_\odot/pc^3]}$')
+    elif quantity == 'sigmaz':
+        y = 367.5*dphi_dq[:, 2].numpy()
+        ax.set_ylabel('$\Sigma_z^*\:\mathrm{[M_\odot/pc^2]}$')
+        
+        z0 = 255.6 # [pc]
+        rho0 = 0.0474 # [1/(M_sun*pc^3)]
+        x_plot = np.linspace(-r_outer, r_outer, 512)
+        sigma_z = 68*x_plot/1.1
+        ax.plot(x_plot[x_plot > 0], sigma_z[x_plot > 0], color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
+        ax.plot(x_plot[x_plot < 0], sigma_z[x_plot < 0], color="tab:red")
+        ax.fill_between(x_plot, 64*x_plot/1.1, 72*x_plot/1.1, alpha=0.3, color="tab:red")
+        ax.axhline(0, color="black", lw=0.5)
+        ax.axvline(0, color="black", lw=0.5)
+            
+    y_mean = binned_statistic(q[:, ikeys[dim1]], y, statistic=np.mean, bins=[xbins]).statistic
+    y_lower = binned_statistic(q[:, ikeys[dim1]], y, statistic=lambda x: np.percentile(x, 15.865), bins=[xbins]).statistic
+    y_upper = binned_statistic(q[:, ikeys[dim1]], y, statistic=lambda x: np.percentile(x, 100-15.865), bins=[xbins]).statistic
+
+    x_plot = 0.5*(xbins[1:]+xbins[:-1])
+    ax.plot(xcenters, y_mean)
+    ax.fill_between(xcenters, y_lower, y_upper, alpha=0.2, label=r'$\pm 1\sigma$')
+
+    ax.set_xlabel(labels[dim1])
+    ax.legend(fontsize=8)
+
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'phi_marginal_{dim1}_{quantity}.{fmt}')
+        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+
+    return
+
 def main():
     """
     Plots different diagnostics for the potential (with frameshift) and flows for Gaia populations.
@@ -601,6 +691,16 @@ def main():
     for dim1, dimy, y, z, dimforce in dims:
         print(f'  --> ({dim1}, {dimy}={y}, {z})')
         plot_force_1d_slice(phi_model, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+
+        
+    print('Plotting 1D marginals of the potential ...')
+    dims = [
+        ('z', 'rho'),
+        ('z', 'sigmaz'),
+    ]
+    for dim1, quantity in dims:
+        print(f'  --> ({dim1}: {quantity})')
+        plot_custom_potential_marginal(phi_model, args.fig_dir, dim1, quantity, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
 
 
     # Extra diagnostics if flow samples are also passed
