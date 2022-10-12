@@ -16,6 +16,7 @@ import os
 from glob import glob
 from pathlib import Path
 import shutil
+import json
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
@@ -36,16 +37,21 @@ def load_potential(fname):
         fname = os.path.join(fname, '')
 
     directory, tail = os.path.split(fname)
-    
+
     has_frameshift = False
     if len(glob(directory + '/*_fspec.json')) > 0:
         has_frameshift = True
+
+    is_guided = False
+    spec_fname = glob(directory + '/*_spec.json')[0]
+    with open(spec_fname, 'r') as f:
+        is_guided = True if 'Guided' in json.load(f)['name'] else False
         
     if os.path.isdir(fname):
-        phi = potential_tf.PhiNN.load_latest(fname)
+        phi = potential_tf.PhiNNGuided.load_latest(fname) if is_guided else potential_tf.PhiNN.load_latest(fname)
         fs = potential_tf.FrameShift.load_latest(fname) if has_frameshift else None
     else:
-        phi = potential_tf.PhiNN.load(fname[:-6])
+        phi = potential_tf.PhiNNGuided.load(fname[:-6]) if is_guided else potential_tf.PhiNN.load(fname[:-6])
         fs = potential_tf.FrameShift.load(fname[:-6]) if has_frameshift else None
     
     return {"phi": phi, "fs": fs}
@@ -80,31 +86,40 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     ax_e, cax_e = axs[1, 2], axs[0, 2]
     main_axs = [ax_p, ax_r, ax_e]
     
-    # Get the plot limits
+
+    """# Get the plot limits
     xmin, xmax, ymin, ymax = 0, 0, 0, 0
+    lims = []
+    for i,y in enumerate([coords_train[dim1], coords_train[dim2]]):
+        xlim = np.percentile(y, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
+        lims.append(xlim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+    xlim, ylim = lims"""
+
+    # Get the plot limits
+    lims = []
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        for dim in [dim1, dim2]:
+            if dim == 'z':
+                lims.append([-c*H_out, c*H_out])
+            else:
+                lims.append([-c*R_out, c*R_out])
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+    xlim, ylim = lims
+
     if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
         # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='black')
-        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
-            # Plot circles
-            for ax in main_axs:
-                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
-                ax.add_patch(circ)
-                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
-                ax.add_patch(circ)
-        if dim1 in ['R']:
-            for ax in main_axs:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-        if dim2 in ['R']:
-            for ax in main_axs:
-                ax.axhline(r_inner, **kw)
-                ax.axhline(r_outer, **kw)
-    xlim, ylim = (xmin, xmax), (ymin, ymax)
+        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
     
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
@@ -112,10 +127,23 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
     
     # Mask for the area for which phi and rho are plotted
-    R2 = X*X+Y*Y+z**2
-    #mask = ((R2 > r_outer**2) | (R2 < r_inner**2))
-    mask = (R2 > r_outer**2*padding**2) | (R2 < r_inner**2/padding**2)
-    
+    r2 = X*X+Y*Y+z**2
+    if dim1 == 'z':
+        actual_z = X
+    elif dim2 == 'z':
+        actual_z = Y
+    else:
+        actual_z = z
+    R2 = r2 - actual_z**2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
+
+
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
     q_grid[:,ikeys[dim2]] = Y.ravel()
@@ -222,41 +250,50 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
     main_axs = [ax_x, ax_y, ax_z]
     main_caxs = [cax_x, cax_y, cax_z]
     
+
     # Get the plot limits
-    xmin, xmax, ymin, ymax = 0, 0, 0, 0
+    lims = []
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        for dim in [dim1, dim2]:
+            if dim == 'z':
+                lims.append([-c*H_out, c*H_out])
+            else:
+                lims.append([-c*R_out, c*R_out])
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+
     if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
         # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='black')
-        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
-            # Plot circles
-            for ax in main_axs:
-                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
-                ax.add_patch(circ)
-                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
-                ax.add_patch(circ)
-        if dim1 in ['R']:
-            for ax in main_axs:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-        if dim2 in ['R']:
-            for ax in main_axs:
-                ax.axhline(r_inner, **kw)
-                ax.axhline(r_outer, **kw)
-    xlim, ylim = (xmin, xmax), (ymin, ymax)
+        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
     
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
     y = np.linspace(ymin, ymax, grid_size + 1)
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
     
-    # Mask for the area for which force is plotted
-    R2 = X*X+Y*Y+z**2
-    #mask = ((R2 > r_outer**2) | (R2 < r_inner**2))
-    mask = (R2 > r_outer**2*padding**2) | (R2 < r_inner**2/padding**2)
+    # Mask for the area for which phi and rho are plotted
+    r2 = X*X+Y*Y+z**2
+    if dim1 == 'z':
+        actual_z = X
+    elif dim2 == 'z':
+        actual_z = Y
+    else:
+        actual_z = z
+    R2 = r2 - actual_z**2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
+
     
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
@@ -387,28 +424,42 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     
     fig,ax = plt.subplots(figsize=(3,3), dpi=200)
     
-    # Get the plot limits
-    xmin, xmax, ymin, ymax = 0, 0, 0, 0
-    if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
-        # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
-        if dim1 in keys:
-            ax.axvline(r_inner, **kw)
-            ax.axvline(r_outer, **kw)
-            ax.axvline(-r_inner, **kw)
-            ax.axvline(-r_outer, **kw)
 
-    xlim = (xmin, xmax)
-    
+    # Get the plot limits
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        xlim = [-c*r_out, c*r_out]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        if dim1 == 'z':
+            xlim = [-c*H_out, c*H_out]
+        else:
+            xlim = [-c*R_out, c*R_out]
+    xmin, xmax = xlim
+
+    if attrs is not None:
+        # Visualise the boundaries
+        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
     
     x_plot = np.linspace(xmin, xmax, 512)
+    # Mask for the area for which phi and rho are plotted
+    r2 = x_plot**2+y**2+z**2
+    if dim1 == 'z':
+        actual_z = x_plot
+    elif dimy == 'z':
+        actual_z = y
+    else:
+        actual_z = z
+    R2 = r2 - actual_z**2
+
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+    elif attrs['volume_type'] == 'cylinder':
+        mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
+
     
-    # Create mask for the region of interest (a donut stretching from parallax_max to parallax_min)
-    mask_ = (((x_plot**2+y**2+z**2)>r_outer**2*padding**2) | ((x_plot**2+y**2+z**2)<r_inner**2/padding**2))
     
     eta_plot = np.full(shape=(len(x_plot), 3), fill_value=z, dtype='f4')
     eta_plot[:,ikeys[dimy]] = y
@@ -533,6 +584,7 @@ def main():
 
     print('Loading training data ...')
     eta_train, attrs_train = plot_flow_projections.load_training_data(args.input, args.load_attrs)
+    
     n_train = eta_train.shape[0]
     print(f'  --> Training data shape = {eta_train.shape}')
     

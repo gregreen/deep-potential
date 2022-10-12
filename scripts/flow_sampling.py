@@ -46,11 +46,11 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
     eta = []
     bar = get_sampling_progressbar_fn(sum(nflow_batches), n_samples)
     iteration = 0
+    TEMP_OFFSET = np.array((8., 0, 0, 0, 0, 0))
     print('Sampling eta..')
     for i, flow in enumerate(flow_list):
         attrs = attrs_list[i]
         coef = 0.95
-        valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
         
         @tf.function
         def sample_batch():
@@ -62,8 +62,15 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
             eta_sample = sample_batch().numpy().astype('f4')[:n_sample]
             # Reject samples that are outside the range of validity
             
-            r_sample = np.sum(eta_sample[:, :3]**2, axis=1)**0.5
-            idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
+            r_sample = np.sum((eta_sample-TEMP_OFFSET)[:, :3]**2, axis=1)**0.5
+            R_sample = np.sum((eta_sample-TEMP_OFFSET)[:, :2]**2, axis=1)**0.5
+            if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+                valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
+                idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
+            elif attrs['volume_type'] == 'cylinder':
+                valid_r_min = attrs['r_in']/coef
+                valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
+                idx = (r_sample >= valid_r_min) & (R_sample <= valid_R_out) & (np.abs(eta_sample[:, 2]) <= valid_H_out)
             bar(iteration)
             iteration += 1
             
@@ -126,8 +133,14 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
         for i, flow in enumerate(flow_list):
             attrs = attrs_list[i]
             coef = 0.95
-            valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
-            idx = (r_eta >= valid_r_min) & (r_eta <= valid_r_max)
+
+            if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+                valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
+                idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
+            elif attrs['volume_type'] == 'cylinder':
+                valid_r_min = attrs['r_in']/coef
+                valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
+                idx = (r_sample >= valid_r_min) & (R_sample <= valid_R_out) & (np.abs(eta_sample[:, 2]) <= valid_H_out)
             mask[i] = idx
 
         df_deta = np.full((len(eta), 6), 0, dtype='f4')

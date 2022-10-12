@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from __future__ import print_function, division
+from binascii import a2b_hqx
 
 import numpy as np
 
@@ -30,7 +31,7 @@ import fit_all
 dpi = 200
 
 
-def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',)): 
+def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -50,21 +51,24 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     main_axs = [ax_p, ax_r, ax_e]
     
     cax_p.set_title(r'$\Phi^*$', fontsize=10)
-    cax_r.set_title(r'$\rho^*\mathrm{\ [M_\odot/pc^3]}$', fontsize=10)
-    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [M_\odot/pc^3]}$', fontsize=10)
+    cax_r.set_title(r'$\rho^*\mathrm{\ [stars/pc^3]}$', fontsize=10)
+    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [stars/pc^3]}$', fontsize=10)
     
     for ax in main_axs:
         ax.set_xlabel(labels[dim1], labelpad=0)
 
     ax_p.set_ylabel(labels[dim2], labelpad=2)
 
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_rho_{dim1}_{dim2}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_rho_{dim1}_{dim2}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs
 
 
-def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',)): 
+def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -96,13 +100,16 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
 
     ax_x.set_ylabel(labels[dim2], labelpad=2)
 
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_force_slice_{dim1}_{dim2}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_force_slice_{dim1}_{dim2}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs
     
     
-def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',)): 
+def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -120,28 +127,41 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     
     fig,ax = plt.subplots(figsize=(3,3), dpi=200)
     
-    # Get the plot limits
-    xmin, xmax, ymin, ymax = 0, 0, 0, 0
-    if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
-        # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
-        if dim1 in keys:
-            ax.axvline(r_inner, **kw)
-            ax.axvline(r_outer, **kw)
-            ax.axvline(-r_inner, **kw)
-            ax.axvline(-r_outer, **kw)
 
-    xlim = (xmin, xmax)
-    
+    # Get the plot limits
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        xlim = [-c*r_out, c*r_out]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        if dim1 == 'z':
+            xlim = [-c*H_out, c*H_out]
+        else:
+            xlim = [-c*R_out, c*R_out]
+    xmin, xmax = xlim
+
+    if attrs is not None:
+        # Visualise the boundaries
+        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
     
     x_plot = np.linspace(xmin, xmax, 512)
-    
-    # Create mask for the region of interest (a donut stretching from parallax_max to parallax_min)
-    mask_ = (((x_plot**2+y**2+z**2)>r_outer**2*padding**2) | ((x_plot**2+y**2+z**2)<r_inner**2/padding**2))
+    # Mask for the area for which phi and rho are plotted
+    r2 = x_plot**2+y**2+z**2
+    if dim1 == 'z':
+        actual_z = x_plot
+    elif dimy == 'z':
+        actual_z = y
+    else:
+        actual_z = z
+    R2 = r2 - actual_z**2
+
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+    elif attrs['volume_type'] == 'cylinder':
+        mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
+
     
     eta_plot = np.full(shape=(len(x_plot), 3), fill_value=z, dtype='f4')
     eta_plot[:,ikeys[dimy]] = y
@@ -187,13 +207,16 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
         ax.plot(x_plot, -u**2/r0**2*x_plot, color='tab:red', label='ideal constant rotation curve')
 
     ax.legend()
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_force_slice_{dim1}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_force_slice_{dim1}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, ax
 
 
-def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padding=0.95, attrs=None, fig_fmt=('svg',)):
+def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
     fig,(all_axs) = plt.subplots(2, 3,
             figsize=(6,2.2),
             dpi=200,
@@ -232,28 +255,27 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
     axs[1].set_yticklabels([])
     axs[2].set_yticklabels([])
 
+    # Get the plot limits
+    lims = []
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        for dim in [dim1, dim2]:
+            if dim == 'z':
+                lims.append([-c*H_out, c*H_out])
+            else:
+                lims.append([-c*R_out, c*R_out])
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+
     if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
         # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='black')
-        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
-            # Plot circles
-            for ax in axs:
-                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
-                ax.add_patch(circ)
-                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
-                ax.add_patch(circ)
-        if dim1 in ['R']:
-            for ax in axs:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-        if dim2 in ['R']:
-            for ax in axs:
-                ax.axhline(r_inner, **kw)
-                ax.axhline(r_outer, **kw)
+        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
+
     x_bins = np.linspace(xmin, xmax, 32)
     y_bins = np.linspace(ymin, ymax, 32)
         
@@ -286,13 +308,16 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
     caxs[2].set_title('$(\partial f/\partial t)_\mathrm{CBE+stat}$')
     
     #plt.tight_layout()
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_flow_dfdt_discrepancy_{dim1}_{dim2}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)  
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_flow_dfdt_discrepancy_{dim1}_{dim2}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs  
 
 
-def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=None, fig_fmt=('svg',)):    
+def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=None, fig_fmt=('svg',), save=True):    
     x_train, x_sample = coords_train['cylR'], coords_sample['cylR']
     y_train, y_sample = coords_train['cylvT'], coords_sample['cylvT']
 
@@ -302,6 +327,7 @@ def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=
         dpi=200,
         gridspec_kw=dict(width_ratios=[1,1,1])
     )
+    axs = (ax_m, ax_t, ax_s)
 
     xlim = np.percentile(x_train, [1., 99.])
     nbins = 64
@@ -332,15 +358,18 @@ def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=
         ax.set_xlabel('$R\mathrm{\ [kpc]}$', labelpad=0)
     ax_m.set_ylabel('$v_\mathrm{circ}\mathrm{\ [100 km/s]}$')
 
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_flow_vcirc_marginals.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_flow_vcirc_marginals.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs
 
     return
 
 
-def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',)):
+def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -364,42 +393,51 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
     axs = all_axs[1,:]
     caxs = all_axs[0,:]
     
+
     # Get the plot limits
-    xmin, xmax, ymin, ymax = 0, 0, 0, 0
+    lims = []
+    c = 1.2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        for dim in [dim1, dim2]:
+            if dim == 'z':
+                lims.append([-c*H_out, c*H_out])
+            else:
+                lims.append([-c*R_out, c*R_out])
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+
     if attrs is not None:
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        xmin, xmax, ymin, ymax = -r_outer, r_outer, -r_outer, r_outer
-        
         # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='black')
-        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
-            # Plot circles
-            for ax in axs:
-                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
-                ax.add_patch(circ)
-                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
-                ax.add_patch(circ)
-        if dim1 in ['R']:
-            for ax in axs:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-        if dim2 in ['R']:
-            for ax in axs:
-                ax.axhline(r_inner, **kw)
-                ax.axhline(r_outer, **kw)
-    xlim, ylim = (xmin, xmax), (ymin, ymax)
+        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
     
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
     y = np.linspace(ymin, ymax, grid_size + 1)
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
     
-    # Mask for the area for which v_circ is plotted
-    R2 = X*X+Y*Y+z**2
-    #mask = ((R2 > r_outer**2) | (R2 < r_inner**2))
-    mask = (R2 > r_outer**2*padding**2) | (R2 < r_inner**2/padding**2)
+    # Mask for the area for which phi and rho are plotted
+    r2 = X*X+Y*Y+z**2
+    if dim1 == 'z':
+        actual_z = X
+    elif dim2 == 'z':
+        actual_z = Y
+    else:
+        actual_z = z
+    R2 = r2 - actual_z**2
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
     
+
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
     q_grid[:,ikeys[dim2]] = Y.ravel()
@@ -458,15 +496,19 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
     axs[1].set_yticklabels([])
     axs[2].set_yticklabels([])
 
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_flow_vcirc_2d_slice_{dim1}_{dim2}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_flow_vcirc_2d_slice_{dim1}_{dim2}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs
 
     return
 
 
-def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0.95, attrs=None, fig_fmt=('svg',)): 
+def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+    # TODO: dim1 needs to be z for cylinder
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -484,18 +526,29 @@ def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0
 
     fig,ax = plt.subplots(figsize=(3,3), dpi=200)
 
-    r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-
     n = 256000
     nbins = 64
-    xbins = np.linspace(-r_outer*padding, r_outer*padding, nbins)
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        xbins = np.linspace(-r_out*padding, r_out*padding, nbins)
+    elif attrs['volume_type'] == 'cylinder':
+        r_in = attrs['r_in']
+        R_out, H_out = attrs['R_out'], attrs['H_out']
+        xbins = np.linspace(-H_out*padding, H_out*padding, nbins)
+
     xcenters = 0.5*(xbins[1:] + xbins[:-1])
     q = []
     for x in xcenters:
         n_x = n//len(xcenters)
-        y = (r_outer**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
-        z = (r_outer**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
-        idx = (x*x+y*y+z*z < r_outer**2*padding**2) & ((x*x+y*y+z*z > r_inner**2/padding**2))
+        
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            y = (r_out**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
+            z = (r_out**2*padding**2 - x**2)**0.5 * (2*np.random.random_sample(n_x) - 1).astype('f4')
+            idx = (x*x+y*y+z*z < r_out**2*padding**2) & ((x*x+y*y+z*z > r_in**2/padding**2))
+        elif attrs['volume_type'] == 'cylinder':
+            y = R_out*padding * (2*np.random.random_sample(n_x) - 1).astype('f4')
+            z = R_out*padding * (2*np.random.random_sample(n_x) - 1).astype('f4')
+            idx = (y*y+z*z < R_out**2*padding**2) & ((x*x+y*y+z*z > r_in**2/padding**2))
         
         new_q = np.full((np.sum(idx), 3), x, dtype='f4')
         iy = (ikeys[dim1] + 1) % 3
@@ -507,15 +560,8 @@ def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0
 
 
     if attrs is not None:
-
         # Visualise the boundaries
-        cartesian_keys = ['x', 'y', 'z']
-        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
-        if dim1 in keys:
-            ax.axvline(r_inner, **kw)
-            ax.axvline(r_outer, **kw)
-            ax.axvline(-r_inner, **kw)
-            ax.axvline(-r_outer, **kw)
+        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
 
     phi,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
         phi_model['phi'], q, return_phi=True
@@ -530,7 +576,10 @@ def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0
         
         z0 = 255.6 # [pc]
         rho0 = 0.0474 # [1/(M_sun*pc^3)]
-        x_plot = np.linspace(-r_outer, r_outer, 512)
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            x_plot = np.linspace(-r_out, r_out, 512)
+        elif attrs['volume_type'] == 'cylinder':
+            x_plot = np.linspace(-H_out, H_out, 512)
         sigma_z = 68*x_plot/1.1
         ax.plot(x_plot[x_plot > 0], sigma_z[x_plot > 0], color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
         ax.plot(x_plot[x_plot < 0], sigma_z[x_plot < 0], color="tab:red")
@@ -549,12 +598,16 @@ def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0
     ax.set_xlabel(labels[dim1])
     ax.legend(fontsize=8)
 
-    for fmt in fig_fmt:
-        fname = os.path.join(fig_dir, f'phi_marginal_{dim1}_{quantity}.{fmt}')
-        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
-    plt.close(fig)
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_marginal_{dim1}_{quantity}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, ax
 
     return
+
 
 def main():
     """
@@ -648,6 +701,9 @@ def main():
 
     print('Loading training data ...')
     eta_train, attrs_train = plot_flow_projections.load_training_data(args.input, True)
+
+    TEMP_OFFSET = np.array((8., 0, 0, 0, 0, 0))
+    eta_train -= TEMP_OFFSET
     n_train = eta_train.shape[0]
     print(f'  --> Training data shape = {eta_train.shape}')
     
@@ -702,9 +758,11 @@ def main():
         print(f'  --> ({dim1}: {quantity})')
         plot_custom_potential_marginal(phi_model, args.fig_dir, dim1, quantity, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
 
+    print('Plotting frameshift parameters evolution (might take a while) ...')
+    plot_potential.plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)
 
     # Extra diagnostics if flow samples are also passed
-    if os.path.isfile(args.df_grads_fname):
+    if os.path.isfile(args.df_grads_fname) and phi_model['fs'] is not None:
         df_data = fit_all.load_df_data(args.df_grads_fname)
         #coords_sample = plot_flow_projections.calc_coords(df_data['eta'], args.spherical_origin, args.cylindrical_origin)
 
@@ -742,9 +800,6 @@ def main():
             plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, args.fig_dir, dim1, dim2, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
     else:
         print("Couldn't find df gradients.")
-
-    print('Plotting frameshift parameters evolution (might take a while) ...')
-    plot_potential.plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)
     
     return 0
 

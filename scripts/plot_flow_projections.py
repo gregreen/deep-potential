@@ -2,6 +2,7 @@
 
 from __future__ import print_function, division
 from genericpath import isfile
+from multiprocessing.sharedctypes import Value
 from re import X
 
 import numpy as np
@@ -92,6 +93,8 @@ def load_flows(fname_patterns):
     for fn in fname_patterns:
         fnames += glob(fn)
     fnames = sorted(fnames)
+    if len(fnames) == 0:
+        raise ValueError("Can't find any flows!")
 
     for i,fn in enumerate(fnames):
         print(f'Loading flow {i+1} of {len(fnames)} ...')
@@ -164,7 +167,8 @@ def plot_1d_marginals(coords_train, coords_sample, fig_dir,
         elif k == 'cth':
             xlim = [-1, 1]
 
-        kw = dict(range=xlim, bins=101, density=True)
+        kw = dict(range=(np.min(xlim), np.max(xlim)), bins=101, density=True)
+
         ax.hist(coords_train[k], label=r'$\mathrm{train}$', alpha=0.7, **kw)
         ax.hist(
             coords_sample[k],
@@ -253,7 +257,7 @@ def plot_2d_marginal(coords_train, coords_sample,
             xlim = [-1, 1]
         lims.append(xlim)
 
-    kw = dict(range=lims, bins=128, rasterized=True)
+    kw = dict(range=[[np.min(lims[0]), np.max(lims[0])], [np.min(lims[1]), np.max(lims[1])]], bins=128, rasterized=True)
 
     n_train = len(x_train)
     n_sample = len(x_sample)
@@ -311,6 +315,109 @@ def plot_2d_marginal(coords_train, coords_sample,
     plt.close(fig)
 
 
+def add_1dpopulation_boundaries(axs, dim1, attrs):
+    kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
+    # Visualise the boundaries of the population
+
+    valid_keys = ['x', 'y', 'z', 'cylR']
+    plot_sph, plot_cyl = [], []
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        plot_sph = [r_in, r_out]
+    elif attrs['volume_type'] == 'cylinder':
+        plot_sph = [attrs['r_in']]
+        plot_cyl = [(attrs['R_out'], attrs['H_out'])]
+
+    for r in plot_sph:
+        if dim1 in valid_keys:
+            for ax in axs:
+                ax.axvline(r, **kw)
+                if dim1 != 'cylR':
+                    ax.axvline(-r, **kw)
+    for R, H in plot_cyl:
+        if dim1 in ['x', 'y', 'cylR']:
+            for ax in axs:
+                ax.axvline(R, **kw)
+                if dim1 != 'cylR':
+                    ax.axvline(-R, **kw)
+        if dim1 in ['z']:
+            for ax in axs:
+                ax.axvline(H, **kw)
+                ax.axvline(-H, **kw)
+
+
+
+def add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='white'):
+    # Visualise the boundaries of the population
+    cartesian_keys = ['x', 'y', 'z']
+    kw = dict(linestyle=(0, (5, 3)), lw=0.5, color=color)
+
+    plot_sph, plot_cyl = [], []
+    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+        plot_sph = [r_in, r_out]
+    elif attrs['volume_type'] == 'cylinder':
+        plot_sph = [attrs['r_in']]
+        plot_cyl = [(attrs['R_out'], attrs['H_out'])]
+    for r in plot_sph:
+        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
+            # Plot circles
+            for ax in axs:
+                circ = plt.Circle((0, 0), r, fill=False, **kw)
+                ax.add_patch(circ)
+                circ = plt.Circle((0, 0), r, fill=False, **kw)
+                ax.add_patch(circ)
+        if dim1 in ['cylR']:
+            for ax in axs:
+                ax.axvline(r, **kw)
+                ax.axvline(r, **kw)
+        if dim2 in ['cylR']:
+            for ax in axs:
+                ax.axhline(r, **kw)
+                ax.axhline(r, **kw)
+    for R, H in plot_cyl:
+        if (dim1 in ['x', 'y']) and (dim2 in ['x', 'y']):
+            # Plot circles
+            for ax in axs:
+                circ = plt.Circle((0, 0), R, fill=False, **kw)
+                ax.add_patch(circ)
+                circ = plt.Circle((0, 0), R, fill=False, **kw)
+                ax.add_patch(circ)
+        else:
+            if dim1 in ['cylR']:
+                for ax in axs:
+                    ax.axvline(R, **kw)
+                    ax.axvline(R, **kw)
+            if dim2 in ['cylR']:
+                for ax in axs:
+                    ax.axhline(R, **kw)
+                    ax.axhline(R, **kw)
+            if dim1 in ['z']:
+                for ax in axs:
+                    ax.axvline(H, **kw)
+                    ax.axvline(H, **kw)
+                    ax.axvline(-H, **kw)
+                    ax.axvline(-H, **kw)
+            if dim2 in ['z']:
+                for ax in axs:
+                    ax.axhline(H, **kw)
+                    ax.axhline(H, **kw)
+                    ax.axhline(-H, **kw)
+                    ax.axhline(-H, **kw)
+            if dim1 in ['x', 'y']:
+                for ax in axs:
+                    ax.axvline(R, **kw)
+                    ax.axvline(R, **kw)
+                    ax.axvline(-R, **kw)
+                    ax.axvline(-R, **kw)
+            if dim2 in ['x', 'y']:
+                for ax in axs:
+                    ax.axhline(R, **kw)
+                    ax.axhline(R, **kw)
+                    ax.axhline(-R, **kw)
+                    ax.axhline(-R, **kw)
+
+
 def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
     labels = [
         '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
@@ -336,6 +443,7 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
         dpi=200,
         gridspec_kw=dict(width_ratios=[1,1,1,0.05])
     )
+    axs = [ax_t, ax_s, ax_d]
 
     lims = []
     for i,(k,val) in enumerate([(dim1,x_train),(dim2,y_train)]):
@@ -350,7 +458,7 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
             xlim = [-1, 1]
         lims.append(xlim)
 
-    kw = dict(range=lims, bins=64, rasterized=True)
+    kw = dict(range=[[np.min(lims[0]), np.max(lims[0])], [np.min(lims[1]), np.max(lims[1])]], bins=64, rasterized=True)
 
     n_train = len(x_train)
     n_sample = len(x_sample)
@@ -360,25 +468,8 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
     ns,_,_,_ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
 
     if attrs is not None:
-        # Visualise the boundaries of the population
-        cartesian_keys = ['x', 'y', 'z']
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        kw = dict(linestyle=(0, (5, 3)), lw=0.5, color='white')
-        if (dim1 in cartesian_keys) and (dim2 in cartesian_keys):
-            # Plot circles
-            for ax in [ax_t, ax_s, ax_d]:
-                circ = plt.Circle((0, 0), r_inner, fill=False, **kw)
-                ax.add_patch(circ)
-                circ = plt.Circle((0, 0), r_outer, fill=False, **kw)
-                ax.add_patch(circ)
-        if dim1 in ['cylR']:
-            for ax in [ax_t, ax_s, ax_d]:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-        if dim2 in ['cylR']:
-            for ax in [ax_t, ax_s, ax_d]:
-                ax.axhline(r_inner, **kw)
-                ax.axhline(r_outer, **kw)
+        add_2dpopulation_boundaries(axs, dim1, dim2, attrs)
+
 
     dn = ns/n_sample - nt/n_train
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -539,17 +630,7 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
     ax_h.set_ylabel('frequency')
 
     if attrs is not None:
-        # Visualise the boundaries of the population
-        valid_keys = ['x', 'y', 'z', 'cylR']
-        r_inner, r_outer = 1/attrs['parallax_max'], 1/attrs['parallax_min'] # [kpc], [kpc]
-        kw = dict(linestyle=(0, (5, 3)), lw=1.0, color='black', zorder=0)
-        if (dim1 in valid_keys):
-            for ax in [ax_h, ax_r]:
-                ax.axvline(r_inner, **kw)
-                ax.axvline(r_outer, **kw)
-                if dim1 != 'cylR':
-                    ax.axvline(-r_inner, **kw)
-                    ax.axvline(-r_outer, **kw)
+        add_1dpopulation_boundaries([ax_h, ax_r], dim1, attrs)
 
     dn = ns/n_sample - nt/n_train
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -661,7 +742,7 @@ def main():
         help='Use dark background for figures.'
     )
     parser.add_argument(
-        '--load-attrs',
+        '--show-attrs',
         action='store_true',
         help='Load attributes of the training data for visualisation (e.g. cut boundaries).'
     )
@@ -701,10 +782,10 @@ def main():
         args.fig_dir = fig_dir
 
     print('Loading training data ...')
-    eta_train, attrs_train = load_training_data(args.input, load_attrs=args.load_attrs)
+    eta_train, attrs_train = load_training_data(args.input, load_attrs=args.show_attrs)
     n_train = eta_train.shape[0]
 
-    print(attrs_train, args.load_attrs)
+    print(attrs_train, args.show_attrs)
     print(f'  --> Training data shape = {eta_train.shape}')
 
     print('Loading flows ...')

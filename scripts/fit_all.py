@@ -130,17 +130,28 @@ def train_potential(df_data, fname,
                     n_epochs=4096, batch_size=1024, validation_frac=0.25,
                     lr={}, optimizer='RAdam', warmup_proportion=0.1,
                     checkpoint_every=None, checkpoint_hours=None, max_checkpoints=None,
-                    include_frameshift=False, frameshift={}):
+                    include_frameshift=False, frameshift={}, guided_potential=False, r_c=8.3):
     # Estimate typical spatial scale of DF data along each dimension
     q_scale = np.std(df_data['eta'][:,:3], axis=0)
 
     # Create model
-    phi_model = potential_tf.PhiNN(
-        n_dim=3,
-        n_hidden=n_hidden,
-        hidden_size=hidden_size,
-        scale=q_scale
-    )
+    if guided_potential:
+        phi_model = potential_tf.PhiNNGuided(
+            n_dim=3,
+            n_hidden=n_hidden,
+            hidden_size=hidden_size,
+            scale=q_scale,
+            name='PhiNNGuided',
+            r_c=r_c
+        )
+    else:
+        phi_model = potential_tf.PhiNN(
+            n_dim=3,
+            n_hidden=n_hidden,
+            hidden_size=hidden_size,
+            name='Phi',
+            scale=q_scale
+        )
     checkpoint_dir, checkpoint_name = os.path.split(fname)
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
     phi_model.save_specs(fname)
@@ -428,7 +439,8 @@ def load_params(fname):
                         "u_z0": {'type':'float', 'default':0.0},
                         "u_z0_trainable": {'type':'boolean', 'default':True}
                     }
-                }
+                },
+                "r_c": {'type':'float', 'default':8.3},
             }
         }
     }
@@ -493,6 +505,11 @@ def main():
         '--flow-median',
         action='store_true',
         help='Use the median of the flow gradients (default: use the mean).'
+    )
+    parser.add_argument(
+        '--guided-potential',
+        action='store_true',
+        help='Try to help the training of the potential by providing guiding variables to the potential.'
     )
     parser.add_argument('--params', type=str, help='JSON with kwargs.')
     args = parser.parse_args()
@@ -560,6 +577,7 @@ def main():
             df_data,
             args.potential_fname,
             include_frameshift=args.potential_frameshift,
+            guided_potential=args.guided_potential,
             **params['Phi']
         )
     
