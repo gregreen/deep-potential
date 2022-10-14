@@ -46,7 +46,6 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
     eta = []
     bar = get_sampling_progressbar_fn(sum(nflow_batches), n_samples)
     iteration = 0
-    TEMP_OFFSET = np.array((8., 0, 0, 0, 0, 0))
     print('Sampling eta..')
     for i, flow in enumerate(flow_list):
         attrs = attrs_list[i]
@@ -62,8 +61,8 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
             eta_sample = sample_batch().numpy().astype('f4')[:n_sample]
             # Reject samples that are outside the range of validity
             
-            r_sample = np.sum((eta_sample-TEMP_OFFSET)[:, :3]**2, axis=1)**0.5
-            R_sample = np.sum((eta_sample-TEMP_OFFSET)[:, :2]**2, axis=1)**0.5
+            r_sample = np.sum(eta_sample[:, :3]**2, axis=1)**0.5
+            R_sample = np.sum(eta_sample[:, :2]**2, axis=1)**0.5
             if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
                 valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
                 idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)

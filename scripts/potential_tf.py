@@ -356,7 +356,7 @@ class PhiNNGuided(snt.Module):
     """
 
     def __init__(self, n_dim=3, n_hidden=3, hidden_size=32,
-                       scale=None, name='Phi', r_c=8.3):
+                       scale=None, name='PhiNNGuided', r_c=8.3):
         """
         Constructor for PhiNN.
 

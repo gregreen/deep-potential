@@ -702,8 +702,6 @@ def main():
     print('Loading training data ...')
     eta_train, attrs_train = plot_flow_projections.load_training_data(args.input, True)
 
-    TEMP_OFFSET = np.array((8., 0, 0, 0, 0, 0))
-    eta_train -= TEMP_OFFSET
     n_train = eta_train.shape[0]
     print(f'  --> Training data shape = {eta_train.shape}')
     

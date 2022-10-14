@@ -46,6 +46,7 @@ def load_potential(fname):
     spec_fname = glob(directory + '/*_spec.json')[0]
     with open(spec_fname, 'r') as f:
         is_guided = True if 'Guided' in json.load(f)['name'] else False
+
         
     if os.path.isdir(fname):
         phi = potential_tf.PhiNNGuided.load_latest(fname) if is_guided else potential_tf.PhiNN.load_latest(fname)
