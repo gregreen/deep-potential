@@ -69,7 +69,7 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
                            lam=1., mu=0,
                            xi=1., delf_delt_scale=1.,
                            l2=tf.constant(0.01),
-                           return_grads=True):
+                           return_grads=True, return_loss_noreg=False):
     """
     Calculates both the loss and the gradients of the loss w.r.t. the
     given parameters.
@@ -192,6 +192,7 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
         #tf.print('likelihood:', tf.reduce_mean(likelihood))
         loss = tf.math.log(tf.reduce_mean(likelihood))
         tf.print('loss (before penalty):', loss)
+        loss_noreg = tf.identity(loss)
         #    likelihood
         #    + lam*prior_neg
         #    + mu*prior_pos
@@ -212,8 +213,12 @@ def get_phi_loss_gradients(phi, frameshift, params, q, p,
     # Gradients of loss w.r.t. NN parameters
     if return_grads:
         dloss_dparam = g.gradient(loss, params)
+        if return_loss_noreg:
+            return loss, loss_noreg, dloss_dparam
         return loss, dloss_dparam
 
+    if return_loss_noreg:
+        return loss, loss_noreg
     return loss
 
 
@@ -336,6 +341,141 @@ class PhiNN(snt.Module):
         return PhiNN.load(latest)
 
 
+class PhiNNGuided(snt.Module):
+    """
+    Feed-forward neural network to represent the gravitational
+    potential. This one has a trainable smooth quadratic potential added
+    on top of the NN. The potential parameter is currently independent of
+    the frameshift omega 
+
+    Note on checkpointing: Both PhiNN and FrameShift rely on a combination of
+    tf.Checkpoint and a custom spec saving system. This is caused by
+    restoration from a tf Checkpoint requiring an already initialized instance
+    of the object. Initializing the object can't use data stored in the
+    checkpoint, and must find its metadata elsewhere, hence from the spec file.
+    """
+
+    def __init__(self, n_dim=3, n_hidden=3, hidden_size=32,
+                       scale=None, name='PhiNNGuided', r_c=8.3):
+        """
+        Constructor for PhiNN.
+
+        Inputs:
+            n_dim (int): Dimensionality of space.
+            n_hidden (int): Number of hidden layers.
+            hidden_size (int): Number of neurons in each hidden layer.
+            scale (float-array-like): Typical scale of coordinates along
+                each dimension. This will be used to rescale the
+                coordinates, before passing them into the neural network.
+                Defaults to None, in which case the scales are 1.
+        """
+        super(PhiNNGuided, self).__init__(name=name)
+
+        self._n_dim = n_dim
+        self._n_hidden = n_hidden
+        self._hidden_size = hidden_size
+        self._name = name
+
+        # The guiding variables R2 and omega**2*R2/2 are calculated w.r.t. (r_c, 0, 0)
+        self._r_c = tf.Variable(r_c, trainable=False, name='r_c', dtype=tf.float32)
+        self._dxy = tf.Variable(np.array((-r_c, 0)).astype('f4'), trainable=False, name='dxy', dtype=tf.float32)
+        self._omega = tf.Variable(0.0001, trainable=True, name='guiding_omega', dtype=tf.float32)
+
+        # Coordinate scaling
+        if scale is None:
+            coord_scale = np.ones((1, n_dim), dtype='f4')
+        else:
+            print(f'Using coordinate scale: {scale}')
+            coord_scale = np.reshape(scale, (1,n_dim)).astype('f4')
+        coord_scale = np.concatenate((coord_scale, np.reshape(r_c**2, (1, 1))), axis=1).astype('f4')
+        self._scale = tf.Variable(
+            1/coord_scale,
+            trainable=False,
+            name='coord_scaling'
+        )
+
+        # Variables that have "l2penalty" in them are penalized
+        self._layers = [
+            snt.Linear(hidden_size, name=f'hidden_{i}_l2penalty')
+            for i in range(n_hidden)
+        ]
+        self._layers.append(snt.Linear(1, with_bias=False, name='Phi_l2penalty'))
+        self._activation = tf.math.tanh
+
+        # Initialize
+        self.__call__(tf.zeros([1,n_dim]))
+
+    def __call__(self, q):
+        """Returns the gravitational potential"""
+        xy,z = tf.split(q, [2,1], axis=1)
+        xy = xy + self._dxy
+        R2 = tf.math.reduce_sum(xy**2, axis=1)
+        R2 = tf.expand_dims(R2, 1)
+
+        q = tf.concat([q,R2], axis=1)
+        guiding_term = self._omega**2 * R2 / 2
+
+        # Transform coordinates to standard frame
+        q = self._scale * q
+        # Run the coordinates through the neural net
+        for layer in self._layers[:-1]:
+            q = layer(q)
+            q = self._activation(q)
+        # No activation on the final layer
+        q = self._layers[-1](q)
+        return q + guiding_term
+
+    def save_specs(self, spec_name_base):
+        """Saves the specs of the model that are required for initialization to a json"""
+        d = dict(
+            n_dim=self._n_dim,
+            n_hidden=self._n_hidden,
+            hidden_size=self._hidden_size,
+            name=self._name
+        )
+        with open(spec_name_base + '_spec.json', 'w') as f:
+            json.dump(d, f)
+
+        return spec_name_base
+
+    @classmethod
+    def load(cls, checkpoint_name):
+        """Load PhiNNGuided from a checkpoint and a spec file"""
+        # Get spec file name
+        if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
+            raise ValueError("PhiNNGuided checkpoint name doesn't follow the correct syntax.")
+        spec_name = checkpoint_name.rsplit('-', 1)[0] + "_spec.json"
+        
+        # Load network specs
+        with open(spec_name, 'r') as f:
+            kw = json.load(f)
+        phi_nn = cls(**kw)
+
+        # Restore variables
+        checkpoint = tf.train.Checkpoint(phi=phi_nn)
+        checkpoint.restore(checkpoint_name).expect_partial() 
+
+        print(f'loaded {phi_nn} from {checkpoint_name}')
+        return phi_nn
+
+    @classmethod
+    def load_latest(cls, checkpoint_dir):
+        """Load the latest PhiNNGuided from a specified checkpoint directory"""
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid PhiNN from {repr(checkpoint_dir)}")
+        return PhiNNGuided.load(latest)
+
+    @classmethod
+    def load_checkpoint_with_id(cls, checkpoint_dir, id):
+        """Load the PhiNNGuided with a specified id from a specified checkpoint directory"""
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise ValueError(f"Couldn't load a valid PhiNNGuided from {repr(checkpoint_dir)}")
+        latest = latest[:latest.rfind('-')] + f'-{id}'
+        return PhiNNGuided.load(latest)
+
+
 class FrameShift(tf.Module):
     """
     A 5-parameter model to represent the rotating frame in which f is stationary.
@@ -386,7 +526,7 @@ class FrameShift(tf.Module):
         u = tf.stack((ux, uy, uz), axis=1)
 
         # Add rotation to w
-        w = tf.stack((tf.multiply(py, -self._omega), tf.multiply(px, self._omega), tf.zeros(n)), axis=1)
+        w = tf.stack((tf.multiply(tf.subtract(py, self._u_y), -self._omega), tf.multiply(tf.subtract(px, self._u_x), self._omega), tf.zeros(n)), axis=1)
 
         return u, w
 
@@ -402,7 +542,7 @@ class FrameShift(tf.Module):
         return spec_name_base
 
     @classmethod
-    def load(cls, checkpoint_name):
+    def load(cls, checkpoint_name, verbose=True):
         """Load FrameShift from a checkpoint and a spec file"""
         # Get spec file name
         if checkpoint_name.find('-') == -1 or not checkpoint_name.rsplit('-', 1)[1].isdigit():
@@ -418,25 +558,26 @@ class FrameShift(tf.Module):
         checkpoint = tf.train.Checkpoint(frameshift=fs)
         checkpoint.restore(checkpoint_name).expect_partial() 
 
-        print(f'loaded {kw} from {checkpoint_name}')
+        if verbose:
+            print(f'loaded {kw} from {checkpoint_name}')
         return fs
 
     @classmethod
-    def load_latest(cls, checkpoint_dir):
+    def load_latest(cls, checkpoint_dir, verbose=True):
         """Load the latest FrameShift from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         if latest is None:
             raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
-        return FrameShift.load(latest)
+        return FrameShift.load(latest, verbose)
 
     @classmethod
-    def load_checkpoint_with_id(cls, checkpoint_dir, id):
+    def load_checkpoint_with_id(cls, checkpoint_dir, id, verbose=True):
         """Load the FrameShift with a specified id from a specified checkpoint directory"""
         latest = tf.train.latest_checkpoint(checkpoint_dir)
         if latest is None:
             raise ValueError(f"Couldn't load a valid FrameShift from {repr(checkpoint_dir)}")
         latest = latest[:latest.rfind('-')] + f'-{id}'
-        return FrameShift.load(latest)
+        return FrameShift.load(latest, verbose)
 
     def debug(self):
         print(f'name={self.name}\n\
@@ -595,7 +736,9 @@ def train_potential(
     print(f'Optimizer: {opt}')
 
     loss_history = []
+    loss_noreg_history = []
     val_loss_history = []
+    val_loss_noreg_history = []
     lr_history = []
 
     # Set up checkpointing
@@ -631,7 +774,7 @@ def train_potential(
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history = load_loss_history(
+            loss_history, val_loss_history, lr_history, loss_noreg_history, val_loss_noreg_history = load_loss_history(
                 loss_fname
             )
 
@@ -650,7 +793,7 @@ def train_potential(
         ]
 
         # Calculate the loss and its gradients w.r.t. the parameters
-        loss, dloss_dparam = get_phi_loss_gradients(
+        loss, loss_noreg, dloss_dparam = get_phi_loss_gradients(
             phi_model, frameshift_model,
             phi_param + frameshift_param,
             q_b, p_b,
@@ -660,7 +803,8 @@ def train_potential(
             delf_delt_scale=1,#delf_delt_scale,
             lam=lam,
             mu=mu,
-            l2=l2
+            l2=l2,
+            return_loss_noreg=True
         )
 
         dloss_dparam,global_norm = tf.clip_by_global_norm(dloss_dparam, 1.)
@@ -670,7 +814,7 @@ def train_potential(
         opt.apply_gradients(zip(dloss_dparam, phi_param + frameshift_param))
 
 
-        return loss
+        return loss, loss_noreg
 
     @tf.function
     def validation_step(batch):
@@ -682,7 +826,7 @@ def train_potential(
         ]
 
         # Calculate the loss and its gradients w.r.t. the parameters
-        loss = get_phi_loss_gradients(
+        loss, loss_noreg = get_phi_loss_gradients(
             phi_model, frameshift_model,
             phi_param + frameshift_param,
             q_b, p_b,
@@ -693,10 +837,11 @@ def train_potential(
             lam=lam,
             mu=mu,
             l2=l2,
-            return_grads=False
+            return_grads=False,
+            return_loss_noreg=True
         )
 
-        return loss
+        return loss, loss_noreg
 
     # Set up checkpointing
     step = tf.Variable(0, name='step')
@@ -729,12 +874,14 @@ def train_potential(
             break
 
         # Take one step
-        loss = training_step(y)
-        val_loss = validation_step(y_val)
+        loss, loss_noreg = training_step(y)
+        val_loss, val_loss_noreg = validation_step(y_val)
 
         # Logging
         loss_history.append(float(loss))
+        loss_noreg_history.append(float(loss_noreg))
         val_loss_history.append(float(val_loss))
+        val_loss_noreg_history.append(float(val_loss_noreg))
         lr_history.append(float(opt._decayed_lr(tf.float32)))
         update_bar(i)
 
@@ -778,14 +925,24 @@ def train_potential(
                 f'{chkpt_fname}_loss.txt',
                 loss_history,
                 val_loss_history=val_loss_history,
-                lr_history=lr_history
+                lr_history=lr_history,
+                loss_noreg_history=loss_noreg_history,
+                val_loss_noreg_history=val_loss_noreg_history
             )
             fig = plot_loss(
                 loss_history,
                 val_loss_hist=val_loss_history,
                 lr_hist=lr_history
             )
-            fig.savefig(f'{chkpt_fname}_loss.svg')
+            fig.savefig(f'{chkpt_fname}_loss.pdf')
+            plt.close(fig)
+
+            fig = plot_loss(
+                loss_noreg_history,
+                val_loss_hist=val_loss_noreg_history,
+                lr_hist=lr_history
+            )
+            fig.savefig(f'{chkpt_fname}_loss_noreg.pdf')
             plt.close(fig)
 
     t2 = time()

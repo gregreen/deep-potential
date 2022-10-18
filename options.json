@@ -2,12 +2,12 @@
   "df": {
     "n_flows": 1,
     "n_hidden": 3,
-    "hidden_size": 128,
+    "hidden_size": 64,
     "n_bij": 3,
     "reg": {
       "dv_dt_reg": 0,
-      "kinetic_reg": 1e-04,
-      "jacobian_reg": 1e-04
+      "kinetic_reg": 0.0001,
+      "jacobian_reg": 0.0001
     },
     "n_epochs": 32768,
     "batch_size": 8192,
@@ -15,12 +15,15 @@
       "type": "step",
       "init": 0.005,
       "patience": 2048,
-      "min_delta": 0.01
+      "min_delta": 0.01,
+      "final": 0.0001
     },
     "optimizer": "RAdam",
     "warmup_proportion": 0.0009765625,
     "max_checkpoints": 128,
-    "checkpoint_every": 1
+    "checkpoint_every": 1,
+    "checkpoint_hours": 1.0,
+    "validation_frac": 0.25
   },
   "Phi": {
     "n_samples": 2097152,
@@ -54,6 +57,7 @@
       "u_y0_trainable": true,
       "u_z0": 0.0859,
       "u_z0_trainable": true
-    }
+    },
+    "r_c": 8.3
   }
 }
