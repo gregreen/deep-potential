@@ -158,7 +158,8 @@ class ForceFieldModel(snt.Module):
 
 class FFJORDFlow(tfd.TransformedDistribution):
     def __init__(self, n_dim, n_hidden, hidden_size, n_bij,
-                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, name='DF'):
+                 reg_kw=dict(), rtol=1.e-7, atol=1.e-5, 
+                 base_mean=None, base_std=None, name='DF'):
         self._n_dim = n_dim
         self._n_hidden = n_hidden
         self._hidden_size = hidden_size
@@ -193,8 +194,19 @@ class FFJORDFlow(tfd.TransformedDistribution):
         bij = tfb.Chain(bij)
 
         # Multivariate normal base distribution
+        self.base_mean = tf.Variable(
+            tf.zeros([n_dim]) if base_mean is None else base_mean,
+            trainable=False,
+            name='base_mean'
+        )
+        self.base_std = tf.Variable(
+            tf.ones([n_dim]) if base_std is None else base_std,
+            trainable=False,
+            name='base_std'
+        )
         base_dist = tfd.MultivariateNormalDiag(
-            loc=np.zeros(n_dim, dtype='f4')
+            loc=self.base_mean,
+            scale_diag=self.base_std
         )
 
         # Initialize FFJORD
@@ -266,7 +278,9 @@ def train_flow(flow, data,
                lr_patience=32,
                lr_min_delta=0.01,
                warmup_proportion=0.1,
+               validation_frac=0.25,
                checkpoint_every=None,
+               max_checkpoints=None,
                checkpoint_dir=r'checkpoints/ffjord',
                checkpoint_name='ffjord'):
     """
@@ -291,11 +305,24 @@ def train_flow(flow, data,
       loss_history (list of floats): Loss after each training iteration.
     """
 
+    # Split training/validation sample
     n_samples = data.shape[0]
+    n_val = int(validation_frac * n_samples)
+    val_batch_size = int(validation_frac * batch_size)
+    n_samples -= n_val
+    val = data[:n_val]
+    data = data[n_val:]
+
+    # Create Tensorflow datasets
     batches = tf.data.Dataset.from_tensor_slices(data)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
     batches = batches.repeat(n_epochs+1)
     batches = batches.batch(batch_size, drop_remainder=True)
+
+    val_batches = tf.data.Dataset.from_tensor_slices(val)
+    val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
+    val_batches = val_batches.repeat(n_epochs+1)
+    val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
     n_steps = n_epochs * n_samples // batch_size
 
@@ -333,6 +360,7 @@ def train_flow(flow, data,
     print(f'Optimizer: {opt}')
 
     loss_history = []
+    val_loss_history = []
     lr_history = []
 
     t0 = time()
@@ -340,15 +368,21 @@ def train_flow(flow, data,
     # Set up checkpointing
     step = tf.Variable(0, name='step')
     loss_min = tf.Variable(np.inf, name='loss_min')
-    checkpoint_prefix = os.path.join(checkpoint_dir, checkpoint_name)
+
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(
             opt=opt, flow=flow,
             step=step, loss_min=loss_min
         )
+        chkpt_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+            max_to_keep=max_checkpoints
+        )
 
-        # Look for latest existing checkpoint
-        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        # Look for latest extisting checkpoint
+        latest = chkpt_manager.latest_checkpoint
         if latest is not None:
             print(f'Restoring from checkpoint {latest} ...')
             checkpoint.restore(latest)
@@ -356,9 +390,9 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_lr = np.loadtxt(loss_fname)
-            loss_history = loss_lr[:,0].tolist()
-            lr_history = loss_lr[:,1].tolist()
+            loss_history, val_loss_history, lr_history = load_loss_history(
+                loss_fname
+            )
 
         # Convert from # of epochs to # of steps between checkpoints
         checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -384,18 +418,26 @@ def train_flow(flow, data,
         opt.apply_gradients(zip(grads, variables))
         return loss
 
+    @tf.function
+    def validation_step(batch):
+        print(f'Tracing validation_step with batch shape {batch.shape} ...')
+        loss = -tf.reduce_mean(flow.log_prob(batch))
+        return loss
+
     update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
 
     # Main training loop
-    for i,y in enumerate(batches, int(step)):
+    for i,(y,y_val) in enumerate(zip(batches,val_batches), int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
             # if we began from a checkpoint.
             break
 
         loss = training_step(y)
+        val_loss = validation_step(y_val)
 
         loss_history.append(float(loss))
+        val_loss_history.append(float(val_loss))
         lr_history.append(float(opt._decayed_lr(tf.float32)))
 
         # Progress bar
@@ -428,30 +470,42 @@ def train_flow(flow, data,
             # Get time after gradients function is first traced
             traced = True
             t1 = time()
+        else:
+            t1 = None
 
         # Checkpoint
         if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             print('Checkpointing ...')
             step.assign(i+1)
-            chkpt_fname = checkpoint.save(checkpoint_prefix)
+            chkpt_fname = chkpt_manager.save()
             print(f'  --> {chkpt_fname}')
-            loss_lr = np.stack([loss_history, lr_history], axis=1)
-            loss_fname = f'{chkpt_fname}_loss.txt'
-            header = f'{"loss": >16s} {"learning_rate": >18s}'
-            np.savetxt(loss_fname, loss_lr, header=header, fmt='%.12e')
+            save_loss_history(
+                f'{chkpt_fname}_loss.txt',
+                loss_history,
+                val_loss_history=val_loss_history,
+                lr_history=lr_history
+            )
+            fig = plot_loss(
+                loss_history,
+                val_loss_hist=val_loss_history,
+                lr_hist=lr_history
+            )
+            fig.savefig(f'{chkpt_fname}_loss.svg')
+            plt.close(fig)
 
     t2 = time()
     loss_avg = np.mean(loss_history[-50:])
     n_steps = len(loss_history)
     print(f'<loss> = {loss_avg: >7.5f}')
-    print(f'tracing time: {t1-t0:.2f} s')
-    print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
+    if t1 is not None:
+        print(f'tracing time: {t1-t0:.2f} s')
+        print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
 
     # Save the trained model
     #checkpoint = tf.train.Checkpoint(flow=flow)
     #checkpoint.save(checkpoint_prefix + '_final')
 
-    return loss_history, lr_history
+    return loss_history, val_loss_history, lr_history
 
 
 def save_flow(flow, fname_base):
