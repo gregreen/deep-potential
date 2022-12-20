@@ -19,7 +19,7 @@ import potential_tf
 import flow_ffjord_tf
 
 
-def load_training_data(fname):
+def load_training_data(fname, cut_attrs=False):
     """
     Loads in the training data, in the form of a (n, d)-dimensional numpy array
     where n is the number of datapoints and d the dimensionality. The attributes,
@@ -31,45 +31,50 @@ def load_training_data(fname):
     function).
 
     Inputs:
-        fnanme (str): file path to be loaded in. Specifies a hdf5 group
+        fnanme (str): File path to be loaded in. Specifies a hdf5 group
+        cut_attrs (bool): Whether the data should be cut to obey the spatial extent 
+            specified by attrs. This is relevant when handling padded data (padding
+            is done for helping flow training by avoiding sharp cut-offs)
     """
+    def cut(eta, attrs):
+        # Cuts eta based on attrs.
+        r2 = np.sum(eta[:,:3]**2, axis=1)
+        R2 = np.sum(eta[:,:2]**2, axis=1)
+        abs_z = np.abs(eta[:,2])
+
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            idx = (r2 > r_in**2) & (r2 < r_out**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in, R_out, H_out = attrs['r_in'], attrs['R_out'], attrs['H_out']
+            idx = (r2 > r_in**2) & (R2 < R_out**2) & (abs_z < H_out)
+        
+        return eta[idx]
+
     _,ext = os.path.splitext(fname)
     attrs = None
     data = {}
     if ext in ('.h5', '.hdf5'):
         with h5py.File(fname, 'r') as f:
-            data['eta'] = f['eta'][:].astype('f4')
             attrs = dict(f['eta'].attrs.items())
+            data['eta'] = f['eta'][:].astype('f4')
             attrs['n'] = len(data['eta'])
+
+            if cut_attrs: data['eta'] = cut(data['eta'], attrs)
             
             # Check if the train-validation split has been passed
             if 'eta_train' in f.keys() and 'eta_val' in f.keys():
                 print('Loaded in training and validation data')
                 data['eta_train'] = f['eta_train'][:].astype('f4')
                 data['eta_val'] = f['eta_val'][:].astype('f4')
+
+                if cut_attrs:
+                    data['eta_train'] = cut(data['eta_train'], attrs)
+                    data['eta_val'] = cut(data['eta_val'], attrs)
     else:
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
+
     return data, attrs
-
-
-def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
-    n_samp, n_point, n_dim = v_samp.shape
-    
-    # Mean vector: shape = (point, dim)
-    v_mean = np.mean(v_samp, axis=0)
-
-    for i in range(rounds):
-        # Difference from mean: shape = (sample, point)
-        dv_samp = np.linalg.norm(v_samp - v_mean[None], axis=2)
-        # Identify outliers: shape = (sample, point)
-        idx = (dv_samp > clip_threshold * np.median(dv_samp, axis=0)[None])
-        # Construct masked array with outliers masked
-        mask_bad = np.repeat(np.reshape(idx, idx.shape+(1,)), n_dim, axis=2)
-        v_samp_ma = np.ma.masked_array(v_samp, mask=mask_bad)
-        # Take mean of masked array
-        v_mean = np.ma.mean(v_samp_ma, axis=0)
-    
-    return v_mean
 
 
 def load_flow_samples(fname, recalc_avg=None):
@@ -138,6 +143,29 @@ def load_flows(fname_patterns):
         flow_list.append(flow)
 
     return flow_list
+
+
+def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
+    """
+    Antiquated function, this is used for multiple flow samples
+    """
+    n_samp, n_point, n_dim = v_samp.shape
+    
+    # Mean vector: shape = (point, dim)
+    v_mean = np.mean(v_samp, axis=0)
+
+    for i in range(rounds):
+        # Difference from mean: shape = (sample, point)
+        dv_samp = np.linalg.norm(v_samp - v_mean[None], axis=2)
+        # Identify outliers: shape = (sample, point)
+        idx = (dv_samp > clip_threshold * np.median(dv_samp, axis=0)[None])
+        # Construct masked array with outliers masked
+        mask_bad = np.repeat(np.reshape(idx, idx.shape+(1,)), n_dim, axis=2)
+        v_samp_ma = np.ma.masked_array(v_samp, mask=mask_bad)
+        # Take mean of masked array
+        v_mean = np.ma.mean(v_samp_ma, axis=0)
+    
+    return v_mean
 
 
 def get_training_progressbar_fn(n_steps, loss_history, opt):

@@ -750,7 +750,7 @@ def main():
         args.fig_dir = fig_dir
 
     print('Loading training data ...')
-    data_train, attrs_train = utils.load_training_data(args.input)
+    data_train, attrs_train = utils.load_training_data(args.input, cut_attrs=True)
     eta_train = data_train['eta']
     n_train = eta_train.shape[0]
 
