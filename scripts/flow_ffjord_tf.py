@@ -24,7 +24,7 @@ import json
 import math
 
 # Custom libraries
-from utils import *
+import utils
 
 
 from tensorflow_probability.python import math as tfp_math
@@ -300,7 +300,7 @@ def train_flow(flow, data,
 
     Inputs:
       flow (NormalizingFlow): Normalizing flow to be trained.
-      data (tf.Tensor): Observed points. Shape = (# of points, # of dim).
+      data (dict of np.array): Observed points. Shape = (# of points, # of dim).
       optimizer (tf.keras.optimizers.Optimizer or str): Optimizer to use.
           Defaults to the Rectified Adam implementation from
           tensorflow_addons. If a string, will try to interpret and
@@ -317,21 +317,36 @@ def train_flow(flow, data,
       loss_history (list of floats): Loss after each training iteration.
     """
 
-    # Split training/validation sample
-    n_samples = data.shape[0]
-    n_val = int(validation_frac * n_samples)
-    val_batch_size = int(validation_frac * batch_size)
-    n_samples -= n_val
-    val = data[:n_val]
-    data = data[n_val:]
+    # Split training/validation sample.
+    # Handle the case where training/validation split has been manually done
+    if 'eta_train' in data and 'eta_val' in data:
+        print('Flow training/validation batches were passed in manually..')
+        n_samples = data['eta_train'].shape[0]
+        n_val = data['eta_val'].shape[0]
+        val_batch_size = int(n_val / (n_samples + n_val) * batch_size)
 
+        data_train = tf.constant(data['eta_train'])
+        data_val = tf.constant(data['eta_val'])
+    else:
+        print('Forming flow training/validation batches..')
+        n_samples = data['eta'].shape[0]
+        n_val = int(validation_frac * n_samples)
+
+        val_batch_size = int(validation_frac * batch_size)
+        n_samples -= n_val
+        
+        data_val = tf.constant(data['eta'][:n_val])
+        data_train = tf.constant(data['eta'][n_val:])
+
+    print(f'Train/validation split: {data_train.shape[0]}/{data_val.shape[0]}')
+    
     # Create Tensorflow datasets
-    batches = tf.data.Dataset.from_tensor_slices(data)
+    batches = tf.data.Dataset.from_tensor_slices(data_train)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
     batches = batches.repeat(n_epochs+1)
     batches = batches.batch(batch_size, drop_remainder=True)
 
-    val_batches = tf.data.Dataset.from_tensor_slices(val)
+    val_batches = tf.data.Dataset.from_tensor_slices(data_val)
     val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
     val_batches = val_batches.repeat(n_epochs+1)
     val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
@@ -403,7 +418,7 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history, _, _ = load_loss_history(
+            loss_history, val_loss_history, lr_history, _, _ = utils.load_loss_history(
                 loss_fname
             )
 
@@ -438,7 +453,7 @@ def train_flow(flow, data,
         loss = -tf.reduce_mean(flow.log_prob(batch))
         return loss
 
-    update_bar = get_training_progressbar_fn(n_steps, loss_history, opt)
+    update_bar = utils.get_training_progressbar_fn(n_steps, loss_history, opt)
 
     # Main training loop
     for i,(y,y_val) in enumerate(zip(batches,val_batches), int(step)):
@@ -493,13 +508,13 @@ def train_flow(flow, data,
             step.assign(i+1)
             chkpt_fname = chkpt_manager.save()
             print(f'  --> {chkpt_fname}')
-            save_loss_history(
+            utils.save_loss_history(
                 f'{chkpt_fname}_loss.txt',
                 loss_history,
                 val_loss_history=val_loss_history,
                 lr_history=lr_history
             )
-            fig = plot_loss(
+            fig = utils.plot_loss(
                 loss_history,
                 val_loss_hist=val_loss_history,
                 lr_hist=lr_history

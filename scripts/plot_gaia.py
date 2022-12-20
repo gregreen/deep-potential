@@ -26,6 +26,7 @@ import potential_tf
 import plot_flow_projections
 import plot_potential
 import fit_all
+import utils
 
 
 dpi = 200
@@ -51,8 +52,8 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     main_axs = [ax_p, ax_r, ax_e]
     
     cax_p.set_title(r'$\Phi^*$', fontsize=10)
-    cax_r.set_title(r'$\rho^*\mathrm{\ [stars/pc^3]}$', fontsize=10)
-    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [stars/pc^3]}$', fontsize=10)
+    cax_r.set_title(r'$\rho^*\mathrm{\ [M_\odot/pc^3]}$', fontsize=10)
+    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [\odot/pc^3]}$', fontsize=10)
     
     for ax in main_axs:
         ax.set_xlabel(labels[dim1], labelpad=0)
@@ -282,8 +283,8 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
 
     # Ideal CBE discrepancy
     ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_CBE_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-5, vmax=5)
-    im = axs[0].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm)
+    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
+    im = axs[0].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
     cb = fig.colorbar(im, cax=caxs[0], orientation='horizontal')
     cb.ax.xaxis.set_ticks_position('top')
     cb.ax.locator_params(nbins=5)
@@ -291,8 +292,8 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
 
     # Ideal CBE stationarity discrepancy
     ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_stat_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-5, vmax=5)
-    im = axs[1].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm)
+    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
+    im = axs[1].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
     cb = fig.colorbar(im, cax=caxs[1], orientation='horizontal')
     cb.ax.xaxis.set_ticks_position('top')
     cb.ax.locator_params(nbins=5)
@@ -300,8 +301,8 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
 
     # CBE+rotating stationarity discrepancy
     ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_CBE_ideal - pdf_dt_stat_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-3, vmax=3)
-    im = axs[2].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm)
+    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
+    im = axs[2].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
     cb = fig.colorbar(im, cax=caxs[2], orientation='horizontal')
     cb.ax.xaxis.set_ticks_position('top')
     cb.ax.locator_params(nbins=5)
@@ -700,13 +701,14 @@ def main():
         args.fig_dir = fig_dir
 
     print('Loading training data ...')
-    eta_train, attrs_train = plot_flow_projections.load_training_data(args.input, True)
+    data_train, attrs_train = utils.load_training_data(args.input)
+    eta_train = data_train['eta']
 
     n_train = eta_train.shape[0]
     print(f'  --> Training data shape = {eta_train.shape}')
     
     print('Loading potential')
-    phi_model = plot_potential.load_potential(args.potential)
+    phi_model = utils.load_potential(args.potential)
     if phi_model['fs'] is not None:
         phi_model['fs'].debug()
 
@@ -761,7 +763,7 @@ def main():
 
     # Extra diagnostics if flow samples are also passed
     if os.path.isfile(args.df_grads_fname) and phi_model['fs'] is not None:
-        df_data = fit_all.load_df_data(args.df_grads_fname)
+        df_data = utils.load_flow_samples(args.df_grads_fname)
         #coords_sample = plot_flow_projections.calc_coords(df_data['eta'], args.spherical_origin, args.cylindrical_origin)
 
         print('Plotting marginals of v_circ ...')

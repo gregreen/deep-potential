@@ -23,39 +23,11 @@ print(f'Tensorflow version {tf.__version__}')
 
 import potential_tf
 import plot_flow_projections
+import utils
 
 
 dpi = 200
 
-
-def load_potential(fname):
-    """Returns a potential, automatically handling FrameShift (by checking if fspec exists).
-       If fname is a directory, load the latest one from there, otherwise expects an .index of the checkpoint"""
-    
-    # Make sure that the trailing slash is there for a directory
-    if os.path.isdir(fname):
-        fname = os.path.join(fname, '')
-
-    directory, tail = os.path.split(fname)
-
-    has_frameshift = False
-    if len(glob(directory + '/*_fspec.json')) > 0:
-        has_frameshift = True
-
-    is_guided = False
-    spec_fname = glob(directory + '/*_spec.json')[0]
-    with open(spec_fname, 'r') as f:
-        is_guided = True if 'Guided' in json.load(f)['name'] else False
-
-        
-    if os.path.isdir(fname):
-        phi = potential_tf.PhiNNGuided.load_latest(fname) if is_guided else potential_tf.PhiNN.load_latest(fname)
-        fs = potential_tf.FrameShift.load_latest(fname) if has_frameshift else None
-    else:
-        phi = potential_tf.PhiNNGuided.load(fname[:-6]) if is_guided else potential_tf.PhiNN.load(fname[:-6])
-        fs = potential_tf.FrameShift.load(fname[:-6]) if has_frameshift else None
-    
-    return {"phi": phi, "fs": fs}
 
 
 def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
@@ -584,13 +556,14 @@ def main():
         args.fig_dir = fig_dir
 
     print('Loading training data ...')
-    eta_train, attrs_train = plot_flow_projections.load_training_data(args.input, args.load_attrs)
-    
+    data_train, attrs_train = utils.load_training_data(args.input)
+    eta_train = data_train['eta']
+
     n_train = eta_train.shape[0]
     print(f'  --> Training data shape = {eta_train.shape}')
     
     print('Loading potential')
-    phi_model = load_potential(args.potential)
+    phi_model = utils.load_potential(args.potential)
     if phi_model['fs'] is not None:
         phi_model['fs'].debug()
 

@@ -37,22 +37,7 @@ import flow_sampling
 import utils
 
 
-def load_data(fname):
-    _,ext = os.path.splitext(fname)
-    attrs = {}
-    if ext == '.json':
-        with open(fname, 'r') as f:
-            o = json.load(f)
-        d = tf.constant(np.array(o['eta'], dtype='f4'))
-    elif ext in ('.h5', '.hdf5'):
-        with h5py.File(fname, 'r') as f:
-            o = f['eta'][:].astype('f4')
-            attrs = dict(f['eta'].attrs.items())
-            attrs['n'] = len(o)
-        d = tf.constant(o)
-    else:
-        raise ValueError(f'Unrecognized input file extension: "{ext}"')
-    return d, attrs
+
 
 
 def train_flows(data, fname_pattern,
@@ -61,14 +46,14 @@ def train_flows(data, fname_pattern,
                 reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
                 checkpoint_every=None, checkpoint_hours=None,
                 max_checkpoints=None):
-    n_samples = data.shape[0]
+    n_samples = data['eta'].shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
 
     flow_list = []
 
-    data_mean = np.mean(data, axis=0)
-    data_std = np.std(data, axis=0)
+    data_mean = np.mean(data['eta'], axis=0)
+    data_std = np.std(data['eta'], axis=0)
     print(f'Using mean: {data_mean}')
     print(f'       std: {data_std}')
 
@@ -231,24 +216,7 @@ def batch_calc_df_deta(flow, eta, batch_size):
     return df_deta
 
 
-def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
-    n_samp, n_point, n_dim = v_samp.shape
-    
-    # Mean vector: shape = (point, dim)
-    v_mean = np.mean(v_samp, axis=0)
 
-    for i in range(rounds):
-        # Difference from mean: shape = (sample, point)
-        dv_samp = np.linalg.norm(v_samp - v_mean[None], axis=2)
-        # Identify outliers: shape = (sample, point)
-        idx = (dv_samp > clip_threshold * np.median(dv_samp, axis=0)[None])
-        # Construct masked array with outliers masked
-        mask_bad = np.repeat(np.reshape(idx, idx.shape+(1,)), n_dim, axis=2)
-        v_samp_ma = np.ma.masked_array(v_samp, mask=mask_bad)
-        # Take mean of masked array
-        v_mean = np.ma.mean(v_samp_ma, axis=0)
-    
-    return v_mean
 
 
 def sample_from_flows(flow_list, n_samples,
@@ -342,18 +310,7 @@ def save_df_data(df_data, fname):
             f.create_dataset(key, data=df_data[key], **kw)
 
 
-def load_df_data(fname, recalc_avg=None):
-    d = {}
-    with h5py.File(fname, 'r') as f:
-        for k in f.keys():
-            d[k] = f[k][:].astype('f4')
-    
-    if recalc_avg == 'mean':
-        d['df_deta'] = clipped_vector_mean(d['df_deta_indiv'])
-    elif recalc_avg == 'median':
-        d['df_deta'] = np.median(d['df_deta_indiv'], axis=0)
 
-    return d
 
 
 def load_params(fname):
@@ -440,7 +397,6 @@ def load_params(fname):
                         "u_z0_trainable": {'type':'boolean', 'default':True}
                     }
                 },
-                "r_c": {'type':'float', 'default':8.3},
             }
         }
     }
@@ -522,8 +478,8 @@ def main():
     # ================= Training/loading the flow =================
     if not args.no_flow_training:
         # Load input phase-space positions to train the flow on
-        data, attrs = load_data(args.input)
-        print(f'Loaded {data.shape[0]} phase-space positions.')
+        data, attrs = utils.load_training_data(args.input)
+        print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
         # Train and save normalizing flows
         print('Training normalizing flows ...')
@@ -538,7 +494,7 @@ def main():
     # ================= Sampling the flow/loading samples =================
     if args.no_flow_sampling:
         print('Loading DF gradients ...')
-        df_data = load_df_data(args.df_grads_fname)
+        df_data = utils.load_flow_samples(args.df_grads_fname)
         params['Phi'].pop('n_samples')
         params['Phi'].pop('grad_batch_size')
         params['Phi'].pop('sample_batch_size')
@@ -550,7 +506,7 @@ def main():
         sample_batch_size = params['Phi'].pop('sample_batch_size')
         if args.flow_sampling_cut:
             # Cut the flow samples to the limits specified by the attributes in training data. Supports one flow
-            _, attrs = load_data(args.input)
+            _, attrs = utils.load_training_data(args.input)
             df_data = flow_sampling.sample_from_different_flows(
                 flows, [attrs], n_samples,
                 return_indiv=True,
@@ -563,7 +519,7 @@ def main():
                 return_indiv=True,
                 grad_batch_size=grad_batch_size,
                 sample_batch_size=sample_batch_size,
-                f_reduce=np.median if args.flow_median else clipped_vector_mean
+                f_reduce=np.median if args.flow_median else utils.clipped_vector_mean
             )
         save_df_data(df_data, args.df_grads_fname)
 

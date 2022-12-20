@@ -2,14 +2,142 @@
 
 from __future__ import print_function, division
 
+import json
+import glob
 import tensorflow as tf
 import numpy as np
 import scipy.ndimage
 import progressbar
 import pandas as pd
+import os
+import h5py
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+
+import potential_tf
+import flow_ffjord_tf
+
+
+def load_training_data(fname):
+    """
+    Loads in the training data, in the form of a (n, d)-dimensional numpy array
+    where n is the number of datapoints and d the dimensionality. The attributes,
+    specifying relevant metadata for the training data are also loaded in.
+
+    In the case where a training and validation split have already been done, 
+    those are loaded in as well. (this is necessary when there are duplicate datapoints
+    due to upsampling, usually in order to account for the non-uniformity of the selection
+    function).
+
+    Inputs:
+        fnanme (str): file path to be loaded in. Specifies a hdf5 group
+    """
+    _,ext = os.path.splitext(fname)
+    attrs = None
+    data = {}
+    if ext in ('.h5', '.hdf5'):
+        with h5py.File(fname, 'r') as f:
+            data['eta'] = f['eta'][:].astype('f4')
+            attrs = dict(f['eta'].attrs.items())
+            attrs['n'] = len(data['eta'])
+            
+            # Check if the train-validation split has been passed
+            if 'eta_train' in f.keys() and 'eta_val' in f.keys():
+                print('Loaded in training and validation data')
+                data['eta_train'] = f['eta_train'][:].astype('f4')
+                data['eta_val'] = f['eta_val'][:].astype('f4')
+    else:
+        raise ValueError(f'Unrecognized input file extension: "{ext}"')
+    return data, attrs
+
+
+def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
+    n_samp, n_point, n_dim = v_samp.shape
+    
+    # Mean vector: shape = (point, dim)
+    v_mean = np.mean(v_samp, axis=0)
+
+    for i in range(rounds):
+        # Difference from mean: shape = (sample, point)
+        dv_samp = np.linalg.norm(v_samp - v_mean[None], axis=2)
+        # Identify outliers: shape = (sample, point)
+        idx = (dv_samp > clip_threshold * np.median(dv_samp, axis=0)[None])
+        # Construct masked array with outliers masked
+        mask_bad = np.repeat(np.reshape(idx, idx.shape+(1,)), n_dim, axis=2)
+        v_samp_ma = np.ma.masked_array(v_samp, mask=mask_bad)
+        # Take mean of masked array
+        v_mean = np.ma.mean(v_samp_ma, axis=0)
+    
+    return v_mean
+
+
+def load_flow_samples(fname, recalc_avg=None):
+    d = {}
+    with h5py.File(fname, 'r') as f:
+        for k in f.keys():
+            d[k] = f[k][:].astype('f4')
+    
+    if recalc_avg == 'mean':
+        d['df_deta'] = clipped_vector_mean(d['df_deta_indiv'])
+    elif recalc_avg == 'median':
+        d['df_deta'] = np.median(d['df_deta_indiv'], axis=0)
+
+    return d
+
+
+def load_potential(fname):
+    """Returns a potential, automatically handling FrameShift (by checking if fspec exists).
+       If fname is a directory, load the latest one from there, otherwise expects an .index of the checkpoint"""
+    
+    # Make sure that the trailing slash is there for a directory
+    if os.path.isdir(fname):
+        fname = os.path.join(fname, '')
+
+    directory, tail = os.path.split(fname)
+
+    has_frameshift = False
+    if len(glob.glob(directory + '/*_fspec.json')) > 0:
+        has_frameshift = True
+
+    is_guided = False
+    spec_fname = glob.glob(directory + '/*_spec.json')[0]
+    with open(spec_fname, 'r') as f:
+        is_guided = True if 'Guided' in json.load(f)['name'] else False
+
+        
+    if os.path.isdir(fname):
+        phi = potential_tf.PhiNNGuided.load_latest(fname) if is_guided else potential_tf.PhiNN.load_latest(fname)
+        fs = potential_tf.FrameShift.load_latest(fname) if has_frameshift else None
+    else:
+        phi = potential_tf.PhiNNGuided.load(fname[:-6]) if is_guided else potential_tf.PhiNN.load(fname[:-6])
+        fs = potential_tf.FrameShift.load(fname[:-6]) if has_frameshift else None
+    
+    return {"phi": phi, "fs": fs}
+
+
+def load_flows(fname_patterns):
+    flow_list = []
+
+    fnames = []
+    print(fname_patterns)
+    for fn in fname_patterns:
+        fnames += glob.glob(fn)
+    fnames = sorted(fnames)
+    if len(fnames) == 0:
+        raise ValueError("Can't find any flows!")
+
+    for i,fn in enumerate(fnames):
+        print(f'Loading flow {i+1} of {len(fnames)} ...')
+        if os.path.isdir(fn):
+            print(f'  Loading latest checkpoint from directory {fn} ...')
+            flow = flow_ffjord_tf.FFJORDFlow.load_latest(fn)
+        else:
+            print(f'  Loading {fn} ...')
+            flow = flow_ffjord_tf.FFJORDFlow.load(fn[:-6])
+        flow_list.append(flow)
+
+    return flow_list
 
 
 def get_training_progressbar_fn(n_steps, loss_history, opt):
@@ -58,7 +186,7 @@ def plot_loss(train_loss_hist, val_loss_hist=None, lr_hist=None, smoothing='auto
     # Detect discrete drops in learning rate
     if lr_hist is not None:
         lr_hist = np.array(lr_hist)
-        lr_ratio = lr_hist[1:] / lr_hist[:-1]
+        lr_ratio = lr_hist[lr_hist>0][1:] / lr_hist[lr_hist>0][:-1]
         n_drop = np.where(lr_ratio < 0.95)[0]
 
     fig,ax_arr = plt.subplots(1,2, figsize=(8,4))

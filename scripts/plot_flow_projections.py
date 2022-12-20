@@ -24,6 +24,7 @@ import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
 
 import flow_ffjord_tf
+import utils
 
 
 dpi = 200
@@ -74,39 +75,6 @@ def calc_coords(eta, spherical_origin, cylindrical_origin):
     sph = {'r':r, 'cth':costheta, 'phi':phi, 'vr':vr, 'vth':vth, 'vT':vT}
 
     return dict(**cart, **cyl, **sph)
-
-
-def load_training_data(fname, load_attrs=False):
-    with h5py.File(fname, 'r') as f:
-        eta = f['eta'][:]
-        if load_attrs:
-            attrs = dict(f['eta'].attrs.items())
-            return eta, attrs
-    return eta, None
-
-
-def load_flows(fname_patterns):
-    flow_list = []
-
-    fnames = []
-    print(fname_patterns)
-    for fn in fname_patterns:
-        fnames += glob(fn)
-    fnames = sorted(fnames)
-    if len(fnames) == 0:
-        raise ValueError("Can't find any flows!")
-
-    for i,fn in enumerate(fnames):
-        print(f'Loading flow {i+1} of {len(fnames)} ...')
-        if os.path.isdir(fn):
-            print(f'  Loading latest checkpoint from directory {fn} ...')
-            flow = flow_ffjord_tf.FFJORDFlow.load_latest(fn)
-        else:
-            print(f'  Loading {fn} ...')
-            flow = flow_ffjord_tf.FFJORDFlow.load(fn[:-6])
-        flow_list.append(flow)
-
-    return flow_list
 
 
 def sample_from_flows(flow_list, n_samples, batch_size=1024):
@@ -782,14 +750,15 @@ def main():
         args.fig_dir = fig_dir
 
     print('Loading training data ...')
-    eta_train, attrs_train = load_training_data(args.input, load_attrs=args.show_attrs)
+    data_train, attrs_train = utils.load_training_data(args.input)
+    eta_train = data_train['eta']
     n_train = eta_train.shape[0]
 
     print(attrs_train, args.show_attrs)
     print(f'  --> Training data shape = {eta_train.shape}')
 
     print('Loading flows ...')
-    flows = load_flows(args.flows)
+    flows = utils.load_flows(args.flows)
 
     if args.store_samples is not None and os.path.isfile(args.store_samples):
         print('Loading pre-generated samples ...')
