@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 matplotlib.rcParams['text.usetex'] = True
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LogNorm, Normalize, TwoSlopeNorm
 
 import h5py
 import progressbar
@@ -19,6 +19,7 @@ import os
 from glob import glob
 from pathlib import Path
 import shutil
+from scipy.stats import binned_statistic_dd, binned_statistic_2d
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
@@ -77,11 +78,14 @@ def calc_coords(eta, spherical_origin, cylindrical_origin):
     return dict(**cart, **cyl, **sph)
 
 
-def sample_from_flows(flow_list, n_samples, batch_size=1024):
+def sample_from_flows(flow_list, n_samples, attrs, batch_size=1024):
     n_flows = len(flow_list)
 
     # Sample from ensemble of flows
     n_batches = n_samples // (n_flows * batch_size)
+    if attrs['has_spatial_cut']:
+        # If there is a spatial cut, oversample by some factor, and then filter out the datapoints outside the spatial limits to n_samples
+        n_batches = int(1.5 * n_batches)
     n_samples_rounded = n_flows * n_batches * batch_size
     print(f'Rounding down # of samples: {n_samples} -> {n_samples_rounded}')
     eta = np.empty((n_samples_rounded,6), dtype='f4')
@@ -104,6 +108,18 @@ def sample_from_flows(flow_list, n_samples, batch_size=1024):
             eta[j0:j0+batch_size] = sample_batch().numpy()
             batch_idx += 1
             bar.update(batch_idx)
+
+    if attrs['has_spatial_cut']:
+        r = np.sum(eta[:, :3]**2, axis=1)**0.5
+        R = np.sum(eta[:, :2]**2, axis=1)**0.5
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            valid_r_min, valid_r_max = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            idx = (r >= valid_r_min) & (r <= valid_r_max)
+        elif attrs['volume_type'] == 'cylinder':
+            valid_r_min = attrs['r_in']
+            valid_R_out, valid_H_out = attrs['R_out'], attrs['H_out']
+            idx = (r >= valid_r_min) & (R <= valid_R_out) & (np.abs(eta[:, 2]) <= valid_H_out)
+        eta = eta[idx][:n_samples]
 
     return eta
 
@@ -386,7 +402,7 @@ def add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='white'):
                     ax.axhline(-R, **kw)
 
 
-def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
+def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz, attrs, fig_fmt=('svg',), verbose=False): 
     labels = [
         '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
         '$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$',
@@ -545,7 +561,144 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     return loss_mean, loss_std
 
 
-def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy, z, dz, attrs=None, fig_fmt=('svg',), verbose=False): 
+def get_flow_ideal_dfdt(df_data, omega=0., v_0=np.array([0., 0., 0.]), r_c=8.3, grid_size=32):
+    """ Returns a least-squares based estimate on the optimal value of \partial f / \partial t
+    corresponding to the flow. This is done by binning the spatial space and optimizing for CBE
+    """
+    eta, df_deta = df_data['eta'], df_data['df_deta']
+    
+
+    internal_grid_lims = np.percentile(eta[:, :3], [1., 99.], axis=0)
+    w = internal_grid_lims[1, :] - internal_grid_lims[0, :]
+    internal_grid_lims[0, :] -= 0.2*w
+    internal_grid_lims[1, :] += 0.2*w
+
+    internal_grid_bins = np.linspace(internal_grid_lims[0, :], internal_grid_lims[1, :], grid_size + 1)
+    internal_grid_bins = [internal_grid_bins[:, i] for i in range(internal_grid_bins.shape[1])]
+
+
+    # bin_indices is of shape (2, N), where row 0 contains the x-coordinate, and row 1 the y-coordinate
+    # Numbering is within [1, len(bins_x))
+    internal_bin_indices = binned_statistic_dd(eta[:, :3], np.zeros(len(eta)), bins=internal_grid_bins, expand_binnumbers=False)[2]
+
+
+    sort_idx = internal_bin_indices.argsort()
+    values_to_groupby, sort_eta, sort_df_deta = internal_bin_indices[sort_idx], eta[sort_idx], df_deta[sort_idx]
+
+    u1, u2 = np.unique(values_to_groupby, return_index=True)
+    group_etas = np.split(sort_eta, u2[1:])
+    group_df_etas = np.split(sort_df_deta, u2[1:])
+
+
+    ix, iy, ivx, ivy = 0, 1, 3, 4
+    ndim = 3
+
+    group_results = np.zeros((internal_bin_indices.max() + 1, ndim))
+    for i in range(len(u1)):
+        bin_eta, bin_df_deta = group_etas[i], group_df_etas[i]
+
+        if len(bin_eta) == 0:
+            group_results[u1[i]] = 0.
+        else:
+            X = bin_df_deta[:, ndim:]
+
+            y = np.sum((bin_eta[:, ndim:] - v_0)*bin_df_deta[:, :ndim], axis=1) +\
+                omega*bin_eta[:, iy]*bin_df_deta[:, ix] -\
+                omega*(bin_eta[:, ix] - r_c)*bin_df_deta[:, iy] +\
+                omega*(bin_eta[:, ivy] - v_0[iy])*bin_df_deta[:, ivx] -\
+                omega*(bin_eta[:, ivx] - v_0[ix])*bin_df_deta[:, ivy]
+            
+            theta = np.linalg.lstsq(X, y, rcond=None)[0]
+            
+            #res = y - X@theta
+            #res = leastsq_residue(X, y)
+            group_results[u1[i], :] = theta #np.mean(res)
+            
+    # TODO: Calculating y twice is inefficient, can be sped up by doing it once in the beginning
+    all_y = np.sum((eta[:, ndim:] - v_0)*df_deta[:, :ndim], axis=1) +\
+                    omega*eta[:, iy]*df_deta[:, ix] -\
+                    omega*(eta[:, ix] - r_c)*df_deta[:, iy] +\
+                    omega*(eta[:, ivy] - v_0[iy])*df_deta[:, ivx] -\
+                    omega*(eta[:, ivx] - v_0[ix])*df_deta[:, ivy]
+
+    theoretical_dfdt_flow = all_y - np.sum(df_deta[:, ndim:]*group_results[internal_bin_indices], axis=1)
+    
+    return theoretical_dfdt_flow
+
+
+def plot_flow_dfdt(df_data, dim1, dim2, omega, v_0, r_c, attrs, fig_dir, fig_fmt=('svg', )):
+    """ Plots the \partial f/\partial t corresponding to the flow via solving the Collisionless Boltzmann Equation (CBE)
+    in the rotating frame specified by omega, v_0 and r_c using the least squares method in cubic spatial bins.
+    """
+    def amplify(min_val, max_val, k=0.2):
+        if min_val*max_val > 0:
+            w = max_val - min_val
+            return min_val - k*w, max_val + k*w
+        return min_val*(1 + k), max_val*(1 + k)
+
+    eta = df_data['eta']
+    
+    fig,(all_axs) = plt.subplots(2, 1,
+            figsize=(2,2.2),
+            dpi=200,
+            gridspec_kw=dict(height_ratios=[0.2, 2]))
+    cax = all_axs[0]
+    ax = all_axs[1]
+
+    
+    labels = ['$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
+              '$v_x\mathrm{\ [100km/s]}$', '$v_y\mathrm{\ [100km/s]}$', '$v_z\mathrm{\ [100km/s]}$']
+    keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
+    
+    labels = {k:l for k,l in zip(keys,labels)}
+    ikeys = {k:i for i, k in enumerate(keys)}
+    ix, iy = ikeys[dim1], ikeys[dim2]
+    
+    ax.set_xlabel(labels[dim1])
+    ax.set_ylabel(labels[dim2])
+    
+    # Get the plot limits
+    lims = []
+    k = 0.2
+    for i in [ix, iy]:
+        xlim = np.percentile(eta[:,i], [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
+        lims.append(xlim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+    
+    
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        add_2dpopulation_boundaries([ax], dim1, dim2, attrs, color='black')
+
+    x_bins = np.linspace(xmin, xmax, 32)
+    y_bins = np.linspace(ymin, ymax, 32)
+    
+    theoretical_flow_dfdt = get_flow_ideal_dfdt(df_data, omega=omega, v_0=v_0, r_c=r_c, grid_size=32)
+
+    # Flow ideal dfdt
+    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], theoretical_flow_dfdt, statistic=np.mean, bins=[x_bins, y_bins])
+    vmin, vmax = amplify(*np.nanpercentile(ret.statistic, [1, 99]), k=0.4)
+    divnorm = TwoSlopeNorm(vcenter=0., vmin=vmin, vmax=vmax)
+    im = ax.imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
+    cb = fig.colorbar(im, cax=cax, orientation='horizontal')
+    cb.ax.xaxis.set_ticks_position('top')
+    cb.ax.locator_params(nbins=5)
+    title = '$(\partial f/\partial t)_\mathrm{flow\_ideal}$' + f'\n$\Omega={omega:.3f},$\n$\\vec v_0=({v_0[0]:.2f}, {v_0[1]:.2f}, {v_0[2]:.2f})$'
+    cax.set_title(title)
+
+    #plt.tight_layout()
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'DF_dfdt_{dim1}_{dim2}_omega={omega:.2f}.{fmt}')
+        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+    if len(fig_fmt) == 0:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy, z, dz, attrs, fig_fmt=('svg',), verbose=False): 
     labels = [
         '$R$', '$z$', r'$\phi$', '$v_R$', '$v_z$', r'$v_{\phi}$',
         '$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$',
@@ -679,7 +832,7 @@ def main():
     )
     parser.add_argument(
         '--oversample',
-        type=int,
+        type=float,
         default=1,
         help='Draw oversample*(# of training samples) samples from flows.'
     )
@@ -708,6 +861,12 @@ def main():
         '--dark',
         action='store_true',
         help='Use dark background for figures.'
+    )
+    parser.add_argument(
+        '--plot-leastsq',
+        action='store_true',
+        help='Whether to plot the least squares estimate of \partial f/\partial t. Requires computing gradients from the sample \
+            which is computationally expensive.'
     )
     parser.add_argument(
         '--autosave',
@@ -755,12 +914,17 @@ def main():
     print('Loading flows ...')
     flows = utils.load_flows(args.flows)
 
+    df_deta_sample = None
     if args.store_samples is not None and os.path.isfile(args.store_samples):
         print('Loading pre-generated samples ...')
         with h5py.File(args.store_samples, 'r') as f:
             eta_sample = f['eta'][:]
             loss_mean = f['eta'].attrs['loss_training']
             loss_std = f['eta'].attrs['loss_std_training']
+            if 'df_deta' in f and args.plot_leastsq:
+                print('Loading in pre-generated sample gradients ...')
+                df_deta_sample = f['df_deta'][:]
+
         print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
         print(f'  --> {len(eta_sample)} samples')
     else:
@@ -768,7 +932,7 @@ def main():
         loss_mean, loss_std = evaluate_loss(flows, eta_train)
         print(f'  --> loss = {loss_mean:.5f} +- {loss_std:.5f}')
         print('Sampling from flows ...')
-        eta_sample = sample_from_flows(flows, args.oversample*n_train)
+        eta_sample = sample_from_flows(flows, int(args.oversample*n_train), attrs_train)
         print('  --> Saving samples ...')
         if args.store_samples is not None:
             Path(os.path.split(args.store_samples)[0]).mkdir(parents=True, exist_ok=True)
@@ -781,6 +945,59 @@ def main():
                 )
                 dset.attrs['loss_training'] = loss_mean
                 dset.attrs['loss_std_training'] = loss_std
+
+    if args.plot_leastsq:
+        if df_deta_sample is None:
+            # Calculate the gradients of eta_sample!
+
+            from flow_sampling import get_sampling_progressbar_fn
+            # Do ceiling divide https://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python
+            grad_batch_size = 2048
+            n_batches = -(-len(eta_sample)//grad_batch_size)
+            bar = get_sampling_progressbar_fn(n_batches, len(eta_sample))
+            iteration = 0
+            print('Sampling gradients of eta..')
+            
+            for i, flow in enumerate(flows):
+                @tf.function
+                def calc_grads(batch):
+                    #print(f'Tracing calc_grads with shape = {batch.shape}')
+                    with tf.GradientTape(watch_accessed_variables=False) as g:
+                        g.watch(batch)
+                        f = flow.prob(batch)
+                    df_deta_sample = g.gradient(f, batch)
+                    return df_deta_sample
+                
+                eta_dataset = tf.data.Dataset.from_tensor_slices(eta_sample).batch(grad_batch_size)
+                df_deta_sample = []
+                for k, b in enumerate(eta_dataset):
+                    df_deta_sample.append(calc_grads(b))
+                    bar(iteration)
+                    iteration += 1
+                
+                df_deta_sample = np.concatenate([b.numpy() for b in df_deta_sample])
+
+            # Save the sample if needed
+            print('  --> Adding gradients to the saved samples ...')
+            if args.store_samples is not None:
+                Path(os.path.split(args.store_samples)[0]).mkdir(parents=True, exist_ok=True)
+                with h5py.File(args.store_samples, 'w') as f:
+                    dset = f.create_dataset(
+                        'eta',
+                        data=eta_sample,
+                        chunks=True,
+                        compression='lzf'
+                    )
+                    dset.attrs['loss_training'] = loss_mean
+                    dset.attrs['loss_std_training'] = loss_std
+                    f.create_dataset(
+                        'df_deta',
+                        data=df_deta_sample,
+                        chunks=True,
+                        compression='lzf'
+                    )
+        df_data_sample = {'eta': eta_sample, 'df_deta': df_deta_sample}
+
 
     print(f'  --> {np.count_nonzero(np.isnan(eta_sample))} NaN values')
 
@@ -869,6 +1086,32 @@ def main():
             fig_fmt=args.fig_fmt,
             verbose=True
         )
+    
+    
+    if args.plot_leastsq:
+        print('Plotting 2D least square estimates of \partial f/\partial t with omega=v_0=0 ...')
+
+        dims = [
+            ('x', 'y'),
+            ('x', 'z'),
+            ('y', 'z'),
+            ('vx', 'vy'),
+            ('vx', 'vz'),
+            ('vy', 'vz'),
+            ('z', 'vz')
+        ]
+
+        omega = 0
+        v_0 = np.array([0, 0, 0])
+
+        for dim1,dim2 in dims:
+            print(f'  --> ({dim1}, {dim2})')
+            plot_flow_dfdt(df_data_sample,
+                dim1, dim2, omega, v_0, r_c=8.3,
+                attrs=attrs_train,
+                fig_dir=args.fig_dir, fig_fmt=args.fig_fmt
+            )
+
     return 0
 
 

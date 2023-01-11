@@ -61,19 +61,22 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
             eta_sample = sample_batch().numpy().astype('f4')[:n_sample]
             # Reject samples that are outside the range of validity
             
-            r_sample = np.sum(eta_sample[:, :3]**2, axis=1)**0.5
-            R_sample = np.sum(eta_sample[:, :2]**2, axis=1)**0.5
-            if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-                valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
-                idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
-            elif attrs['volume_type'] == 'cylinder':
-                valid_r_min = attrs['r_in']/coef
-                valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
-                idx = (r_sample >= valid_r_min) & (R_sample <= valid_R_out) & (np.abs(eta_sample[:, 2]) <= valid_H_out)
+            if attrs['has_spatial_cut']:
+                r_sample = np.sum(eta_sample[:, :3]**2, axis=1)**0.5
+                R_sample = np.sum(eta_sample[:, :2]**2, axis=1)**0.5
+                if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+                    valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
+                    idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
+                elif attrs['volume_type'] == 'cylinder':
+                    valid_r_min = attrs['r_in']/coef
+                    valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
+                    idx = (r_sample >= valid_r_min) & (R_sample <= valid_R_out) & (np.abs(eta_sample[:, 2]) <= valid_H_out)
+                
+                eta.append(eta_sample[idx])
+            else:
+                eta.append(eta_sample)
             bar(iteration)
             iteration += 1
-            
-            eta.append(eta_sample[idx])
     # All eta will have at least one flow in their region of validity
     eta = np.concatenate(eta, axis=0)
 
@@ -127,20 +130,22 @@ def sample_from_different_flows(flow_list, attrs_list, n_samples, return_indiv=F
             probs_indiv[i] = probs
         
         # Combine the gradients by using the local probability density * N as the weight (prob is normalized)
-        mask = np.full((len(flow_list), len(eta)), 0, dtype='f4')
+        mask = np.full((len(flow_list), len(eta)), 1., dtype='f4')
         r_eta = np.sum(eta[:, :3]**2, axis=1)**0.5
+        R_eta = np.sum(eta[:, :2]**2, axis=1)**0.5
         for i, flow in enumerate(flow_list):
             attrs = attrs_list[i]
             coef = 0.95
 
-            if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-                valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
-                idx = (r_sample >= valid_r_min) & (r_sample <= valid_r_max)
-            elif attrs['volume_type'] == 'cylinder':
-                valid_r_min = attrs['r_in']/coef
-                valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
-                idx = (r_sample >= valid_r_min) & (R_sample <= valid_R_out) & (np.abs(eta_sample[:, 2]) <= valid_H_out)
-            mask[i] = idx
+            if attrs['has_spatial_cut']:
+                if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+                    valid_r_min, valid_r_max = 1/attrs['parallax_max']/coef, 1/attrs['parallax_min']*coef # [kpc], [kpc]
+                    idx = (r_eta >= valid_r_min) & (r_eta <= valid_r_max)
+                elif attrs['volume_type'] == 'cylinder':
+                    valid_r_min = attrs['r_in']/coef
+                    valid_R_out, valid_H_out = attrs['R_out']*coef, attrs['H_out']*coef
+                    idx = (r_eta >= valid_r_min) & (R_eta <= valid_R_out) & (np.abs(eta[:, 2]) <= valid_H_out)
+                mask[i] = idx
 
         df_deta = np.full((len(eta), 6), 0, dtype='f4')
         for i in range(6):

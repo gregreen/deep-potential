@@ -32,7 +32,7 @@ import utils
 dpi = 200
 
 
-def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -69,7 +69,7 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
         return fig, axs
 
 
-def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -110,7 +110,7 @@ def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, p
         return fig, axs
     
     
-def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -214,7 +214,7 @@ def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimf
         return fig, ax
 
 
-def plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, fig_dir, dim1, dim2, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
+def plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, fig_dir, dim1, dim2, attrs, padding=0.95, fig_fmt=('svg',), save=True):
     fig,(all_axs) = plt.subplots(2, 3,
             figsize=(6,2.2),
             dpi=200,
@@ -309,7 +309,7 @@ def plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, fig_dir, di
         return fig, axs  
 
 
-def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=None, fig_fmt=('svg',), save=True):    
+def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs, fig_fmt=('svg',), save=True):    
     x_train, x_sample = coords_train['cylR'], coords_sample['cylR']
     y_train, y_sample = coords_train['cylvT'], coords_sample['cylvT']
 
@@ -361,7 +361,7 @@ def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs=
     return
 
 
-def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
+def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, attrs, padding=0.95, fig_fmt=('svg',), save=True):
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -494,7 +494,7 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
     return
 
 
-def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     # Draws samples in the volume of validity, and bins them along a chosen axis
     # (TODO: Currently only z works). Works for the implied surface density
     # TODO: Only works with attributes
@@ -715,7 +715,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_rho(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_rho(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
     
     print('Plotting 2D slices of forces ...')
@@ -726,7 +726,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
 
     print('Plotting 1D slices of forces ...')
@@ -737,7 +737,7 @@ def main():
     ]
     for dim1, dimy, y, z, dimforce in dims:
         print(f'  --> ({dim1}, {dimy}={y}, {z})')
-        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
         
     print('Plotting 1D marginals of the potential ...')
@@ -747,7 +747,7 @@ def main():
     ]
     for dim1, quantity in dims:
         print(f'  --> ({dim1}: {quantity})')
-        plot_custom_potential_marginal(phi_model, args.fig_dir, dim1, quantity, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_custom_potential_marginal(phi_model, args.fig_dir, dim1, quantity, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
     print('Plotting frameshift parameters evolution (might take a while) ...')
     plot_potential.plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)
@@ -776,7 +776,7 @@ def main():
         ]
         for dim1, dim2, dimz, z in dims:
             print(f'  --> ({dim1}, {dim2}, {dimz}={z})')
-            plot_vcirc_2d_slice(phi_model, coords_gc_train, coords_gc_sample, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+            plot_vcirc_2d_slice(phi_model, coords_gc_train, coords_gc_sample, fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
         print('Plotting 2D slices of \partial f/\partial t ...')
         dims = [
@@ -788,7 +788,7 @@ def main():
         _, dphi_dq,_ = potential_tf.calc_phi_derivatives(phi_model['phi'], df_data['eta'][:,:3], return_phi=True)
         for dim1, dim2 in dims:
             print(f'  --> ({dim1}, {dim2})')
-            plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, args.fig_dir, dim1, dim2, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+            plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, args.fig_dir, dim1, dim2, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
     else:
         print("Couldn't find df gradients.")
     

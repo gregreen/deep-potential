@@ -30,8 +30,8 @@ dpi = 200
 
 
 
-def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
-    """ TODO: only works with attrs at the moment, verbose not implemented. Only support cartesian.
+def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
+    """ Only support cartesian.
     """
     labels = [
         '$x$', '$y$', '$z$',
@@ -174,7 +174,7 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
         return fig, axs
 
 
-def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     """ Only support cartesian.
     """
     labels = [
@@ -353,7 +353,7 @@ def plot_frameshift_params(fname, fig_dir, fig_fmt=('svg',)):
     plt.close(fig)
     
 
-def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, attrs, padding=0.95, fig_fmt=('svg',), save=True): 
     """ Only supports cartesian.
     """
     labels = [
@@ -379,7 +379,6 @@ def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimf
     
 
     # Get the plot limits
-    lims = []
     k = 0.2
     xlim = np.percentile(coords_train[dim1], [1., 99.])
     w = xlim[1] - xlim[0]
@@ -551,7 +550,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_rho(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_rho(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
     
     print('Plotting 2D slices of forces ...')
@@ -562,7 +561,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
+        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, zattrs=attrs_train, padding=0.95, fig_fmt=('pdf',))
 
 
     print('Plotting 1D slices of forces ...')
@@ -573,7 +572,7 @@ def main():
     ]
     for dim1, dimy, y, z, dimforce in dims:
         print(f'  --> ({dim1})')
-        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
+        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, attrs=attrs_train, padding=0.95, fig_fmt=('pdf',))
 
     print('Plotting frameshift parameters evolution (might take a while) ...')
     plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)
