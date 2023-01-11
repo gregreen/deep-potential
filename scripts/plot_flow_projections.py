@@ -435,7 +435,7 @@ def plot_2d_slice(coords_train, coords_sample, fig_dir, dim1, dim2, dimz, z, dz,
     norm = Normalize(vmin=0, vmax=np.max(nt)*n_sample/n_train)
     ns,_,_,_ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
 
-    if attrs is not None:
+    if attrs['has_spatial_cut']:
         add_2dpopulation_boundaries(axs, dim1, dim2, attrs)
 
 
@@ -597,7 +597,7 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
     ax_h.legend(loc='lower right', frameon=False, fontsize=8)
     ax_h.set_ylabel('frequency')
 
-    if attrs is not None:
+    if attrs['has_spatial_cut']:
         add_1dpopulation_boundaries([ax_h, ax_r], dim1, attrs)
 
     dn = ns/n_sample - nt/n_train
@@ -710,11 +710,6 @@ def main():
         help='Use dark background for figures.'
     )
     parser.add_argument(
-        '--show-attrs',
-        action='store_true',
-        help='Load attributes of the training data for visualisation (e.g. cut boundaries).'
-    )
-    parser.add_argument(
         '--autosave',
         action='store_true',
         help='Automatically saves/loads samples and chooses fig dir. Incompatible with save samples, load samples, and fig-dir.\
@@ -754,7 +749,7 @@ def main():
     eta_train = data_train['eta']
     n_train = eta_train.shape[0]
 
-    print(attrs_train, args.show_attrs)
+    print(attrs_train)
     print(f'  --> Training data shape = {eta_train.shape}')
 
     print('Loading flows ...')

@@ -60,63 +60,23 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     main_axs = [ax_p, ax_r, ax_e]
     
 
-    """# Get the plot limits
-    xmin, xmax, ymin, ymax = 0, 0, 0, 0
+    # Get the plot limits
     lims = []
-    for i,y in enumerate([coords_train[dim1], coords_train[dim2]]):
-        xlim = np.percentile(y, [1., 99.])
+    k = 0.2
+    for x in coords_train[dim1], coords_train[dim2]:
+        xlim = np.percentile(x, [1., 99.])
         w = xlim[1] - xlim[0]
-        xlim = [xlim[0]-0.2*w, xlim[1]+0.2*w]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
         lims.append(xlim)
     xmin, xmax = lims[0]
     ymin, ymax = lims[1]
-    xlim, ylim = lims"""
 
-    # Get the plot limits
-    lims = []
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        for dim in [dim1, dim2]:
-            if dim == 'z':
-                lims.append([-c*H_out, c*H_out])
-            else:
-                lims.append([-c*R_out, c*R_out])
-    xmin, xmax = lims[0]
-    ymin, ymax = lims[1]
-    xlim, ylim = lims
-
-    if attrs is not None:
-        # Visualise the boundaries
-        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
     
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
     y = np.linspace(ymin, ymax, grid_size + 1)
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
     
-    # Mask for the area for which phi and rho are plotted
-    r2 = X*X+Y*Y+z**2
-    if dim1 == 'z':
-        actual_z = X
-    elif dim2 == 'z':
-        actual_z = Y
-    else:
-        actual_z = z
-    R2 = r2 - actual_z**2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
-
-
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
     q_grid[:,ikeys[dim2]] = Y.ravel()
@@ -124,11 +84,35 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     phi,_,d2phi_dq2 = potential_tf.calc_phi_derivatives(
         phi_model['phi'], q_grid, return_phi=True
     )
+
     phi_img = np.reshape(phi.numpy(), X.shape)
     rho_img = np.reshape(2.309*d2phi_dq2.numpy()/(4*np.pi), X.shape) #[M_Sun/pc^3]
-    phi_img = np.ma.masked_where(mask, phi_img)
-    rho_img = np.ma.masked_where(mask, rho_img)
-    
+
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
+
+        # Mask for the area for which phi and rho are plotted
+        r2 = X*X+Y*Y+z**2
+        if dim1 == 'z':
+            actual_z = X
+        elif dim2 == 'z':
+            actual_z = Y
+        else:
+            actual_z = z
+        R2 = r2 - actual_z**2
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in = attrs['r_in']
+            R_out, H_out = attrs['R_out'], attrs['H_out']
+            mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
+
+        phi_img = np.ma.masked_where(mask, phi_img)
+        rho_img = np.ma.masked_where(mask, rho_img)
+
+
     phi_img = phi_img - np.mean(phi_img)
     
     # Plot phi
@@ -166,7 +150,7 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     y_train = coords_train[dim2][idx_train]
     nbins = 64
     weights = np.full_like(x_train, 1/((xmax-xmin)*(xmax-xmin)/nbins**2*2*dz)/10**9)
-    h = ax_e.hist2d(x_train, y_train, range=(xlim, ylim), weights=weights, bins=64, rasterized=True)#, norm=matplotlib.colors.LogNorm(vmin=1))
+    h = ax_e.hist2d(x_train, y_train, range=lims, weights=weights, bins=64, rasterized=True)#, norm=matplotlib.colors.LogNorm(vmin=1))
     cb_e = fig.colorbar(h[3], cax=cax_e, orientation='horizontal')
     cb_e.ax.xaxis.set_ticks_position('top')
     cb_e.ax.locator_params(nbins=3)
@@ -190,8 +174,8 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
         return fig, axs
 
 
-def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
-    """ TODO: only works with attrs at the moment, verbose not implemented. Only support cartesian.
+def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+    """ Only support cartesian.
     """
     labels = [
         '$x$', '$y$', '$z$',
@@ -226,47 +210,20 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
 
     # Get the plot limits
     lims = []
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        for dim in [dim1, dim2]:
-            if dim == 'z':
-                lims.append([-c*H_out, c*H_out])
-            else:
-                lims.append([-c*R_out, c*R_out])
+    k = 0.2
+    for x in coords_train[dim1], coords_train[dim2]:
+        xlim = np.percentile(x, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
+        lims.append(xlim)
     xmin, xmax = lims[0]
     ymin, ymax = lims[1]
 
-    if attrs is not None:
-        # Visualise the boundaries
-        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
-    
+
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
     y = np.linspace(ymin, ymax, grid_size + 1)
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
-    
-    # Mask for the area for which phi and rho are plotted
-    r2 = X*X+Y*Y+z**2
-    if dim1 == 'z':
-        actual_z = X
-    elif dim2 == 'z':
-        actual_z = Y
-    else:
-        actual_z = z
-    R2 = r2 - actual_z**2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
-
     
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
@@ -275,9 +232,32 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
     phi, dphi_dq,_ = potential_tf.calc_phi_derivatives(
         phi_model['phi'], q_grid, return_phi=True)
     
+    
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_2dpopulation_boundaries(main_axs, dim1, dim2, attrs, color='black')
+    
+        # Mask for the area for which forces are plotted
+        r2 = X*X+Y*Y+z**2
+        if dim1 == 'z':
+            actual_z = X
+        elif dim2 == 'z':
+            actual_z = Y
+        else:
+            actual_z = z
+        R2 = r2 - actual_z**2
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in = attrs['r_in']
+            R_out, H_out = attrs['R_out'], attrs['H_out']
+            mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
+    
+
     for i, ax in enumerate(main_axs):
         F_i = -dphi_dq[:, i].numpy().ravel().reshape(X.shape)
-        F_i = np.ma.masked_where(mask, F_i)
+        if attrs['has_spatial_cut']: F_i = np.ma.masked_where(mask, F_i)
         
         # Plot the force
         min_val, max_val = F_i.min(), F_i.max()
@@ -373,8 +353,8 @@ def plot_frameshift_params(fname, fig_dir, fig_fmt=('svg',)):
     plt.close(fig)
     
 
-def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
-    """ TODO: only works with attrs at the moment, verbose not implemented. Only support cartesian.
+def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+    """ Only supports cartesian.
     """
     labels = [
         '$x$', '$y$', '$z$',
@@ -399,41 +379,14 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     
 
     # Get the plot limits
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        xlim = [-c*r_out, c*r_out]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        if dim1 == 'z':
-            xlim = [-c*H_out, c*H_out]
-        else:
-            xlim = [-c*R_out, c*R_out]
+    lims = []
+    k = 0.2
+    xlim = np.percentile(coords_train[dim1], [1., 99.])
+    w = xlim[1] - xlim[0]
+    xlim = [xlim[0]-k*w, xlim[1]+k*w]
     xmin, xmax = xlim
 
-    if attrs is not None:
-        # Visualise the boundaries
-        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
-    
     x_plot = np.linspace(xmin, xmax, 512)
-    # Mask for the area for which phi and rho are plotted
-    r2 = x_plot**2+y**2+z**2
-    if dim1 == 'z':
-        actual_z = x_plot
-    elif dimy == 'z':
-        actual_z = y
-    else:
-        actual_z = z
-    R2 = r2 - actual_z**2
-
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
-    elif attrs['volume_type'] == 'cylinder':
-        mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
-
-    
-    
     eta_plot = np.full(shape=(len(x_plot), 3), fill_value=z, dtype='f4')
     eta_plot[:,ikeys[dimy]] = y
     eta_plot[:,ikeys[dim1]] = x_plot
@@ -442,12 +395,36 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     _,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
             phi_model['phi'], eta_plot, return_phi=True)
     Z_plot = -dphi_dq[:,ikeys[dimforce]].numpy()
+
+
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
     
-    ax.plot(x_plot[~mask_ & (x_plot > 0)], Z_plot[~mask_ & (x_plot > 0)], color='tab:blue')
-    ax.plot(x_plot[~mask_ & (x_plot < 0)], Z_plot[~mask_ & (x_plot < 0)], color='tab:blue')
-    
-    #ax.set_xlim(-r_max, r_max)
-    #ax.set_ylim(-r_max, r_max)
+        # Mask for the area for which phi and rho are plotted
+        r2 = x_plot**2+y**2+z**2
+        if dim1 == 'z':
+            actual_z = x_plot
+        elif dimy == 'z':
+            actual_z = y
+        else:
+            actual_z = z
+        R2 = r2 - actual_z**2
+
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in = attrs['r_in']
+            R_out, H_out = attrs['R_out'], attrs['H_out']
+            mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
+
+        ax.plot(x_plot[~mask_ & (x_plot > 0)], Z_plot[~mask_ & (x_plot > 0)], color='tab:blue')
+        ax.plot(x_plot[~mask_ & (x_plot < 0)], Z_plot[~mask_ & (x_plot < 0)], color='tab:blue')
+    else:
+        ax.plot(x_plot, Z_plot, color='tab:blue')
+
+
     ax.set_xlabel(labels[dim1])
     ax.set_ylabel(f'{force_labels[dimforce]}')
 
@@ -518,11 +495,6 @@ def main():
         help='Use dark background for figures.'
     )
     parser.add_argument(
-        '--load-attrs',
-        action='store_true',
-        help='Load attributes of the training data for visualisation (e.g. cut boundaries).'
-    )
-    parser.add_argument(
         '--autosave',
         action='store_true',
         help='Automatically saves/loads samples and chooses fig dir. Incompatible with fig-dir.\
@@ -590,7 +562,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_force_2d_slice(phi_model, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
+        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
 
 
     print('Plotting 1D slices of forces ...')
@@ -601,7 +573,7 @@ def main():
     ]
     for dim1, dimy, y, z, dimforce in dims:
         print(f'  --> ({dim1})')
-        plot_force_1d_slice(phi_model, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
+        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=('pdf',))
 
     print('Plotting frameshift parameters evolution (might take a while) ...')
     plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)

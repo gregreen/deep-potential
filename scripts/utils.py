@@ -37,7 +37,10 @@ def load_training_data(fname, cut_attrs=False):
             is done for helping flow training by avoiding sharp cut-offs)
     """
     def cut(eta, attrs):
-        # Cuts eta based on attrs.
+        # Don't perform a cut if there is no attrs
+        if attrs == {}: return eta
+
+        # Cuts eta based on attrs
         r2 = np.sum(eta[:,:3]**2, axis=1)
         R2 = np.sum(eta[:,:2]**2, axis=1)
         abs_z = np.abs(eta[:,2])
@@ -57,8 +60,8 @@ def load_training_data(fname, cut_attrs=False):
     if ext in ('.h5', '.hdf5'):
         with h5py.File(fname, 'r') as f:
             attrs = dict(f['eta'].attrs.items())
+
             data['eta'] = f['eta'][:].astype('f4')
-            attrs['n'] = len(data['eta'])
 
             if cut_attrs: data['eta'] = cut(data['eta'], attrs)
             
@@ -71,6 +74,9 @@ def load_training_data(fname, cut_attrs=False):
                 if cut_attrs:
                     data['eta_train'] = cut(data['eta_train'], attrs)
                     data['eta_val'] = cut(data['eta_val'], attrs)
+
+            attrs['has_spatial_cut'] = True if attrs != {} else False
+            attrs['n'] = len(data['eta'])
     else:
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
 

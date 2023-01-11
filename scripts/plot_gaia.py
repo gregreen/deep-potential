@@ -53,7 +53,7 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
     
     cax_p.set_title(r'$\Phi^*$', fontsize=10)
     cax_r.set_title(r'$\rho^*\mathrm{\ [M_\odot/pc^3]}$', fontsize=10)
-    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [\odot/pc^3]}$', fontsize=10)
+    cax_e.set_title(r'$\rho_\mathrm{train}\mathrm{\ [1/pc^3]}$', fontsize=10)
     
     for ax in main_axs:
         ax.set_xlabel(labels[dim1], labelpad=0)
@@ -69,7 +69,7 @@ def plot_rho(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95
         return fig, axs
 
 
-def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -84,7 +84,7 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
     ikeys = {k:i for i, k in enumerate(keys)}
     
 
-    fig, axs = plot_potential.plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=padding, attrs=attrs, fig_fmt=fig_fmt, save=False)
+    fig, axs = plot_potential.plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, padding=padding, attrs=attrs, fig_fmt=fig_fmt, save=False)
     
     ax_x, cax_x = axs[1, 0], axs[0, 0]
     ax_y, cax_y = axs[1, 1], axs[0, 1]
@@ -110,7 +110,7 @@ def plot_force_2d_slice(phi_model, fig_dir, dim1, dim2, dimz, z, padding=0.95, a
         return fig, axs
     
     
-def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
+def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -130,45 +130,17 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     
 
     # Get the plot limits
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        xlim = [-c*r_out, c*r_out]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        if dim1 == 'z':
-            xlim = [-c*H_out, c*H_out]
-        else:
-            xlim = [-c*R_out, c*R_out]
+    k = 0.2
+    xlim = np.percentile(coords_train[dim1], [1., 99.])
+    w = xlim[1] - xlim[0]
+    xlim = [xlim[0]-k*w, xlim[1]+k*w]
     xmin, xmax = xlim
 
-    if attrs is not None:
-        # Visualise the boundaries
-        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
-    
     x_plot = np.linspace(xmin, xmax, 512)
-    # Mask for the area for which phi and rho are plotted
-    r2 = x_plot**2+y**2+z**2
-    if dim1 == 'z':
-        actual_z = x_plot
-    elif dimy == 'z':
-        actual_z = y
-    else:
-        actual_z = z
-    R2 = r2 - actual_z**2
-
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
-    elif attrs['volume_type'] == 'cylinder':
-        mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
-
-    
     eta_plot = np.full(shape=(len(x_plot), 3), fill_value=z, dtype='f4')
     eta_plot[:,ikeys[dimy]] = y
     eta_plot[:,ikeys[dim1]] = x_plot
-    #print(eta_eval)
-    
+
     _,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
             phi_model['phi'], eta_plot, return_phi=True)
     Z_plot = -dphi_dq[:,ikeys[dimforce]].numpy()
@@ -176,9 +148,35 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
     if dim1 == 'z' and dimforce == 'z':
         # with F_z - z, plot the implied surface density instead
         Z_plot *= -367.5
-    ax.plot(x_plot[~mask_ & (x_plot > 0)], Z_plot[~mask_ & (x_plot > 0)], color='tab:blue')
-    ax.plot(x_plot[~mask_ & (x_plot < 0)], Z_plot[~mask_ & (x_plot < 0)], color='tab:blue')
+
+
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
     
+        # Mask for the area for which phi and rho are plotted
+        r2 = x_plot**2+y**2+z**2
+        if dim1 == 'z':
+            actual_z = x_plot
+        elif dimy == 'z':
+            actual_z = y
+        else:
+            actual_z = z
+        R2 = r2 - actual_z**2
+
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            mask_ = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in = attrs['r_in']
+            R_out, H_out = attrs['R_out'], attrs['H_out']
+            mask_ = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out/padding)
+
+        ax.plot(x_plot[~mask_ & (x_plot > 0)], Z_plot[~mask_ & (x_plot > 0)], color='tab:blue')
+        ax.plot(x_plot[~mask_ & (x_plot < 0)], Z_plot[~mask_ & (x_plot < 0)], color='tab:blue')
+    else:
+        ax.plot(x_plot, Z_plot, color='tab:blue')
+
     #ax.set_xlim(-r_max, r_max)
     #ax.set_ylim(-r_max, r_max)
     ax.set_xlabel(labels[dim1])
@@ -191,8 +189,7 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
         sigma_z = 68*x_plot/1.1
         #sigma_z = 2*xs/np.abs(xs)*rho0*z0*(1 - np.exp(-np.abs(xs)*1000/z0))
         #print(az)
-        ax.plot(x_plot[~mask_ & (x_plot > 0)], sigma_z[~mask_ & (x_plot > 0)], color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
-        ax.plot(x_plot[~mask_ & (x_plot < 0)], sigma_z[~mask_ & (x_plot < 0)], color="tab:red")
+        ax.plot(x_plot, sigma_z, color="tab:red", label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$")
         ax.fill_between(x_plot, 64*x_plot/1.1, 72*x_plot/1.1, alpha=0.3, color="tab:red")
         ax.axhline(0, color="black", lw=0.5)
         ax.axvline(0, color="black", lw=0.5)
@@ -217,7 +214,7 @@ def plot_force_1d_slice(phi_model, fig_dir, dim1, dimy, y, z, dimforce, padding=
         return fig, ax
 
 
-def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
+def plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, fig_dir, dim1, dim2, padding=0.95, attrs=None, fig_fmt=('svg',), save=True):
     fig,(all_axs) = plt.subplots(2, 3,
             figsize=(6,2.2),
             dpi=200,
@@ -258,22 +255,16 @@ def plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, padd
 
     # Get the plot limits
     lims = []
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        for dim in [dim1, dim2]:
-            if dim == 'z':
-                lims.append([-c*H_out, c*H_out])
-            else:
-                lims.append([-c*R_out, c*R_out])
+    k = 0.2
+    for x in coords_train[dim1], coords_train[dim2]:
+        xlim = np.percentile(x, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
+        lims.append(xlim)
     xmin, xmax = lims[0]
     ymin, ymax = lims[1]
 
-    if attrs is not None:
+    if attrs['has_spatial_cut']:
         # Visualise the boundaries
         plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
 
@@ -397,48 +388,20 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
 
     # Get the plot limits
     lims = []
-    c = 1.2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        lims = [[-c*r_out, c*r_out], [-c*r_out, c*r_out]]
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        for dim in [dim1, dim2]:
-            if dim == 'z':
-                lims.append([-c*H_out, c*H_out])
-            else:
-                lims.append([-c*R_out, c*R_out])
+    k = 0.2
+    for x in coords_train[dim1], coords_train[dim2]:
+        xlim = np.percentile(x, [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
+        lims.append(xlim)
     xmin, xmax = lims[0]
     ymin, ymax = lims[1]
 
-    if attrs is not None:
-        # Visualise the boundaries
-        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
-    
     grid_size = 256
     x = np.linspace(xmin, xmax, grid_size + 1)
     y = np.linspace(ymin, ymax, grid_size + 1)
     X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
     
-    # Mask for the area for which phi and rho are plotted
-    r2 = X*X+Y*Y+z**2
-    if dim1 == 'z':
-        actual_z = X
-    elif dim2 == 'z':
-        actual_z = Y
-    else:
-        actual_z = z
-    R2 = r2 - actual_z**2
-    if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
-        r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
-        mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
-    elif attrs['volume_type'] == 'cylinder':
-        r_in = attrs['r_in']
-        R_out, H_out = attrs['R_out'], attrs['H_out']
-        mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
-    
-
     q_grid = np.full(shape=(X.size, 3), fill_value=z, dtype='f4')
     q_grid[:,ikeys[dim1]] = X.ravel()
     q_grid[:,ikeys[dim2]] = Y.ravel()
@@ -448,7 +411,30 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
     )
     offset = np.array((phi_model['fs']._r_c.numpy(), 0, 0))
     vcirc_img = np.reshape(np.sum(dphi_dq*(q_grid - offset), axis=1)**0.5, X.shape) # 100 km/s
-    vcirc_img = np.ma.masked_where(mask, vcirc_img)
+    
+    
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
+    
+        # Mask for the area for which phi and rho are plotted
+        r2 = X*X+Y*Y+z**2
+        if dim1 == 'z':
+            actual_z = X
+        elif dim2 == 'z':
+            actual_z = Y
+        else:
+            actual_z = z
+        R2 = r2 - actual_z**2
+        if 'volume_type' not in attrs or attrs['volume_type'] == 'sphere':
+            r_in, r_out = 1/attrs['parallax_max'], 1/attrs['parallax_min']
+            mask = (r2 > r_out**2*padding**2) | (r2 < r_in**2/padding**2)
+        elif attrs['volume_type'] == 'cylinder':
+            r_in = attrs['r_in']
+            R_out, H_out = attrs['R_out'], attrs['H_out']
+            mask = (R2 > R_out**2*padding**2) | (r2 < r_in**2/padding**2) | (np.abs(actual_z) > H_out*padding)
+    
+        vcirc_img = np.ma.masked_where(mask, vcirc_img)
     
     # Plot v_circ
     min_val, max_val = vcirc_img.min(), vcirc_img.max()
@@ -509,7 +495,12 @@ def plot_vcirc_2d_slice(phi_model, coords_train, coords_sample, fig_dir, dim1, d
 
 
 def plot_custom_potential_marginal(phi_model, fig_dir, dim1, quantity, padding=0.95, attrs=None, fig_fmt=('svg',), save=True): 
-    # TODO: dim1 needs to be z for cylinder
+    # Draws samples in the volume of validity, and bins them along a chosen axis
+    # (TODO: Currently only z works). Works for the implied surface density
+    # TODO: Only works with attributes
+    if not attrs['has_spatial_cut']:
+        return
+    
     labels = [
         '$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
     ]
@@ -735,7 +726,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_force_2d_slice(phi_model, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
 
 
     print('Plotting 1D slices of forces ...')
@@ -746,7 +737,7 @@ def main():
     ]
     for dim1, dimy, y, z, dimforce in dims:
         print(f'  --> ({dim1}, {dimy}={y}, {z})')
-        plot_force_1d_slice(phi_model, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+        plot_force_1d_slice(phi_model, coords_train, args.fig_dir, dim1, dimy, y, z, dimforce, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
 
         
     print('Plotting 1D marginals of the potential ...')
@@ -797,7 +788,7 @@ def main():
         _, dphi_dq,_ = potential_tf.calc_phi_derivatives(phi_model['phi'], df_data['eta'][:,:3], return_phi=True)
         for dim1, dim2 in dims:
             print(f'  --> ({dim1}, {dim2})')
-            plot_dfdt_2d_marginal(phi_model, df_data, dphi_dq, args.fig_dir, dim1, dim2, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
+            plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, args.fig_dir, dim1, dim2, padding=0.95, attrs=attrs_train, fig_fmt=args.fig_fmt)
     else:
         print("Couldn't find df gradients.")
     
