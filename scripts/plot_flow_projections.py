@@ -561,7 +561,7 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     return loss_mean, loss_std
 
 
-def get_flow_ideal_dfdt(df_data, omega=0., v_0=np.array([0., 0., 0.]), r_c=8.3, grid_size=32):
+def get_flow_leastsq_dfdt(df_data, omega=0., v_0=np.array([0., 0., 0.]), r_c=8.3, grid_size=32):
     """ Returns a least-squares based estimate on the optimal value of \partial f / \partial t
     corresponding to the flow. This is done by binning the spatial space and optimizing for CBE
     """
@@ -676,7 +676,7 @@ def plot_flow_dfdt(df_data, dim1, dim2, omega, v_0, r_c, attrs, fig_dir, fig_fmt
     x_bins = np.linspace(xmin, xmax, 32)
     y_bins = np.linspace(ymin, ymax, 32)
     
-    theoretical_flow_dfdt = get_flow_ideal_dfdt(df_data, omega=omega, v_0=v_0, r_c=r_c, grid_size=32)
+    theoretical_flow_dfdt = get_flow_leastsq_dfdt(df_data, omega=omega, v_0=v_0, r_c=r_c, grid_size=32)
 
     # Flow ideal dfdt
     ret = binned_statistic_2d(eta[:, ix], eta[:, iy], theoretical_flow_dfdt, statistic=np.mean, bins=[x_bins, y_bins])

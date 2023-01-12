@@ -214,99 +214,28 @@ def plot_force_1d_slice(phi_model, coords_train, fig_dir, dim1, dimy, y, z, dimf
         return fig, ax
 
 
-def plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, fig_dir, dim1, dim2, attrs, padding=0.95, fig_fmt=('svg',), save=True):
-    fig,(all_axs) = plt.subplots(2, 3,
-            figsize=(6,2.2),
-            dpi=200,
-            gridspec_kw=dict(width_ratios=[2,2,2], height_ratios=[0.2, 2]))
-    axs = all_axs[1,:]
-    caxs = all_axs[0,:]
-
-
-    eta, df_deta = df_data['eta'], df_data['df_deta']
-
-    model_omega = phi_model['fs']._omega.numpy()
-    model_u0 = np.array((phi_model['fs']._u_x.numpy(), phi_model['fs']._u_y.numpy(), phi_model['fs']._u_z.numpy()))
-    model_r_c = phi_model['fs']._r_c.numpy()
-
-    pdf_dt_CBE_ideal = -np.sum(eta[:, 3:]*df_deta[:, :3], axis=1) +\
-                        np.sum(dphi_dq.numpy()*df_deta[:, 3:], axis=1)
-
-
-    ix, iy, ivx, ivy = 0, 1, 3, 4
-    pdf_dt_stat_ideal = -model_omega*((eta[:, ix] - model_r_c)*df_deta[:, iy] -\
-                        eta[:, iy]*df_deta[:, ix] +\
-                        (eta[:, ivx] - model_u0[ix])*df_deta[:, ivy] -\
-                        (eta[:, ivy] - model_u0[iy])*df_deta[:, ivx]) -\
-                        np.sum(model_u0*df_deta[:,:3], axis=1)
-
-    labels = ['$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$']
-    keys = ['x', 'y', 'z']
+def plot_dfdt_comparison(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, attrs, fig_fmt=('svg',), save=True):
+    labels = ['$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
+              '$v_x\mathrm{\ [100km/s]}$', '$v_y\mathrm{\ [100km/s]}$', '$v_z\mathrm{\ [100km/s]}$']
+    keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
     
     labels = {k:l for k,l in zip(keys,labels)}
-    ikeys = {k:i for i, k in enumerate(keys)}
-    ix, iy = ikeys[dim1], ikeys[dim2]
-
-    for i in range(3):
+    
+    fig, axs = plot_potential.plot_dfdt_comparison(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, attrs, save=False)
+    
+    for i in range(2):
         axs[i].set_xlabel(labels[dim1])
     axs[0].set_ylabel(labels[dim2])
     axs[1].set_yticklabels([])
-    axs[2].set_yticklabels([])
 
-    # Get the plot limits
-    lims = []
-    k = 0.2
-    for x in coords_train[dim1], coords_train[dim2]:
-        xlim = np.percentile(x, [1., 99.])
-        w = xlim[1] - xlim[0]
-        xlim = [xlim[0]-k*w, xlim[1]+k*w]
-        lims.append(xlim)
-    xmin, xmax = lims[0]
-    ymin, ymax = lims[1]
-
-    if attrs['has_spatial_cut']:
-        # Visualise the boundaries
-        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
-
-    x_bins = np.linspace(xmin, xmax, 32)
-    y_bins = np.linspace(ymin, ymax, 32)
-        
-
-    # Ideal CBE discrepancy
-    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_CBE_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
-    im = axs[0].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
-    cb = fig.colorbar(im, cax=caxs[0], orientation='horizontal')
-    cb.ax.xaxis.set_ticks_position('top')
-    cb.ax.locator_params(nbins=5)
-    caxs[0].set_title('$(\partial f/\partial t)_\mathrm{CBE}$')
-
-    # Ideal CBE stationarity discrepancy
-    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_stat_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
-    im = axs[1].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
-    cb = fig.colorbar(im, cax=caxs[1], orientation='horizontal')
-    cb.ax.xaxis.set_ticks_position('top')
-    cb.ax.locator_params(nbins=5)
-    caxs[1].set_title('$(\partial f/\partial t)_\mathrm{stat}$')
-
-    # CBE+rotating stationarity discrepancy
-    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], pdf_dt_CBE_ideal - pdf_dt_stat_ideal, statistic=np.mean, bins=[x_bins, y_bins])
-    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=-np.min(ret.statistic), vmax=np.max(ret.statistic))
-    im = axs[2].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
-    cb = fig.colorbar(im, cax=caxs[2], orientation='horizontal')
-    cb.ax.xaxis.set_ticks_position('top')
-    cb.ax.locator_params(nbins=5)
-    caxs[2].set_title('$(\partial f/\partial t)_\mathrm{CBE+stat}$')
-    
-    #plt.tight_layout()
     if save:
+        omega = phi_model['fs']._omega.numpy()
         for fmt in fig_fmt:
-            fname = os.path.join(fig_dir, f'phi_flow_dfdt_discrepancy_{dim1}_{dim2}.{fmt}')
+            fname = os.path.join(fig_dir, f'phi_dfdt_comparison_{dim1}_{dim2}_omega={omega:.2f}.{fmt}')
             fig.savefig(fname, dpi=dpi, bbox_inches='tight')
         plt.close(fig)
     else:
-        return fig, axs  
+        return fig, axs
 
 
 def plot_vcirc_marginals(phi_model, coords_train, coords_sample, fig_dir, attrs, fig_fmt=('svg',), save=True):    
@@ -778,17 +707,20 @@ def main():
             print(f'  --> ({dim1}, {dim2}, {dimz}={z})')
             plot_vcirc_2d_slice(phi_model, coords_gc_train, coords_gc_sample, fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
 
-        print('Plotting 2D slices of \partial f/\partial t ...')
+        print('Plotting 2D marginals of \partial f/\partial t ...')
         dims = [
             ('x', 'y'),
             ('x', 'z'),
             ('y', 'z'),
+            ('vx', 'vy'),
+            ('vx', 'vz'),
+            ('vy', 'vz'),
         ]
         print('  Calculating Phi gradients (might take a while) ...')
         _, dphi_dq,_ = potential_tf.calc_phi_derivatives(phi_model['phi'], df_data['eta'][:,:3], return_phi=True)
         for dim1, dim2 in dims:
             print(f'  --> ({dim1}, {dim2})')
-            plot_dfdt_2d_marginal(phi_model, coords_train, df_data, dphi_dq, args.fig_dir, dim1, dim2, attrs=attrs_train, padding=0.95, fig_fmt=args.fig_fmt)
+            plot_dfdt_comparison(phi_model, df_data, dphi_dq, args.fig_dir, dim1, dim2, attrs=attrs_train, fig_fmt=args.fig_fmt)
     else:
         print("Couldn't find df gradients.")
     

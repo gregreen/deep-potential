@@ -17,6 +17,7 @@ from glob import glob
 from pathlib import Path
 import shutil
 import json
+from scipy.stats import binned_statistic_dd, binned_statistic_2d
 
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
@@ -286,6 +287,121 @@ def plot_force_2d_slice(phi_model, coords_train, fig_dir, dim1, dim2, dimz, z, a
     if save:
         for fmt in fig_fmt:
             fname = os.path.join(fig_dir, f'phi_force_slice_{dim1}_{dim2}.{fmt}')
+            fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        return fig, axs
+
+
+def get_potential_dfdt(phi_model, df_data, dphi_dq):
+    """ Returns the \partial f/\partial t predicted by the potential in the associated rotating frame.
+    """
+    eta, df_deta = df_data['eta'], df_data['df_deta']
+
+    model_omega = phi_model['fs']._omega.numpy()
+    model_u0 = np.array((phi_model['fs']._u_x.numpy(), phi_model['fs']._u_y.numpy(), phi_model['fs']._u_z.numpy()))
+    model_r_c = phi_model['fs']._r_c.numpy()
+
+    pdf_dt_CBE = -np.sum(eta[:, 3:]*df_deta[:, :3], axis=1) +\
+                  np.sum(dphi_dq.numpy()*df_deta[:, 3:], axis=1)
+
+
+    ix, iy, ivx, ivy = 0, 1, 3, 4
+    pdf_dt_stat = -model_omega*((eta[:, ix] - model_r_c)*df_deta[:, iy] -\
+                   eta[:, iy]*df_deta[:, ix] +\
+                  (eta[:, ivx] - model_u0[ix])*df_deta[:, ivy] -\
+                  (eta[:, ivy] - model_u0[iy])*df_deta[:, ivx]) -\
+                   np.sum(model_u0*df_deta[:,:3], axis=1)
+    
+    return pdf_dt_CBE - pdf_dt_stat
+
+
+def plot_dfdt_comparison(phi_model, df_data, dphi_dq, fig_dir, dim1, dim2, attrs, fig_fmt=('svg',), save=True):
+    """ Plots the \partial f/\partial t corresponding to the flow via solving the Collisionless Boltzmann Equation (CBE)
+    in the rotating frame specified by omega, v_0 and r_c using the least squares method in cubic spatial bins.
+    """
+    def amplify(min_val, max_val, k=0.2):
+        if min_val*max_val > 0:
+            w = max_val - min_val
+            return min_val - k*w, max_val + k*w
+        return min_val*(1 + k), max_val*(1 + k)
+
+    eta = df_data['eta']
+    
+    fig,(all_axs) = plt.subplots(2, 2,
+            figsize=(4,2.2),
+            dpi=200,
+            gridspec_kw=dict(width_ratios=[2,2], height_ratios=[0.2, 2]))
+    axs = all_axs[1,:]
+    caxs = all_axs[0,:]
+
+    
+    labels = ['$x$', '$y$', '$z$', '$v_x$', '$v_y$', '$v_z$']
+    keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
+    
+    labels = {k:l for k,l in zip(keys,labels)}
+    ikeys = {k:i for i, k in enumerate(keys)}
+    ix, iy = ikeys[dim1], ikeys[dim2]
+    
+    for i in range(2):
+        axs[i].set_xlabel(labels[dim1])
+    axs[0].set_ylabel(labels[dim2])
+    axs[1].set_yticklabels([])
+
+    # Get the plot limits
+    lims = []
+    k = 0.2
+    for i in [ix, iy]:
+        xlim = np.percentile(eta[:,i], [1., 99.])
+        w = xlim[1] - xlim[0]
+        xlim = [xlim[0]-k*w, xlim[1]+k*w]
+        lims.append(xlim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+    
+    
+    if attrs['has_spatial_cut']:
+        # Visualise the boundaries
+        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
+
+    x_bins = np.linspace(xmin, xmax, 32)
+    y_bins = np.linspace(ymin, ymax, 32)
+    
+    
+    omega = phi_model['fs']._omega.numpy()
+    v0 = np.array((phi_model['fs']._u_x.numpy(), phi_model['fs']._u_y.numpy(), phi_model['fs']._u_z.numpy()))
+    r_c = phi_model['fs']._r_c.numpy()
+    #omega = -0.0
+    #v0 = np.array([0., 0., 0.])
+    #df_data_temp = {'eta': df_data['eta'] - np.array([0, 0, 0, -0.128, -2.222, -0.077]), 'df_deta':df_data['df_deta']}
+    theoretical_flow_dfdt = plot_flow_projections.get_flow_leastsq_dfdt(df_data, omega=omega, v_0=v0, r_c=r_c, grid_size=32)
+    potential_dfdt = get_potential_dfdt(phi_model, df_data, dphi_dq)
+
+    
+    # Flow ideal dfdt
+    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], theoretical_flow_dfdt, statistic=np.mean, bins=[x_bins, y_bins])
+    vmin, vmax = amplify(*np.nanpercentile(ret.statistic, [1, 99]), k=0.4)
+    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=vmin, vmax=vmax)
+    im = axs[0].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
+    cb = fig.colorbar(im, cax=caxs[0], orientation='horizontal')
+    cb.ax.xaxis.set_ticks_position('top')
+    cb.ax.locator_params(nbins=5)
+    title = '$(\partial f/\partial t)_\mathrm{flow\_leastsq}$' + f'\n$\Omega={omega:.3f},$\n$\\vec v_0=({v0[0]:.2f}, {v0[1]:.2f}, {v0[2]:.2f})$'
+    caxs[0].set_title(title)
+
+    # CBE+rotating stationarity discrepancy
+    ret = binned_statistic_2d(eta[:, ix], eta[:, iy], -potential_dfdt, statistic=np.mean, bins=[x_bins, y_bins])
+    vmin, vmax = amplify(*np.nanpercentile(ret.statistic, [1, 99]), k=0.4)
+    divnorm = colors.TwoSlopeNorm(vcenter=0., vmin=vmin, vmax=vmax)
+    im = axs[1].imshow(ret.statistic.T, origin='lower', extent=(xmin, xmax, ymin, ymax), cmap='seismic', norm=divnorm, aspect='auto')
+    cb = fig.colorbar(im, cax=caxs[1], orientation='horizontal')
+    cb.ax.xaxis.set_ticks_position('top')
+    cb.ax.locator_params(nbins=5)
+    caxs[1].set_title('$(\partial f/\partial t)_\mathrm{ potential}$')
+    
+    if save:
+        for fmt in fig_fmt:
+            fname = os.path.join(fig_dir, f'phi_dfdt_comparison_{dim1}_{dim2}_omega={omega:.2f}.{fmt}')
             fig.savefig(fname, dpi=dpi, bbox_inches='tight')
         plt.close(fig)
     else:
@@ -577,8 +693,30 @@ def main():
     print('Plotting frameshift parameters evolution (might take a while) ...')
     plot_frameshift_params(args.potential, args.fig_dir, args.fig_fmt)
     
-    return 0
 
+    # Extra diagnostics if flow samples are also passed
+    if os.path.isfile(args.df_grads_fname) and phi_model['fs'] is not None:
+        df_data = utils.load_flow_samples(args.df_grads_fname)
+   
+        print('Plotting 2D marginals of \partial f/\partial t ...')
+        dims = [
+            ('x', 'y'),
+            ('x', 'z'),
+            ('y', 'z'),
+            ('vx', 'vy'),
+            ('vx', 'vz'),
+            ('vy', 'vz'),
+        ]
+        print('  Calculating Phi gradients (might take a while) ...')
+        _, dphi_dq,_ = potential_tf.calc_phi_derivatives(phi_model['phi'], df_data['eta'][:,:3], return_phi=True)
+        for dim1, dim2 in dims:
+            print(f'  --> ({dim1}, {dim2})')
+            plot_dfdt_comparison(phi_model, df_data, dphi_dq, args.fig_dir, dim1, dim2, attrs=attrs_train, fig_fmt=args.fig_fmt)
+    else:
+        print("Couldn't find df gradients.")
+
+    return 0
+  
 
 if __name__ == '__main__':
     main()
