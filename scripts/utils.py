@@ -339,13 +339,13 @@ def save_loss_history(fname, loss_history, val_loss_history=None, lr_history=Non
 
 def load_loss_history(fname):
     df = pd.read_csv(fname)
-    loss_history = list(df['loss'].values)
+    train_loss_history = list(df['loss'].values)
     val_loss_history = list(df['validation_loss'].values) if 'validation_loss' in df.columns else None
     lr_history = list(df['learning_rate'].values) if 'learning_rate' in df.columns else None
-    loss_noreg_history = list(df['loss_noreg'].values) if 'loss_noreg' in df.columns else None
+    train_loss_noreg_history = list(df['loss_noreg'].values) if 'loss_noreg' in df.columns else None
     val_loss_noreg_history = list(df['validation_loss_noreg'].values) if 'validation_loss_noreg' in df.columns else None
 
-    return loss_history, val_loss_history, lr_history, loss_noreg_history, val_loss_noreg_history
+    return train_loss_history, val_loss_history, lr_history, train_loss_noreg_history, val_loss_noreg_history
 
 
 def plot_corr(ax, x, y,

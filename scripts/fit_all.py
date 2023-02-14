@@ -45,7 +45,7 @@ def train_flows(data, fname_pattern,
                 n_epochs=128, batch_size=1024, validation_frac=0.25,
                 reg={}, lr={}, optimizer='RAdam', warmup_proportion=0.1,
                 checkpoint_every=None, checkpoint_hours=None,
-                max_checkpoints=None):
+                max_checkpoints=None, neptune_run=None):
     n_samples = data['eta'].shape[0]
     n_steps = n_samples * n_epochs // batch_size
     print(f'n_steps = {n_steps}')
@@ -76,7 +76,7 @@ def train_flows(data, fname_pattern,
 
         lr_kw = {f'lr_{k}':lr[k] for k in lr}
 
-        loss_history, val_loss_history, lr_history = flow_ffjord_tf.train_flow(
+        train_loss_history, val_loss_history, lr_history = flow_ffjord_tf.train_flow(
             flow_model, data,
             n_epochs=n_epochs,
             batch_size=batch_size,
@@ -88,6 +88,7 @@ def train_flows(data, fname_pattern,
             max_checkpoints=max_checkpoints,
             checkpoint_dir=checkpoint_dir,
             checkpoint_name=checkpoint_name,
+            neptune_run=neptune_run,
             **lr_kw
         )
 
@@ -474,6 +475,27 @@ def main():
     print('Options:')
     print(json.dumps(params, indent=2))
 
+    # Set up Neptune, if the necessary environmental variables are set
+    neptune_project = os.environ.get('NEPTUNE_PROJECT')
+    neptune_api_token = os.environ.get('NEPTUNE_API_TOKEN')
+    neptune_run = None
+    if neptune_project is not None and neptune_api_token is not None:
+        import neptune.new as neptune
+
+        print('Neptune credentials read from environmental variables..')
+        print(f'  Neptune project name: {neptune_project}')
+        print(f'  Neptune API token: {neptune_api_token}')
+        
+        project_id = os.environ.get('NEPTUNE_NAME')
+        if project_id is not None: kw=dict(custom_run_id=project_id, name=project_id)
+        neptune_run = neptune.init_run(
+            project=neptune_project,
+            api_token=neptune_api_token,
+            **kw
+        )
+
+        neptune_run['parameters_flow'] = params['df']
+        neptune_run['parameters_phi'] = params['Phi']
 
     # ================= Training/loading the flow =================
     if not args.no_flow_training:
@@ -485,7 +507,8 @@ def main():
         print('Training normalizing flows ...')
         flows = train_flows(
             data, args.flow_fname,
-            **params['df']
+            **params['df'],
+            neptune_run=neptune_run
         )
     # Re-load the flows (this removes the regularization terms)
     flows = load_flows(args.flow_fname)

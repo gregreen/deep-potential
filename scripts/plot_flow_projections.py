@@ -24,8 +24,8 @@ from scipy.stats import binned_statistic_dd, binned_statistic_2d
 import tensorflow as tf
 print(f'Tensorflow version {tf.__version__}')
 
-import flow_ffjord_tf
 import utils
+import fit_all
 
 
 dpi = 200
@@ -634,7 +634,8 @@ def plot_flow_dfdt(df_data, dim1, dim2, omega, v_0, r_c, attrs, fig_dir, fig_fmt
         if min_val*max_val > 0:
             w = max_val - min_val
             return min_val - k*w, max_val + k*w
-        return min_val*(1 + k), max_val*(1 + k)
+        max_val = np.max([-min_val, max_val])
+        return -max_val*(1 + k), max_val*(1 + k)
 
     eta = df_data['eta']
     
@@ -646,8 +647,8 @@ def plot_flow_dfdt(df_data, dim1, dim2, omega, v_0, r_c, attrs, fig_dir, fig_fmt
     ax = all_axs[1]
 
     
-    labels = ['$x\mathrm{\ [kpc]}$', '$y\mathrm{\ [kpc]}$', '$z\mathrm{\ [kpc]}$',
-              '$v_x\mathrm{\ [100km/s]}$', '$v_y\mathrm{\ [100km/s]}$', '$v_z\mathrm{\ [100km/s]}$']
+    labels = ['$x$', '$y$', '$z$',
+              '$v_x$', '$v_y$', '$v_z$']
     keys = ['x', 'y', 'z', 'vx', 'vy', 'vz']
     
     labels = {k:l for k,l in zip(keys,labels)}
@@ -686,7 +687,7 @@ def plot_flow_dfdt(df_data, dim1, dim2, omega, v_0, r_c, attrs, fig_dir, fig_fmt
     cb = fig.colorbar(im, cax=cax, orientation='horizontal')
     cb.ax.xaxis.set_ticks_position('top')
     cb.ax.locator_params(nbins=5)
-    title = '$(\partial f/\partial t)_\mathrm{flow\_ideal}$' + f'\n$\Omega={omega:.3f},$\n$\\vec v_0=({v_0[0]:.2f}, {v_0[1]:.2f}, {v_0[2]:.2f})$'
+    title = '$(\partial f/\partial t)_\mathrm{flow\_leastsq}$' + f'\n$\Omega={omega:.3f},$\n$\\vec v_0=({v_0[0]:.2f}, {v_0[1]:.2f}, {v_0[2]:.2f})$'
     cax.set_title(title)
 
     #plt.tight_layout()
@@ -800,7 +801,6 @@ def plot_1d_slice(coords_train, coords_sample, fig_dir, dim1, dimy, dimz, y, dy,
 def main():
     """
     Plots different diagnostics for the flow and the training data.
-    TODO: Currently some of the functions require attributes from the training data, remove this dependancy.
     """
     from argparse import ArgumentParser
     parser = ArgumentParser(
@@ -867,6 +867,12 @@ def main():
         action='store_true',
         help='Whether to plot the least squares estimate of \partial f/\partial t. Requires computing gradients from the sample \
             which is computationally expensive.'
+    )
+    parser.add_argument(
+        '--plot-leastsq-other',
+        action='store_true',
+        help='Whether to plot the least squares estimate of \partial f/\partial t based on the values from the options file. \
+            Requires computing gradients from the sample which is computationally expensive.'
     )
     parser.add_argument(
         '--autosave',
@@ -1101,16 +1107,34 @@ def main():
             ('z', 'vz')
         ]
 
-        omega = 0
-        v_0 = np.array([0, 0, 0])
+        if not args.plot_leastsq_other:
+            omega = 0
+            v_0 = np.array([0, 0, 0])
 
-        for dim1,dim2 in dims:
-            print(f'  --> ({dim1}, {dim2})')
-            plot_flow_dfdt(df_data_sample,
-                dim1, dim2, omega, v_0, r_c=8.3,
-                attrs=attrs_train,
-                fig_dir=args.fig_dir, fig_fmt=args.fig_fmt
-            )
+            for dim1,dim2 in dims:
+                print(f'  --> ({dim1}, {dim2})')
+                plot_flow_dfdt(df_data_sample,
+                    dim1, dim2, omega, v_0, r_c=8.3,
+                    attrs=attrs_train,
+                    fig_dir=args.fig_dir, fig_fmt=args.fig_fmt
+                )
+        else:
+            # Check for an options for file in the active directory
+            fname_options = glob('*.json')[0]
+            params = fit_all.load_params(fname_options)
+            fs_params = params['Phi']['frameshift']
+
+            omega = fs_params['omega0']
+            v_0 = np.array([fs_params['u_x0'], fs_params['u_y0'], fs_params['u_z0']])
+            r_c = fs_params['r_c0']
+
+            for dim1,dim2 in dims:
+                print(f'  --> ({dim1}, {dim2})')
+                plot_flow_dfdt(df_data_sample,
+                    dim1, dim2, omega, v_0, r_c=r_c,
+                    attrs=attrs_train,
+                    fig_dir=args.fig_dir, fig_fmt=args.fig_fmt
+                )
 
     return 0
 

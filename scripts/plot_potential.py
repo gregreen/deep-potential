@@ -578,6 +578,11 @@ def main():
         help='Potential model filename. Can be either checkpoint dir or *.index in that checkpoint dir.'
     )
     parser.add_argument(
+        '--df-grads-fname',
+        type=str, default='data/df_gradients.h5',
+        help='Directory in which to store the flow samples (positions and f gradients).'
+    )
+    parser.add_argument(
         '--fig-dir',
         type=str,
         default='plots',
@@ -677,8 +682,7 @@ def main():
     ]
     for dim1, dim2, dimz, z in dims:
         print(f'  --> ({dim1}, {dim2})')
-        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, zattrs=attrs_train, padding=0.95, fig_fmt=('pdf',))
-
+        plot_force_2d_slice(phi_model, coords_train, args.fig_dir, dim1, dim2, dimz, z, attrs=attrs_train, padding=0.95, fig_fmt=('pdf',))
 
     print('Plotting 1D slices of forces ...')
     dims = [

@@ -294,7 +294,8 @@ def train_flow(flow, data,
                checkpoint_hours=None,
                max_checkpoints=None,
                checkpoint_dir=r'checkpoints/ffjord',
-               checkpoint_name='ffjord'):
+               checkpoint_name='ffjord',
+               neptune_run=None):
     """
     Trains a flow using the given data.
 
@@ -351,7 +352,11 @@ def train_flow(flow, data,
     val_batches = val_batches.repeat(n_epochs+1)
     val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
-    n_steps = n_epochs * n_samples // batch_size
+    n_steps = (n_epochs * n_samples) // batch_size
+    unrounded_steps_per_epoch = n_samples / batch_size # Due to the way batches are repeated, the number of steps per epoch is not necessarily an integer..
+    epoch_counter, rounded_epoch_duration = unrounded_steps_per_epoch, 0
+
+    print('\n\n\nIMPORTANT: ', n_epochs, n_samples, batch_size, n_steps, n_samples//batch_size)
 
     if isinstance(optimizer, str):
         if lr_type == 'exponential':
@@ -386,7 +391,7 @@ def train_flow(flow, data,
 
     print(f'Optimizer: {opt}')
 
-    loss_history = []
+    train_loss_history = []
     val_loss_history = []
     lr_history = []
 
@@ -394,12 +399,12 @@ def train_flow(flow, data,
 
     # Set up checkpointing
     step = tf.Variable(0, name='step')
-    loss_min = tf.Variable(np.inf, name='loss_min')
+    val_loss_min = tf.Variable(np.inf, name='loss_min')
 
     if checkpoint_every is not None:
         checkpoint = tf.train.Checkpoint(
             opt=opt, flow=flow,
-            step=step, loss_min=loss_min
+            step=step, loss_min=val_loss_min
         )
         chkpt_manager = tf.train.CheckpointManager(
             checkpoint,
@@ -418,7 +423,7 @@ def train_flow(flow, data,
 
             # Try to load loss history
             loss_fname = f'{latest}_loss.txt'
-            loss_history, val_loss_history, lr_history, _, _ = utils.load_loss_history(
+            train_loss_history, val_loss_history, lr_history, _, _ = utils.load_loss_history(
                 loss_fname
             )
 
@@ -436,8 +441,8 @@ def train_flow(flow, data,
         variables = flow.trainable_variables
         with tf.GradientTape() as g:
             g.watch(variables)
-            loss = -tf.reduce_mean(flow.log_prob(batch))
-        grads = g.gradient(loss, variables)
+            train_loss = -tf.reduce_mean(flow.log_prob(batch))
+        grads = g.gradient(train_loss, variables)
         #tf.print([(v.name,tf.norm(dv)) for v,dv in zip(variables,grads)])
         grads,global_norm = tf.clip_by_global_norm(grads, 10.)
         #grads,global_norm = tf.clip_by_global_norm(grads, 100.)
@@ -445,15 +450,15 @@ def train_flow(flow, data,
         #tf.print([(v.name,tf.norm(v)) for v in grads])
         #tf.print('loss =', loss)
         opt.apply_gradients(zip(grads, variables))
-        return loss
+        return train_loss
 
     @tf.function
     def validation_step(batch):
         print(f'Tracing validation_step with batch shape {batch.shape} ...')
-        loss = -tf.reduce_mean(flow.log_prob(batch))
-        return loss
+        val_loss = -tf.reduce_mean(flow.log_prob(batch))
+        return val_loss
 
-    update_bar = utils.get_training_progressbar_fn(n_steps, loss_history, opt)
+    update_bar = utils.get_training_progressbar_fn(n_steps, train_loss_history, opt)
 
     # Main training loop
     for i,(y,y_val) in enumerate(zip(batches,val_batches), int(step)):
@@ -462,12 +467,27 @@ def train_flow(flow, data,
             # if we began from a checkpoint.
             break
 
-        loss = training_step(y)
+        train_loss = training_step(y)
         val_loss = validation_step(y_val)
 
-        loss_history.append(float(loss))
+        train_loss_history.append(float(train_loss))
         val_loss_history.append(float(val_loss))
         lr_history.append(float(opt._decayed_lr(tf.float32)))
+
+        if neptune_run is not None:
+            neptune_run["train/train_loss"].append(train_loss_history[-1])
+            neptune_run["train/val_loss"].append(val_loss_history[-1])
+            neptune_run["train/lr"].append(lr_history[-1])
+            
+            epoch_counter -= 1
+            rounded_epoch_duration += 1
+            if epoch_counter <= -0.5:
+                # we say that a new epoch has started when integer*unrounded_steps_per_epoch \in [-0.5, 0.5]
+                neptune_run["train/epoch_train_loss"].append(np.mean(train_loss_history[-rounded_epoch_duration:]))
+                neptune_run["train/epoch_val_loss"].append(np.mean(val_loss_history[-rounded_epoch_duration:]))
+                neptune_run["train/epoch_lr"].append(np.mean(lr_history[-rounded_epoch_duration:]))
+                epoch_counter += unrounded_steps_per_epoch
+                rounded_epoch_duration = 0
 
         # Progress bar
         update_bar(i)
@@ -475,21 +495,23 @@ def train_flow(flow, data,
         # Adjust learning rate?
         if lr_type == 'step':
             n_smooth = max(lr_patience//8, 1)
-            if len(loss_history) >= n_smooth:
-                loss_avg = np.mean(loss_history[-n_smooth:])
+            if len(train_loss_history) >= n_smooth:
+                train_loss_avg = np.mean(train_loss_history[-n_smooth:])
+                val_loss_avg = np.mean(val_loss_history[-n_smooth:])
             else:
-                loss_avg = np.inf
+                train_loss_avg = np.inf
+                val_loss_avg = np.inf
 
-            if loss_avg < loss_min - lr_min_delta:
+            if val_loss_avg < val_loss_min - lr_min_delta:
                 steps_since_decline = 0
-                print(f'New minimum loss: {loss_avg}.')
-                loss_min.assign(loss_avg)
+                print(f'New minimum loss: {val_loss_avg}.')
+                val_loss_min.assign(val_loss_avg)
             elif steps_since_decline >= lr_patience:
                 # Reduce learning rate
                 old_lr = float(opt.lr)
                 new_lr = 0.5 * old_lr
                 print(f'Reducing learning rate from {old_lr} to {new_lr}.')
-                print(f'   (loss threshold: {float(loss_min-lr_min_delta)})')
+                print(f'   (loss threshold: {float(val_loss_min-lr_min_delta)})')
                 opt.lr.assign(new_lr)
                 steps_since_decline = 0
             else:
@@ -510,12 +532,12 @@ def train_flow(flow, data,
             print(f'  --> {chkpt_fname}')
             utils.save_loss_history(
                 f'{chkpt_fname}_loss.txt',
-                loss_history,
+                train_loss_history,
                 val_loss_history=val_loss_history,
                 lr_history=lr_history
             )
             fig = utils.plot_loss(
-                loss_history,
+                train_loss_history,
                 val_loss_hist=val_loss_history,
                 lr_hist=lr_history
             )
@@ -523,18 +545,21 @@ def train_flow(flow, data,
             plt.close(fig)
 
     t2 = time()
-    loss_avg = np.mean(loss_history[-50:])
-    n_steps = len(loss_history)
-    print(f'<loss> = {loss_avg: >7.5f}')
+    train_loss_avg = np.mean(train_loss_history[-50:])
+    n_steps = len(train_loss_history)
+    print(f'<train loss> = {train_loss_avg: >7.5f}')
     if t1 is not None:
         print(f'tracing time: {t1-t0:.2f} s')
         print(f'training time: {t2-t1:.1f} s ({(t2-t1)/(n_steps-1):.4f} s/step)')
+
+    if neptune_run is not None:
+        neptune_run.stop()
 
     # Save the trained model
     #checkpoint = tf.train.Checkpoint(flow=flow)
     #checkpoint.save(checkpoint_prefix + '_final')
 
-    return loss_history, val_loss_history, lr_history
+    return train_loss_history, val_loss_history, lr_history
 
 
 def save_flow(flow, fname_base):
