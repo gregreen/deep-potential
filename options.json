@@ -58,6 +58,11 @@
       "u_z0": 0.0859,
       "u_z0_trainable": true
     },
-    "r_c": 8.3
+    "analytic_potential": {
+      "mn_a": 1.0,
+      "mn_a_trainable": true,
+      "mn_b": 1.0,
+      "mn_b_trainable": true
+    }
   }
 }
