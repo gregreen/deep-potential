@@ -93,21 +93,11 @@ def save_selection(eta, t_snap, fname, n_max=None):
     return eta_sel
 
 
-def save_nonstationary(eta, t_snap, fname, t_idx=4):
-    t_nonstationary = t_snap[t_idx]
-    eta_nonstationary = eta[:,t_idx]
-    print(f'Using t = {t_nonstationary}.')
-
-    with h5py.File(fname, 'w') as f:
-        dset = f.create_dataset('eta', data=eta_nonstationary, compression='lzf')
-        dset.attrs['axes'] = ('particle', 'dimension')
-        dset.attrs['time'] = t_nonstationary
-        dset.attrs['dimensions'] = ('x', 'y', 'z', 'vx', 'vy', 'vz')
-
 def radial_cut(eta, r_inner, r_outer, n):
     r2 = np.sum(eta[:, :3]**2, axis=1)
     idx = (r_inner**2 <= r2) & (r2 <= r_outer**2)
     return eta[idx][:n]
+
 
 def main():
     n = 2**21          # 131072 stars

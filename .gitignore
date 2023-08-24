@@ -140,3 +140,9 @@ misc/
 
 # Checkpoints
 checkpoints/
+
+# Custom dirs
+data/
+paper_barmodel_202306/
+runs/
+notebooks/

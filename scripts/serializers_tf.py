@@ -50,4 +50,3 @@ def deserialize_variable(d):
         name=d['name'],
         trainable=d['trainable']
     )
-

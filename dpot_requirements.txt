@@ -1,6 +1,9 @@
+numpy
 tensorflow
 tensorflow-probability
 tensorflow-addons
+keras
+tensorboard
 numpy
 scipy
 matplotlib
