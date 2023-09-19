@@ -30,7 +30,7 @@ def cart2cyl(eta):
     phi = np.arctan2(eta[:,1], eta[:,0])
     cos_phi = eta[:,0] / R
     sin_phi = eta[:,1] / R
-    vR =  eta[:,3] * cos_phi + eta[:,4] * sin_phi
+    vR = eta[:,3] * cos_phi + eta[:,4] * sin_phi
     vT = -eta[:,3] * sin_phi + eta[:,4] * cos_phi
     vz = eta[:,5]
     return {'R':R, 'z':z, 'phi':phi, 'vR':vR, 'vz':vz, 'vT':vT}
@@ -426,4 +426,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

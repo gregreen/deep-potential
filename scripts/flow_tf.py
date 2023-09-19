@@ -140,7 +140,7 @@ class RQSBijector(tf.Module):
         if not len(self._bin_widths.weights):
             return o
 
-        o['dense'] = [weights_as_list(l) for l in self._layers[::2]]
+        o['dense'] = [weights_as_list(lay) for lay in self._layers[::2]]
         o['bin_widths'] = weights_as_list(self._bin_widths)
         o['bin_heights'] = weights_as_list(self._bin_heights)
         o['knot_slopes'] = weights_as_list(self._knot_slopes)
@@ -249,7 +249,7 @@ class NormalizingFlow(object):
             self.rqs = [RQSBijector(n_bins=8) for i in range(2*n_units)]
         else:
             self.rqs = rqs
-        
+
         if lu_fact is None:
             self.lu_fact = [
                 trainable_lu_factorization(n_dim)
@@ -302,7 +302,7 @@ class NormalizingFlow(object):
             distribution=self.dist,
             bijector=self.bij
         )
-    
+
     def serialize(self):
         """
         Returns a JSON-serializable object representing the
@@ -318,7 +318,7 @@ class NormalizingFlow(object):
         ]
         o['log_scale'] = [serialize_variable(v) for v in self.log_scale]
         return o
-    
+
     @classmethod
     def deserialize(cls, d):
         """
@@ -572,10 +572,10 @@ def plot_bijections(flow):
 
     for i,b in enumerate(flow.bij.bijectors[::-1]):
         if isinstance(b, tfb.RealNVP):
-            plot_nsf(b, ax_arr[0,i], label_y_axis=(i==0))
+            plot_nsf(b, ax_arr[0,i], label_y_axis=(i == 0))
         elif (isinstance(b, tfb.ScaleMatvecLU)
               or isinstance(b, tfb.ScaleMatvecDiag)):
-            plot_inv1x1conv(b, ax_arr[0,i], label_y_axis=(i==0))
+            plot_inv1x1conv(b, ax_arr[0,i], label_y_axis=(i == 0))
         else:
             ax_arr[0,i].axis('off')
 
@@ -615,10 +615,12 @@ def get_flow_loss_gradient_func(flow):
     return calc_flow_loss_gradients
 
 
-def get_training_callback(flow, every=500,
-                                fname='nvp_{i:05d}.png',
-                                p_true_fn=None,
-                                **kwargs):
+def get_training_callback(
+    flow, every=500,
+    fname='nvp_{i:05d}.png',
+    p_true_fn=None,
+    **kwargs
+):
     """
     Returns a standard callback function that can be passed
     to train_flow. Every <every> steps callback prints the
@@ -636,7 +638,7 @@ def get_training_callback(flow, every=500,
             to None.
     """
     plt_fn = kwargs.get(
-        'plt_fn', 
+        'plt_fn',
         get_flow_plot_fn(flow, p_true_fn=p_true_fn)
     )
 
@@ -737,4 +739,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

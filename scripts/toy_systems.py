@@ -50,16 +50,16 @@ class PlummerSphere(object):
         #    0, 10
         #)
         self.df_norm = 24*np.sqrt(2.) / (7*np.pi**3)
-    
+
     def psi(self, r):
         return 1 / np.sqrt(1 + r**2)
-    
+
     def phi(self, r):
         return -self.psi(r)
 
     def rho(self, r):
         return 3/(4*np.pi) * (1+r**2)**(-5/2)
-    
+
     def sample_r(self, n):
         # return self._r_sampler(n)
         u = np.random.uniform(size=n)
@@ -75,7 +75,7 @@ class PlummerSphere(object):
         v = v[:,None] * draw_from_sphere(n)
 
         return x, v
-    
+
     def df(self, x, v):
         r = np.sqrt(np.sum(x**2, axis=1))
         v2 = np.sum(v**2, axis=1)
@@ -124,4 +124,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

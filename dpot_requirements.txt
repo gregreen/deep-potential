@@ -1,0 +1,15 @@
+numpy
+tensorflow
+tensorflow-probability
+tensorflow-addons
+keras
+tensorboard
+numpy
+scipy
+matplotlib
+h5py
+astropy
+progressbar2
+cerberus
+dm-sonnet
+pandas
