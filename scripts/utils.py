@@ -50,7 +50,14 @@ def load_training_data(fname, cut_attrs=False):
         z = eta[:, 2]
 
         if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-            r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+            if "r_out" in attrs:
+                r_out = attrs["r_out"]
+            else:
+                r_out = 1 / attrs["parallax_min"]
+            if "r_in" in attrs:
+                r_in = attrs["r_in"]
+            else:
+                r_in = 1 / attrs["parallax_max"]
             idx = (r2 > r_in**2) & (r2 < r_out**2)
         elif attrs["volume_type"] == "cylinder":
             R_out, H_out = attrs["R_out"], attrs["H_out"]
@@ -593,7 +600,14 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
         R = np.sum(eta[:, :2] ** 2, axis=1) ** 0.5
         z = eta[:, 2]
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         idx = (r >= r_in) & (r <= r_out)
     elif attrs["volume_type"] == "cylinder":
         R_out, H_out = attrs["R_out"], attrs["H_out"]
