@@ -407,8 +407,7 @@ def plot_vcirc_2d_slice(
             raise ValueError(f"dimension {dim} not supported")
 
     fig, all_axs = plt.subplots(
-        2,
-        3,
+        2, 3,
         figsize=(6, 2.2),
         dpi=200,
         gridspec_kw=dict(width_ratios=[2, 2, 2], height_ratios=[0.2, 2]),
