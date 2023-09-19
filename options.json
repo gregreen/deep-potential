@@ -1,34 +1,68 @@
 {
   "df": {
     "n_flows": 1,
-    "n_hidden": 2,
-    "hidden_size": 16,
-    "n_bij": 2,
+    "n_hidden": 3,
+    "hidden_size": 64,
+    "n_bij": 3,
     "reg": {
       "dv_dt_reg": 0,
-      "kinetic_reg": 1e-05,
-      "jacobian_reg": 1e-05
+      "kinetic_reg": 0.0001,
+      "jacobian_reg": 0.0001
     },
-    "n_epochs": 128,
-    "batch_size": 64,
+    "n_epochs": 32768,
+    "batch_size": 8192,
     "lr": {
-			"type": "step",
-			"init": 0.02,
-			"patience": 1024,
-			"min_delta": 0.01
-		},
+      "type": "step",
+      "init": 0.005,
+      "patience": 2048,
+      "min_delta": 0.01,
+      "final": 0.0001
+    },
     "optimizer": "RAdam",
-    "checkpoint_every": 1
+    "warmup_proportion": 0.0009765625,
+    "max_checkpoints": 128,
+    "checkpoint_every": 1,
+    "checkpoint_hours": 1.0,
+    "validation_frac": 0.25
   },
   "Phi": {
-    "n_samples": 524288,
+    "n_samples": 2097152,
+    "sample_batch_size": 2048,
+    "grad_batch_size": 128,
     "n_hidden": 4,
-    "hidden_size": 32,
+    "hidden_size": 512,
     "xi": 1.0,
     "lam": 1.0,
-    "n_epochs": 2048,
-    "batch_size": 16384,
-    "lr_init": 0.001,
-    "lr_final": 0.00001
+    "l2": 0.1,
+    "n_epochs": 4096,
+    "batch_size": 32768,
+    "lr": {
+      "type": "step",
+      "init": 0.001,
+      "patience": 2048,
+      "min_delta": 0.005
+    },
+    "optimizer": "RAdam",
+    "warmup_proportion": 0.015625,
+    "max_checkpoints": 128,
+    "checkpoint_every": 16,
+    "frameshift": {
+      "omega0": 0.4,
+      "omega0_trainable": true,
+      "r_c0": 8.3,
+      "r_c0_trainable": false,
+      "u_x0": 0.093,
+      "u_x0_trainable": true,
+      "u_y0": 2.515,
+      "u_y0_trainable": true,
+      "u_z0": 0.0859,
+      "u_z0_trainable": true
+    },
+    "analytic_potential": {
+      "mn_a": 1.0,
+      "mn_a_trainable": true,
+      "mn_b": 1.0,
+      "mn_b_trainable": true
+    }
   }
 }

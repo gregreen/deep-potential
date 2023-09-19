@@ -99,9 +99,8 @@ def main():
 
     print(f'Saving {data.shape[0]} data points ...')
     save_data(data, args.output)
-    
+
     return 0
 
 if __name__ == '__main__':
     main()
-
