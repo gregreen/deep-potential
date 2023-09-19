@@ -323,7 +323,14 @@ def add_1dpopulation_boundaries(axs, dim1, attrs):
     valid_keys = ["x", "y", "z", "cylR"]
     plot_sph, plot_cyl = [], []
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         plot_sph = [r_in, r_out]
     elif attrs["volume_type"] == "cylinder":
         if "r_in" in attrs:
@@ -357,7 +364,14 @@ def add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color="white"):
 
     plot_sph, plot_cyl = [], []
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         plot_sph = [r_in, r_out]
     elif attrs["volume_type"] == "cylinder":
         if "r_in" in attrs:
