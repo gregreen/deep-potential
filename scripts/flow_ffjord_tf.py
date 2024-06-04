@@ -310,6 +310,7 @@ def train_flow(
     validation_frac=0.25,
     checkpoint_every=None,
     checkpoint_hours=None,
+    checkpoint_at_end=False,
     max_checkpoints=None,
     checkpoint_dir=r"checkpoints/ffjord",
     checkpoint_name="ffjord",
@@ -364,12 +365,12 @@ def train_flow(
     # Create Tensorflow datasets
     batches = tf.data.Dataset.from_tensor_slices(data_train)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
-    batches = batches.repeat(n_epochs + 1)
+    batches = batches.repeat(n_epochs)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     val_batches = tf.data.Dataset.from_tensor_slices(data_val)
     val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
-    val_batches = val_batches.repeat(n_epochs + 1)
+    val_batches = val_batches.repeat(n_epochs)
     val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
     n_steps = (n_epochs * n_samples) // batch_size
@@ -377,15 +378,6 @@ def train_flow(
         n_samples / batch_size
     )  # Due to the way batches are repeated, the number of steps per epoch is not necessarily an integer..
     epoch_counter, rounded_epoch_duration = unrounded_steps_per_epoch, 0
-
-    print(
-        "\n\n\nIMPORTANT: ",
-        n_epochs,
-        n_samples,
-        batch_size,
-        n_steps,
-        n_samples // batch_size,
-    )
 
     def get_optimizer():
         if isinstance(optimizer, str):
@@ -493,12 +485,18 @@ def train_flow(
         return val_loss
 
     update_bar = utils.get_training_progressbar_fn(n_steps, train_loss_history, opt)
+    t1 = None
 
     # Main training loop
     # First we check for stopping conditions, then perform the training step
     # and update the progress bar. The order is important in case we load in
     # a checkpoint which has already satisfied the stopping conditions.
     for i, (y, y_val) in enumerate(zip(batches, val_batches), int(step)):
+        if i >= n_steps:
+            # Break if too many steps taken. This can occur
+            # if we began from a checkpoint.
+            break
+
         # Adjust learning rate?
         if lr_type == "step":
             n_smooth = max(lr_patience // 8, 1)
@@ -583,11 +581,9 @@ def train_flow(
             # Get time after gradients function is first traced
             traced = True
             t1 = time()
-        else:
-            t1 = None
 
-        # Checkpoint
-        if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+        # Checkpoint periodically or at the very end
+        if (checkpoint_at_end and i == n_steps - 1) or (checkpoint_every is not None) and i and not (i % checkpoint_steps):
             print("Checkpointing ...")
             step.assign(i + 1)
             chkpt_fname = chkpt_manager.save()
@@ -603,11 +599,6 @@ def train_flow(
             )
             fig.savefig(f"{chkpt_fname}_loss.pdf")
             plt.close(fig)
-
-        if i >= n_steps:
-            # Break if too many steps taken. This can occur
-            # if we began from a checkpoint.
-            break
 
     t2 = time()
     train_loss_avg = np.mean(train_loss_history[-50:])
@@ -628,29 +619,57 @@ def train_flow(
 
 
 def main():
-    flow = FFJORDFlow(2, 4, 16)
+    from scipy.stats import multivariate_normal
+
+    flow = FFJORDFlow(n_dim=2, n_hidden=5, hidden_size=20, n_bij=1)
+
+    # If directory checkpoints exists, delete it
+    if os.path.exists("checkpoints/ffjord"):
+        import shutil
+
+        shutil.rmtree("checkpoints/ffjord")
 
     n_samples = 8 * 1024
-    mu = [[-2.0, 0.0], [2.0, 0.0]]
+    mu = [[-2, 0.0], [2, 0.0]]
     cov = [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]]]
-    data = tf.concat(
+    data = {}
+    data['eta'] = tf.concat(
         [
             np.random.multivariate_normal(m, c, n_samples // 2).astype("f4")
             for m, c in zip(mu, cov)
         ],
         axis=0,
     )
+    # Shuffle the data
+    data['eta'] = tf.random.shuffle(data['eta'])
 
-    train_flow(flow, data, batch_size=1024, n_epochs=1, checkpoint_every=256)
+    plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], bins=128, cmap="Blues")
+    plt.savefig("data.png")
 
-    fname = flow.save("checkpoints/ffjord/ffjord_test")
-    flow2 = FFJORDFlow.load(fname)
+    train_flow(
+        flow, data, batch_size=1024, n_epochs=16, checkpoint_every=256,
+        optimizer='RAdam', checkpoint_at_end=True, lr_init=0.02, lr_patience=16
+    )
+
+    fname = "checkpoints/ffjord/"
+    flow.save_specs('checkpoints/ffjord/ffjord')
+    flow2 = FFJORDFlow.load_latest(fname)
+
+    samples = flow.sample(32 * 1024)
+    plt.hist2d(samples[:, 0], samples[:, 1], bins=128, cmap="Blues")
+    plt.savefig("samples.png")
 
     x = tf.random.normal([5, 2])
+
+    theoretical_y = np.log(
+        (multivariate_normal.pdf(x, mean=mu[0], cov=cov[0]) +
+         multivariate_normal.pdf(x, mean=mu[1], cov=cov[1]))/2
+    )
     y = flow.log_prob(x)
     y2 = flow2.log_prob(x)
-    print(y)
-    print(y2)
+    print(theoretical_y)
+    print(y.numpy())
+    print(y2.numpy())
 
     # for i in range(10):
     #    eta = tf.random.normal([1024,2])
