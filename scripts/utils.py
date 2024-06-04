@@ -447,7 +447,7 @@ def append_to_potential_params_history(phi, fs, potential_params_hist={}):
                 potential_params_hist[param_name] = []
             if "log" in attr:
                 value = np.exp(value)
-            if type(value) == np.ndarray:
+            if type(value) is np.ndarray:
                 potential_params_hist[param_name].append(value[0])
             else:
                 potential_params_hist[param_name].append(value)
@@ -622,6 +622,176 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
                 & (np.abs(z) <= H_out)
             )
     return idx
+
+
+def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vector_field=None):
+    """Calculate components in different coordinate systems. If a vector field is specified, then the function
+    returns the components of the vector field in Cartesian, Spherical, and Cylindrical coordinates. This assumes
+    that the positions of the vector fields values are specified by eta (eta is in Cartesian). If vector_field is
+    None, then the function returns the coordinates of eta in different coordinates.
+
+    Cartesian coordinates: x, y, z, vx, vy, vz
+    Spherical coordiantes: r, cos(theta), phi, v_radial, v_theta (v_phi is missing)
+    Cylindrical coordinates: cyl_R, cyl_z, cyl_phi, cyl_vR, cyl_vz, cyl_vT
+    """
+    def dot(a, b):
+        # a and b are of shape (n, 3)
+        return np.sum(a*b, axis=1)
+
+    sph_x0 = np.array(spherical_origin)
+    cyl_x0 = np.array(cylindrical_origin)
+
+    if vector_field is not None:
+        # Cartesian
+        zeros = np.zeros((len(eta), 1))
+        cart = {
+            "x": vector_field[:,0],
+            "y": vector_field[:,1],
+            "z": vector_field[:,2],
+        }
+
+        # Cylindrical
+        x, y, z = np.split(eta[:,:3] - cyl_x0, 3, axis=1)
+        R = (x**2 + y**2)**0.5
+        e_cyl_R = np.concatenate([x, y, zeros], axis=1)/R
+        e_cyl_z = np.concatenate([zeros, zeros, np.ones((len(x), 1))], axis=1)
+        e_cyl_phi = np.concatenate([-y, x, zeros], axis=1)/R
+        cyl = {
+            "cylR": dot(e_cyl_R, vector_field),
+            "cylz": dot(e_cyl_z, vector_field),
+            "cylphi": dot(e_cyl_phi, vector_field),
+        }
+
+        # Spherical
+        x, y, z = np.split(eta[:,:3] - sph_x0, 3, axis=1)
+        R = (x**2 + y**2)**0.5
+        r = (x**2 + y**2 + z**2)**0.5
+        e_sph_r = np.concatenate([x, y, z], axis=1)/r
+        e_sph_th = np.concatenate([x*z, y*z, -R**2], axis=1)/r/R
+        e_sph_phi = np.concatenate([-y, x, zeros], axis=1)/R
+        sph = {
+            "sphR": dot(e_sph_r, vector_field),
+            "sphth": dot(e_sph_th, vector_field),
+            "sphphi": dot(e_sph_phi, vector_field),
+        }
+    else:
+        # Cartesian
+        x = eta[:, 0] - sph_x0[0]
+        y = eta[:, 1] - sph_x0[1]
+        z = eta[:, 2] - sph_x0[2]
+        cart = {"x": x, "y": y, "z": z}
+
+        has_velocities = eta.shape[1] == 6
+
+        # Cylindrical
+        cyl_R = np.linalg.norm(eta[:, :2] - cyl_x0[:2], axis=1)
+        cyl_z = eta[:, 2] - cyl_x0[2]
+        cyl_phi = np.arctan2(eta[:, 1] - cyl_x0[1], eta[:, 0] - cyl_x0[0])
+        cyl_cos_phi = (eta[:, 0] - cyl_x0[0]) / cyl_R
+        cyl_sin_phi = (eta[:, 1] - cyl_x0[1]) / cyl_R
+
+        cyl = {
+            "cylR": cyl_R,
+            "cylz": cyl_z,
+            "cylphi": cyl_phi,
+        }
+
+        # Spherical
+        r = np.linalg.norm(eta[:, :3] - sph_x0, axis=1)
+        costheta = z / r
+        sph_R = np.linalg.norm(eta[:, :2] - sph_x0[:2], axis=1)
+        phi = np.arctan2(eta[:, 1] - sph_x0[1], eta[:, 0] - sph_x0[0])
+
+        sph = {"r": r, "cth": costheta, "phi": phi}
+
+        if has_velocities:
+            # Cartesian
+            vz = eta[:, 5]
+            cart = {**cart, **{"vx": eta[:, 3], "vy": eta[:, 4], "vz": vz}}
+
+            # Cylindrical
+            cyl_vR = eta[:, 3] * cyl_cos_phi + eta[:, 4] * cyl_sin_phi
+            cyl_vT = -eta[:, 3] * cyl_sin_phi + eta[:, 4] * cyl_cos_phi
+            cyl_vz = eta[:, 5]
+            cyl = {**cyl, **{"cylvR": cyl_vR, "cylvT": cyl_vT, "cylvz": cyl_vz}}
+
+            # Spherical
+            vr = np.sum((eta[:, :3] - sph_x0) * eta[:, 3:], axis=1) / r
+            vth = (z * vr - r * vz) / sph_R
+            cos_phi = (eta[:, 0] - sph_x0[0]) / cyl_R
+            sin_phi = (eta[:, 1] - sph_x0[1]) / cyl_R
+            vT = -eta[:, 3] * sin_phi + eta[:, 4] * cos_phi
+            sph = {**sph, **{"vth": vth, "vT": vT, "vr": vr}}
+
+    return dict(**cart, **cyl, **sph)
+
+
+def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=None):
+    """
+    Calculate the potential, acceleration and density implied by the
+    differentiable model of the potential. If specified, the results are saved to a file
+    in a subdirectory of fig_dir, named data.
+    Currently, the spatial dimension is expected to be in units of kpc
+    and velocity dimension 100 km/s. The conversion factor for rho
+    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
+    (100 km/s)^2/kpc
+
+    Parameters:
+        phi_model (dict): The model of the potential to be used.
+        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
+        fig_dir (str): The directory where the data is to be saved
+        fname (str): The name of the file where the data is to be saved
+    """
+    def get_sampling_progressbar_fn(n_batches, n_samples):
+        # Progressbar to make the sampling progress visible and nice!
+        widgets = [
+            progressbar.Percentage(), ' | ',
+            progressbar.Timer(format='Elapsed: %(elapsed)s'), ' | ',
+            progressbar.AdaptiveETA(), ' | ',
+            progressbar.Variable('batches_done', width=6, precision=0), ', ',
+            progressbar.Variable('n_batches', width=6, precision=0), ', ',
+            progressbar.Variable('n_samples', width=8, precision=0)
+        ]
+        bar = progressbar.ProgressBar(max_value=n_batches, widgets=widgets)
+
+        def update_progressbar(i):
+            bar.update(i+1, batches_done=i+1, n_batches=n_batches, n_samples=n_samples)
+
+        return update_progressbar
+
+    n0 = len(q_eval)
+    q_eval = tf.data.Dataset.from_tensor_slices(q_eval).batch(batch_size)
+
+    if fname is not None:
+        fname = os.path.join(fig_dir, f'data/{fname}_{n0}.npz')
+    if fname is None or (fname is not None and not os.path.exists(fname)):
+        rhos = []
+        accs = []
+        phis = []
+
+        bar, iteration = get_sampling_progressbar_fn(len(q_eval), n0), 0
+        for i, b in enumerate(q_eval):
+            phi,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+                phi_model['phi'], b, return_phi=True
+            )
+            rhos.append(2.325*d2phi_dq2.numpy()/(4*np.pi)) # [M_Sun/pc^3]
+            accs.append(-dphi_dq) # (100 km/s)^2/kpc
+            phis.append(phi)
+            bar(iteration)
+            iteration += 1
+        rhos = np.concatenate(rhos)
+        accs = np.concatenate(accs)
+        phis = np.concatenate(phis)
+        if fname is not None:
+            os.makedirs(os.path.join(fig_dir, 'data'), exist_ok=True)
+            np.savez(fname, phi=phis, acc=accs, rho=rhos)
+    else:
+        npzfile = np.load(fname)
+        rhos = npzfile['rho']
+        accs = npzfile['acc']
+        phis = npzfile['phi']
+
+    return phis, accs, rhos
 
 
 def main():
