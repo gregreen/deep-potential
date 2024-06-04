@@ -1,9 +1,9 @@
 numpy
-tensorflow
-tensorflow-probability
-tensorflow-addons
-keras
+tensorflow==2.14.0
+tensorflow-probability==0.22.1
+tensorflow-addons==0.23.0
 tensorboard
+keras==2.14.0
 numpy
 scipy
 matplotlib
@@ -13,3 +13,6 @@ progressbar2
 cerberus
 dm-sonnet
 pandas
+scikit-learn
+astropy-healpix
+reproject
