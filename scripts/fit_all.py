@@ -7,7 +7,6 @@ import tensorflow as tf
 print(f"Tensorflow version {tf.__version__}")
 # tf.debugging.set_log_device_placement(True)
 from tensorflow import keras
-import tensorflow_addons as tfa
 import tensorflow_probability as tfp
 
 print(f"Tensorflow Probability version {tfp.__version__}")
@@ -57,6 +56,7 @@ def train_flows(
     checkpoint_hours=None,
     max_checkpoints=None,
     neptune_run=None,
+    reset_flow_lr=False
 ):
     n_samples = data["eta"].shape[0]
     n_steps = n_samples * n_epochs // batch_size
@@ -105,6 +105,7 @@ def train_flows(
             checkpoint_dir=checkpoint_dir,
             checkpoint_name=checkpoint_name,
             neptune_run=neptune_run,
+            reset_flow_lr=reset_flow_lr,
             **lr_kw,
         )
 
@@ -498,6 +499,11 @@ def main():
         help="Filename pattern to store flows in.",
     )
     parser.add_argument(
+        "--reset-flow-lr",
+        action="store_true",
+        help="Reset the learning rate of the flow in the beginning (this is useful when loading in an old model).",
+    )
+    parser.add_argument(
         "--potential-fname",
         type=str,
         default="models/Phi/Phi",
@@ -591,7 +597,7 @@ def main():
             # Train and save normalizing flows
             print("Training normalizing flows ...")
             flows = train_flows(
-                data, args.flow_fname, **params["df"], neptune_run=neptune_run
+                data, args.flow_fname, **params["df"], neptune_run=neptune_run, reset_flow_lr=args.reset_flow_lr
             )
         # Re-load the flows (this removes the regularization terms)
         flows = load_flows(args.flow_fname)

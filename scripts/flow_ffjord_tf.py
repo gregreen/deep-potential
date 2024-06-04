@@ -314,6 +314,7 @@ def train_flow(
     checkpoint_dir=r"checkpoints/ffjord",
     checkpoint_name="ffjord",
     neptune_run=None,
+    reset_flow_lr=False,
 ):
     """
     Trains a flow using the given data.
@@ -386,26 +387,30 @@ def train_flow(
         n_samples // batch_size,
     )
 
-    if isinstance(optimizer, str):
-        if lr_type == "exponential":
-            lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-                lr_init, n_steps, lr_final / lr_init, staircase=False
-            )
-        elif lr_type == "step":
-            lr_schedule = lr_init
-            steps_since_decline = 0
+    def get_optimizer():
+        if isinstance(optimizer, str):
+            if lr_type == "exponential":
+                lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+                    lr_init, n_steps, lr_final / lr_init, staircase=False
+                )
+            elif lr_type == "step":
+                lr_schedule = lr_init
+                steps_since_decline = 0
+            else:
+                raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
+            if optimizer == "RAdam":
+                opt = tfa.optimizers.RectifiedAdam(
+                    lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
+                )
+            elif optimizer == "SGD":
+                opt = keras.optimizers.SGD(learning_rate=lr_schedule, momentum=0.5)
+            else:
+                raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
         else:
-            raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
-        if optimizer == "RAdam":
-            opt = tfa.optimizers.RectifiedAdam(
-                lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
-            )
-        elif optimizer == "SGD":
-            opt = keras.optimizers.SGD(learning_rate=lr_schedule, momentum=0.5)
-        else:
-            raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
-    else:
-        opt = optimizer
+            opt = optimizer
+        return opt
+    opt = get_optimizer()
+    steps_since_decline = 0
 
     print(f"Optimizer: {opt}")
 
@@ -438,15 +443,23 @@ def train_flow(
             checkpoint.restore(latest)
             print(f"Beginning from step {int(step)}.")
 
-            # Try to load loss history
-            loss_fname = f"{latest}_loss.txt"
-            (
-                train_loss_history,
-                val_loss_history,
-                lr_history,
-                _,
-                _,
-            ) = utils.load_loss_history(loss_fname)
+            if reset_flow_lr:
+                # Reset the learning rate, and also forgo loading loss history
+                # since the history is used for learning rate scheduling
+                # (TODO: this is bad practice!)
+                print("Resetting flow learning rate.")
+                opt = get_optimizer()
+                steps_since_decline = 0
+            else:
+                # Try to load loss history
+                loss_fname = f"{latest}_loss.txt"
+                (
+                    train_loss_history,
+                    val_loss_history,
+                    lr_history,
+                    _,
+                    _,
+                ) = utils.load_loss_history(loss_fname)
 
         # Convert from # of epochs to # of steps between checkpoints
         # checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -482,44 +495,10 @@ def train_flow(
     update_bar = utils.get_training_progressbar_fn(n_steps, train_loss_history, opt)
 
     # Main training loop
+    # First we check for stopping conditions, then perform the training step
+    # and update the progress bar. The order is important in case we load in
+    # a checkpoint which has already satisfied the stopping conditions.
     for i, (y, y_val) in enumerate(zip(batches, val_batches), int(step)):
-        if i >= n_steps:
-            # Break if too many steps taken. This can occur
-            # if we began from a checkpoint.
-            break
-
-        train_loss = training_step(y)
-        val_loss = validation_step(y_val)
-
-        train_loss_history.append(float(train_loss))
-        val_loss_history.append(float(val_loss))
-        lr_history.append(float(opt._decayed_lr(tf.float32)))
-
-        if neptune_run is not None:
-            neptune_run["train/train_loss"].append(train_loss_history[-1])
-            neptune_run["train/val_loss"].append(val_loss_history[-1])
-            neptune_run["train/lr"].append(lr_history[-1])
-
-            epoch_counter -= 1
-            rounded_epoch_duration += 1
-            if epoch_counter <= -0.5:
-                # we say that a new epoch has started when
-                # integer*unrounded_steps_per_epoch \in [-0.5, 0.5]
-                neptune_run["train/epoch_train_loss"].append(
-                    np.mean(train_loss_history[-rounded_epoch_duration:])
-                )
-                neptune_run["train/epoch_val_loss"].append(
-                    np.mean(val_loss_history[-rounded_epoch_duration:])
-                )
-                neptune_run["train/epoch_lr"].append(
-                    np.mean(lr_history[-rounded_epoch_duration:])
-                )
-                epoch_counter += unrounded_steps_per_epoch
-                rounded_epoch_duration = 0
-
-        # Progress bar
-        update_bar(i)
-
         # Adjust learning rate?
         if lr_type == "step":
             n_smooth = max(lr_patience // 8, 1)
@@ -568,6 +547,38 @@ def train_flow(
             else:
                 steps_since_decline += 1
 
+        train_loss = training_step(y)
+        val_loss = validation_step(y_val)
+
+        train_loss_history.append(float(train_loss))
+        val_loss_history.append(float(val_loss))
+        lr_history.append(float(opt._decayed_lr(tf.float32)))
+
+        if neptune_run is not None:
+            neptune_run["train/train_loss"].append(train_loss_history[-1])
+            neptune_run["train/val_loss"].append(val_loss_history[-1])
+            neptune_run["train/lr"].append(lr_history[-1])
+
+            epoch_counter -= 1
+            rounded_epoch_duration += 1
+            if epoch_counter <= -0.5:
+                # we say that a new epoch has started when
+                # integer*unrounded_steps_per_epoch \in [-0.5, 0.5]
+                neptune_run["train/epoch_train_loss"].append(
+                    np.mean(train_loss_history[-rounded_epoch_duration:])
+                )
+                neptune_run["train/epoch_val_loss"].append(
+                    np.mean(val_loss_history[-rounded_epoch_duration:])
+                )
+                neptune_run["train/epoch_lr"].append(
+                    np.mean(lr_history[-rounded_epoch_duration:])
+                )
+                epoch_counter += unrounded_steps_per_epoch
+                rounded_epoch_duration = 0
+
+        # Progress bar
+        update_bar(i)
+
         if not traced:
             # Get time after gradients function is first traced
             traced = True
@@ -592,6 +603,11 @@ def train_flow(
             )
             fig.savefig(f"{chkpt_fname}_loss.pdf")
             plt.close(fig)
+
+        if i >= n_steps:
+            # Break if too many steps taken. This can occur
+            # if we began from a checkpoint.
+            break
 
     t2 = time()
     train_loss_avg = np.mean(train_loss_history[-50:])

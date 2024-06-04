@@ -765,9 +765,9 @@ def main():
             )
 
         print(fname_loss_pdf, os.path.isfile(fname_loss_pdf))
+        Path(fig_dir).mkdir(parents=True, exist_ok=True)
         if os.path.isfile(fname_loss_pdf):
             # Copy the latest loss over to the plots dir
-            Path(fig_dir).mkdir(parents=True, exist_ok=True)
             shutil.copy(fname_loss_pdf, fig_dir)
             shutil.copy(fname_loss_pdf[:-4] + "_noreg.pdf", fig_dir)
 
@@ -857,7 +857,6 @@ def main():
             y, z,
             dimforce,
             attrs=attrs_train,
-            padding=0.95,
             fig_fmt=args.fig_fmt,
         )
 

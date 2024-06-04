@@ -894,6 +894,78 @@ def plot_1d_slice(
     plt.close(fig)
 
 
+def calculate_and_store_loss(data, flows, fig_dir, batch_size=16384):
+    def evaluate_loss_(flow_list, eta_train, batch_size=16384):
+        def weighted_std(values, weights):
+            average = np.average(values, weights=weights)
+            # Fast and numerically precise:
+            variance = np.average((values - average)**2, weights=weights)
+            return np.sqrt(variance)
+
+        n_flows = len(flow_list)
+        n_samples = eta_train.shape[0]
+
+        n_batches = n_samples // batch_size
+        if np.mod(n_samples, batch_size) > 0:
+            n_batches += 1
+
+        loss = []
+        std = []
+        bar = progressbar.ProgressBar(max_value=n_batches * n_flows)
+
+        for i, flow in enumerate(flow_list):
+            loss_i = []
+            weight_i = []
+
+            @tf.function
+            def logp_batch(eta):
+                print("Tracing logp_batch ...")
+                return -tf.math.reduce_mean(flow.log_prob(eta))
+
+            for k in range(0, n_samples, batch_size):
+                eta = eta_train[k: k + batch_size].astype("f4")
+                loss_i.append(logp_batch(tf.constant(eta)).numpy())
+                weight_i.append(eta.shape[0])
+                bar.update(i * n_batches + k // batch_size + 1)
+
+            std.append(weighted_std(loss_i, weights=weight_i))
+            loss.append(np.average(loss_i, weights=weight_i))
+
+        loss_std = np.mean(std)
+        loss_mean = np.mean(loss)
+
+        return loss_mean, loss_std
+
+    # Extract train and validation sets
+    if "eta_train" in data and "eta_val" in data:
+        print("Flow training/validation batches were passed in manually..")
+        n_samples = data["eta_train"].shape[0]
+        n_val = data["eta_val"].shape[0]
+        val_batch_size = int(n_val / (n_samples + n_val) * batch_size)
+
+        eta_train = data["eta_train"]
+        eta_val = data["eta_val"]
+    else:
+        print("Forming flow training/validation batches..")
+        n_samples = data["eta"].shape[0]
+        n_val = int(0.25 * n_samples)
+
+        val_batch_size = int(0.25 * batch_size)
+        n_samples -= n_val
+
+        eta_val = data["eta"][:n_val]
+        eta_train = data["eta"][n_val:]
+
+    train_loss, train_loss_std = evaluate_loss_(flows, eta_train, batch_size)
+    val_loss, val_loss_std = evaluate_loss_(flows, eta_val, batch_size)
+
+    # Save the train loss into a txt
+    fname = os.path.join(fig_dir, "loss.txt")
+    with open(fname, "w") as f:
+        f.write(f"train_loss = {train_loss:.6f} +/- {train_loss_std:.6f}\n")
+        f.write(f"  val_loss = {val_loss:.6f} +/- {val_loss_std:.6f}\n")
+
+
 def main():
     """
     Plots different diagnostics for the flow and the training data.
@@ -1237,6 +1309,12 @@ def main():
             )
         except Exception:
             print("  --> Failed to plot 1d slice! Probably because the slice is empty.")
+
+    print("Calculating and storing training and validation loss ...")
+    if flows is None:
+        print("Loading flows ...")
+        flows = utils.load_flows(args.flows)
+    calculate_and_store_loss(data_train, flows, args.fig_dir)
 
     if args.plot_leastsq:
         print(
