@@ -341,6 +341,8 @@ def train_flow(
 
     # Split training/validation sample.
     # Handle the case where training/validation split has been manually done
+    has_weights = False
+
     if "eta_train" in data and "eta_val" in data:
         print("Flow training/validation batches were passed in manually..")
         n_samples = data["eta_train"].shape[0]
@@ -349,6 +351,11 @@ def train_flow(
 
         data_train = tf.constant(data["eta_train"])
         data_val = tf.constant(data["eta_val"])
+        if 'weights_train' in data and 'weights_val' in data:
+            has_weights = True
+            # Append weights as the last column in data tensors
+            data_train = tf.concat([data_train, tf.expand_dims(data['weights_train'], 1)], axis=1)
+            data_val = tf.concat([data_val, tf.expand_dims(data['weights_val'], 1)], axis=1)
     else:
         print("Forming flow training/validation batches..")
         n_samples = data["eta"].shape[0]
@@ -359,8 +366,15 @@ def train_flow(
 
         data_val = tf.constant(data["eta"][:n_val])
         data_train = tf.constant(data["eta"][n_val:])
+        if 'weights' in data:
+            has_weights = True
+            # Append weights as the last column in data tensors
+            data_train = tf.concat([data_train, tf.expand_dims(data['weights'][n_val:], 1)], axis=1)
+            data_val = tf.concat([data_val, tf.expand_dims(data['weights'][:n_val], 1)], axis=1)
 
     print(f"Train/validation split: {data_train.shape[0]}/{data_val.shape[0]}")
+    if has_weights:
+        print("Using weights in training/validation data.")
 
     # Create Tensorflow datasets
     batches = tf.data.Dataset.from_tensor_slices(data_train)
@@ -461,28 +475,42 @@ def train_flow(
     # Were it not for checkpointing, we could use i == 0.
     traced = False
 
-    @tf.function
-    def training_step(batch):
-        print(f"Tracing training_step with batch shape {batch.shape} ...")
-        variables = flow.trainable_variables
-        with tf.GradientTape() as g:
-            g.watch(variables)
-            train_loss = -tf.reduce_mean(flow.log_prob(batch))
-        grads = g.gradient(train_loss, variables)
-        # tf.print([(v.name,tf.norm(dv)) for v,dv in zip(variables,grads)])
-        grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
-        # grads,global_norm = tf.clip_by_global_norm(grads, 100.)
-        # tf.print('\nglobal_norm =', global_norm)
-        # tf.print([(v.name,tf.norm(v)) for v in grads])
-        # tf.print('loss =', loss)
-        opt.apply_gradients(zip(grads, variables))
-        return train_loss
+    if has_weights:
+        @tf.function
+        def training_step(batch):
+            print(f"Tracing training_step with batch shape {batch.shape} ...")
+            variables = flow.trainable_variables
+            with tf.GradientTape() as g:
+                g.watch(variables)
+                train_loss = -tf.reduce_mean(flow.log_prob(batch[:, :-1]) * batch[:, -1])
+            grads = g.gradient(train_loss, variables)
+            grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
+            opt.apply_gradients(zip(grads, variables))
+            return train_loss
 
-    @tf.function
-    def validation_step(batch):
-        print(f"Tracing validation_step with batch shape {batch.shape} ...")
-        val_loss = -tf.reduce_mean(flow.log_prob(batch))
-        return val_loss
+        @tf.function
+        def validation_step(batch):
+            print(f"Tracing validation_step with batch shape {batch.shape} ...")
+            val_loss = -tf.reduce_mean(flow.log_prob(batch[:, :-1]) * batch[:, -1])
+            return val_loss
+    else:
+        @tf.function
+        def training_step(batch):
+            print(f"Tracing training_step with batch shape {batch.shape} ...")
+            variables = flow.trainable_variables
+            with tf.GradientTape() as g:
+                g.watch(variables)
+                train_loss = -tf.reduce_mean(flow.log_prob(batch))
+            grads = g.gradient(train_loss, variables)
+            grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
+            opt.apply_gradients(zip(grads, variables))
+            return train_loss
+
+        @tf.function
+        def validation_step(batch):
+            print(f"Tracing validation_step with batch shape {batch.shape} ...")
+            val_loss = -tf.reduce_mean(flow.log_prob(batch))
+            return val_loss
 
     update_bar = utils.get_training_progressbar_fn(n_steps, train_loss_history, opt)
     t1 = None
@@ -620,6 +648,7 @@ def train_flow(
 
 def main():
     from scipy.stats import multivariate_normal
+    test_weights = True
 
     flow = FFJORDFlow(n_dim=2, n_hidden=5, hidden_size=20, n_bij=1)
 
@@ -629,22 +658,45 @@ def main():
 
         shutil.rmtree("checkpoints/ffjord")
 
-    n_samples = 8 * 1024
+    n_samples = 16 * 1024
     mu = [[-2, 0.0], [2, 0.0]]
     cov = [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]]]
-    data = {}
-    data['eta'] = tf.concat(
-        [
-            np.random.multivariate_normal(m, c, n_samples // 2).astype("f4")
-            for m, c in zip(mu, cov)
-        ],
-        axis=0,
-    )
-    # Shuffle the data
-    data['eta'] = tf.random.shuffle(data['eta'])
 
-    plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], bins=128, cmap="Blues")
-    plt.savefig("data.png")
+    data = {}
+    if test_weights:
+        # Uniformly sample a grid between -4 and 4 and -3 and 3
+        x = np.linspace(-4, 4, int(n_samples**0.5))
+        y = np.linspace(-3, 3, int(n_samples**0.5))
+        print(int(n_samples**0.5))
+        x, y = np.meshgrid(x, y)
+        x = x.flatten()
+        y = y.flatten()
+        data['eta'] = np.vstack([x, y]).T
+
+        # Calculate the weights
+        weights = (multivariate_normal.pdf(data['eta'], mean=mu[0], cov=cov[0]) +
+                   multivariate_normal.pdf(data['eta'], mean=mu[1], cov=cov[1]))/2
+        data['weights'] = weights
+        # Shuffle the data
+        perm = np.random.permutation(n_samples)
+        data['eta'] = tf.constant(data['eta'][perm].astype('f4'))
+        data['weights'] = tf.constant(data['weights'][perm].astype('f4'))
+
+        plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], weights=data['weights'], bins=128, cmap="Blues")
+        plt.savefig("data_weights.png")
+    else:
+        data['eta'] = tf.concat(
+            [
+                np.random.multivariate_normal(m, c, n_samples // 2).astype("f4")
+                for m, c in zip(mu, cov)
+            ],
+            axis=0,
+        )
+
+        # Shuffle the data
+        data['eta'] = tf.random.shuffle(data['eta'])
+        plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], bins=128, cmap="Blues")
+        plt.savefig("data.png")
 
     train_flow(
         flow, data, batch_size=1024, n_epochs=16, checkpoint_every=256,
@@ -657,7 +709,8 @@ def main():
 
     samples = flow.sample(32 * 1024)
     plt.hist2d(samples[:, 0], samples[:, 1], bins=128, cmap="Blues")
-    plt.savefig("samples.png")
+    fname = "samples.png" if not test_weights else "samples_weights.png"
+    plt.savefig(fname)
 
     x = tf.random.normal([5, 2])
 
