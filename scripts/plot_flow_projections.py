@@ -561,15 +561,20 @@ def plot_2d_slice(
     plt.close(fig)
 
 
-def evaluate_loss(flow_list, eta_train, batch_size=1024):
+def evaluate_loss(flow_list, eta, weights=None, batch_size=16384):
+    def weighted_std(values, weights):
+        average = np.average(values, weights=weights)
+        variance = np.average((values - average)**2, weights=weights)
+        return np.sqrt(variance)
+    
     n_flows = len(flow_list)
-    n_samples = eta_train.shape[0]
+    n_samples = eta.shape[0]
 
     # Sample from ensemble of flows
     # n_batches = n_samples // batch_size
-    # eta_batches = np.reshape(eta_train, (n_batches,batch_size,6)).astype('f4')
+    # eta_batches = np.reshape(eta, (n_batches,batch_size,6)).astype('f4')
     # eta_batches = [
-    #    eta_train[i0:i0+batch_size].astype('f4')
+    #    eta[i0:i0+batch_size].astype('f4')
     #    for i0 in range(0,n_samples,batch_size)
     # ]
     # n_batches = len(eta_batches)
@@ -577,6 +582,7 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     if np.mod(n_samples, batch_size) > 0:
         n_batches += 1
 
+    std = []
     loss = []
     bar = progressbar.ProgressBar(max_value=n_batches * n_flows)
 
@@ -585,16 +591,21 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
         weight_i = []
 
         @tf.function
-        def logp_batch(eta):
+        def logp_batch(eta, weights=None):
             print("Tracing logp_batch ...")
-            return -tf.math.reduce_mean(flow.log_prob(eta))
+            if weights is not None:
+                return -tf.math.reduce_mean(flow.log_prob(eta) * weights)
+            else:
+                return -tf.math.reduce_mean(flow.log_prob(eta))
 
         for k in range(0, n_samples, batch_size):
-            eta = eta_train[k: k + batch_size].astype("f4")
-            loss_i.append(logp_batch(tf.constant(eta)).numpy())
-            weight_i.append(eta.shape[0])
+            eta_k = eta[k: k + batch_size].astype("f4")
+            weight_k = tf.constant(weights[k: k + batch_size]) if weights is not None else None
+            loss_i.append(logp_batch(tf.constant(eta_k), weight_k).numpy())
+            weight_i.append(np.sum(weight_k))
             bar.update(i * n_batches + k // batch_size + 1)
 
+        std.append(weighted_std(loss_i, weights=weight_k))
         loss.append(np.average(loss_i, weights=weight_i))
 
     loss_std = np.std(loss)
@@ -895,47 +906,6 @@ def plot_1d_slice(
 
 
 def calculate_and_store_loss(data, flows, fig_dir, batch_size=16384):
-    def evaluate_loss_(flow_list, eta_train, batch_size=16384):
-        def weighted_std(values, weights):
-            average = np.average(values, weights=weights)
-            # Fast and numerically precise:
-            variance = np.average((values - average)**2, weights=weights)
-            return np.sqrt(variance)
-
-        n_flows = len(flow_list)
-        n_samples = eta_train.shape[0]
-
-        n_batches = n_samples // batch_size
-        if np.mod(n_samples, batch_size) > 0:
-            n_batches += 1
-
-        loss = []
-        std = []
-        bar = progressbar.ProgressBar(max_value=n_batches * n_flows)
-
-        for i, flow in enumerate(flow_list):
-            loss_i = []
-            weight_i = []
-
-            @tf.function
-            def logp_batch(eta):
-                print("Tracing logp_batch ...")
-                return -tf.math.reduce_mean(flow.log_prob(eta))
-
-            for k in range(0, n_samples, batch_size):
-                eta = eta_train[k: k + batch_size].astype("f4")
-                loss_i.append(logp_batch(tf.constant(eta)).numpy())
-                weight_i.append(eta.shape[0])
-                bar.update(i * n_batches + k // batch_size + 1)
-
-            std.append(weighted_std(loss_i, weights=weight_i))
-            loss.append(np.average(loss_i, weights=weight_i))
-
-        loss_std = np.mean(std)
-        loss_mean = np.mean(loss)
-
-        return loss_mean, loss_std
-
     # Extract train and validation sets
     if "eta_train" in data and "eta_val" in data:
         print("Flow training/validation batches were passed in manually..")
@@ -956,8 +926,8 @@ def calculate_and_store_loss(data, flows, fig_dir, batch_size=16384):
         eta_val = data["eta"][:n_val]
         eta_train = data["eta"][n_val:]
 
-    train_loss, train_loss_std = evaluate_loss_(flows, eta_train, batch_size)
-    val_loss, val_loss_std = evaluate_loss_(flows, eta_val, batch_size)
+    train_loss, train_loss_std = evaluate_loss(flows, eta_train, batch_size)
+    val_loss, val_loss_std = evaluate_loss(flows, eta_val, batch_size)
 
     # Save the train loss into a txt
     fname = os.path.join(fig_dir, "loss.txt")
@@ -1227,7 +1197,7 @@ def main():
         plot_1d_marginals(
             coords_train, coords_sample,
             args.fig_dir,
-            loss=loss_mean,
+            #loss=loss_mean,
             coordsys=coordsys,
             fig_fmt=args.fig_fmt,
         )

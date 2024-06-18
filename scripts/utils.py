@@ -82,6 +82,8 @@ def load_training_data(fname, cut_attrs=False):
             attrs = dict(f["eta"].attrs.items())
 
             data["eta"] = f["eta"][:].astype("f4")
+            if "weights" in f.keys():
+                data["weights"] = f["weights"][:].astype("f4")
 
             if cut_attrs:
                 data["eta"] = cut(data["eta"], attrs)
@@ -95,6 +97,9 @@ def load_training_data(fname, cut_attrs=False):
                 if cut_attrs:
                     data["eta_train"] = cut(data["eta_train"], attrs)
                     data["eta_val"] = cut(data["eta_val"], attrs)
+            if "weights_train" in f.keys() and "weights_val" in f.keys():
+                data["weights_train"] = f["weights_train"][:].astype("f4")
+                data["weights_val"] = f["weights_val"][:].astype("f4")
 
             attrs["has_spatial_cut"] = True if attrs != {} else False
             attrs["n"] = len(data["eta"])
