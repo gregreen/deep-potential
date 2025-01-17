@@ -597,7 +597,15 @@ def plot_potential_param_evolution(potential_params_hist, fig_dir, fig_fmt=("svg
         "mn_amp": r"mn$_\mathrm{amp}$",
         "mn_a": r"mn$_\mathrm{a}$",
         "mn_b": r"mn$_\mathrm{b}$",
-        "mn_amp": r"mn$_\mathrm{amp}$",
+        "mn1_amp": r"mn$_\mathrm{amp,1}$",
+        "mn1_a": r"mn$_\mathrm{a,1}$",
+        "mn1_b": r"mn$_\mathrm{b,1}$",
+        "mn2_amp": r"mn$_\mathrm{amp,2}$",
+        "mn2_a": r"mn$_\mathrm{a,2}$",
+        "mn2_b": r"mn$_\mathrm{b,2}$",
+        "mn3_amp": r"mn$_\mathrm{amp,3}$",
+        "mn3_a": r"mn$_\mathrm{a,3}$",
+        "mn3_b": r"mn$_\mathrm{b,3}$",
         "halo_amp": r"$\mathrm{halo}_\mathrm{amp}$",
         "halo_a": r"$\mathrm{halo}_\mathrm{a}$",
         "bulge_amp": r"$\mathrm{bulge}_\mathrm{amp}$",
@@ -676,7 +684,7 @@ def plot_potential_param_evolution(potential_params_hist, fig_dir, fig_fmt=("svg
         if np.abs(np.log10(np.abs(values[-1]))) < 3:
             new_label = f"{label} = {values[-1]:.3f}"
         ax.plot(values, label=new_label, lw=1.0)
-        ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+        #ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
         ax.set_xlim(0, len(values) - 1)
         ax.legend(handlelength=0, handletextpad=0)
 

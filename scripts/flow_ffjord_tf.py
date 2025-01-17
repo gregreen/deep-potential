@@ -333,7 +333,7 @@ def train_flow(
           'checkpoints/ffjord/'.
       checkpoint_name (str): Name to save checkpoints under. Defaults
           to 'ffjord'.
-      checkpoint_every (int): Checkpoint every N steps. Defaults to 128.
+      checkpoint_every (int): Checkpoint every N epochs. Defaults to 128.
 
     Returns:
       loss_history (list of floats): Loss after each training iteration.
@@ -611,7 +611,7 @@ def train_flow(
             t1 = time()
 
         # Checkpoint periodically or at the very end
-        if (checkpoint_at_end and i == n_steps - 1) or (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+        if (checkpoint_at_end and i == n_steps - 1) or ((checkpoint_every is not None) and i and not (i % checkpoint_steps)):
             print("Checkpointing ...")
             step.assign(i + 1)
             chkpt_fname = chkpt_manager.save()

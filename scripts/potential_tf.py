@@ -74,10 +74,12 @@ def get_phi_loss_gradients(
     f=None,
     df_dq=None,
     df_dp=None,
-    lam=1.0,
+    f_value=None,
+    alpha=1.0,
+    beta=1.0,
+    lambda_=1.0,
+    gamma=0,
     mu=0,
-    xi=1.0,
-    delf_delt_scale=1.0,
     l2=tf.constant(0.01),
     return_grads=True,
     return_loss_noreg=False,
@@ -125,6 +127,12 @@ def get_phi_loss_gradients(
         lam (scalar): Constant that determines how strongly to
             penalize negative matter densities. Larger values
             translate to stronger penalties. Defaults to 1.
+        mu (scalar): Constant that determines how strongly to
+            penalize positive matter densities. Larger values
+            translate to stronger penalties. Defaults to 0.
+        gamma (scalar): Constant that determines how strongly to
+            penalize positive matter densities using a linear penalty
+            on matter density. Defaults to 0.
 
         NOTE: weight_samples, sigma_q, sigma_p, eps_w aren't implemented
 
@@ -135,14 +143,12 @@ def get_phi_loss_gradients(
     """
 
     # If df/dq and df/dp are not provided, then calculate them
-    # from using the distribution function.
+    # using the distribution function.
     if f is not None:
-        _, df_dq, df_dp = calc_df_deta(f, q, p)
-    elif (df_dq is None) or (df_dp is None):
+        f_value, df_dq, df_dp = calc_df_deta(f, q, p)
+    elif (df_dq is None) or (df_dp is None) or (f_value is None):
         raise ValueError("If f is not provided, then df_dq and df_dp must be provided.")
 
-    c = xi
-    print(f"c = {c}")
 
     with tf.GradientTape(watch_accessed_variables=False) as g:
         if return_grads:
@@ -152,49 +158,36 @@ def get_phi_loss_gradients(
         dphi_dq, d2phi_dq2 = calc_phi_derivatives(phi, q)
 
         if frameshift is None:
-            # partial f / partial t = {H,f}
             df_dt = tf.reduce_sum(df_dp * dphi_dq - df_dq * p, axis=1)
 
-            null_hyp = df_dt
+            null_hyp = df_dt # Old loss
+            # null_hyp = df_dt / f_value # Penalizes \partial ln f / \partial t
         else:
             u, w = frameshift(q, p)
 
-            # TODO: add weighing
-
-            null_hyp = tf.reduce_sum((p - u) * df_dq - (dphi_dq + w) * df_dp, axis=1)
+            df_dt_omega = tf.reduce_sum((p - u) * df_dq - (dphi_dq + w) * df_dp, axis=1)
+            null_hyp = df_dt_omega # Old loss
+            # null_hyp = df_dt_omega / f_value # Penalizes \partial ln f / \partial t
 
         # Average over sampled points in phase space
-        likelihood = tf.math.asinh(c * tf.math.abs(null_hyp)) / c
-        # likelihood = tf.math.asinh(tf.math.abs(null_hyp))
-        tf.print("likelihood:", tf.reduce_mean(likelihood))
+        likelihood = tf.math.asinh(alpha * tf.math.abs(null_hyp)) / alpha
 
         if phi._name == "PhiNNAnalytic":
+            # Analytic potentials currently Not supported
             tf.print(type(phi))
-            # tf.print(f'mn (amp, a, b): ({phi._mn_amp.print_tensor()}, {phi._mn_a}, {phi._mn_b})')
-            # tf.print(f'a: {phi._mn_a.numpy()}')
-            # print(f'nm (amp, a, b): ({phi._mn_amp.numpy():.5f}, {phi._mn_a.numpy():.5f}, {phi._mn_b.numpy():.5f})')
 
-        if lam != 0:
-            prior_neg = tf.math.asinh(tf.clip_by_value(-d2phi_dq2, 0.0, np.inf))
-            # prior_neg = tf.clip_by_value(-d2phi_dq2, 0., np.inf)
-            tf.print("prior_neg:", tf.reduce_mean(lam * prior_neg))
-            # pneg_mean = tf.math.reduce_mean(prior_neg)
-            # pneg_max = tf.math.reduce_max(prior_neg)
-            # L_mean = tf.math.reduce_mean(likelihood)
-            # r = tf.norm(q, axis=1)
-            # r_max = tf.math.reduce_max(r)
-            # tf.print('     lambda =', lam)
-            # tf.print('        <L> =', L_mean)
-            # tf.print('  <penalty> =', pneg_mean)
-            # tf.print('penalty_max =', pneg_max)
-            # tf.print('      r_max =', r_max)
-            # tf.print('')
-            likelihood = likelihood + lam * prior_neg
+        if lambda_ != 0:
+            # prior_neg = tf.math.asinh(tf.clip_by_value(-d2phi_dq2, 0.0, np.inf)) # Old loss
+            prior_neg = tf.math.asinh(beta * tf.clip_by_value(-d2phi_dq2, 0.0, np.inf)) / beta
+            likelihood = likelihood + lambda_ * prior_neg
 
         if mu != 0:
             prior_pos = tf.math.asinh(tf.clip_by_value(d2phi_dq2, 0.0, np.inf))
-            tf.print("prior_pos:", tf.reduce_mean(mu * prior_pos))
             likelihood = likelihood + mu * prior_pos
+
+        if gamma != 0:
+            prior_pos = tf.clip_by_value(d2phi_dq2, 0.0, np.inf)
+            likelihood = likelihood + gamma * prior_pos
 
         # Regularization penalty
         # penalty = 0.
@@ -203,7 +196,7 @@ def get_phi_loss_gradients(
 
         # tf.print('likelihood:', tf.reduce_mean(likelihood))
         loss = tf.math.log(tf.reduce_mean(likelihood))
-        tf.print("loss (before penalty):", loss)
+        #tf.print("loss (before penalty):", loss)
         loss_noreg = tf.identity(loss)
         #    likelihood
         #    + lam*prior_neg
@@ -213,13 +206,13 @@ def get_phi_loss_gradients(
 
         # L2 penalty on all weights with l2penalty in their name, except for biases.
         if l2 != 0:
-            print(f"l2 = {l2}")
+            #print(f"l2 = {l2}")
             penalty = 0
             for p in params:
                 if ("l2penalty" in p.name) and not ("b:0" in p.name):
-                    print(f"L2 penalty on {p}")
+                    #print(f"L2 penalty on {p}")
                     penalty += l2 * tf.reduce_mean(p**2)
-            tf.print("L2 penalty:", penalty)
+            #tf.print("L2 penalty:", penalty)
             loss += penalty
 
     # Gradients of loss w.r.t. NN parameters
@@ -671,8 +664,10 @@ def train_potential(
     max_checkpoints=None,
     checkpoint_dir=r"checkpoints/Phi",
     checkpoint_name="Phi",
-    xi=1.0,
-    lam=1.0,
+    alpha=1.0,
+    beta=1.0,
+    lambda_=1.0,
+    gamma=0,
     mu=0,
     l2=0,
 ):
@@ -710,9 +705,11 @@ def train_potential(
             TODO: CheckpointManager currently doesn't clean all the auxilliary
             files when checkpoint number exceeds max_checkpoints.
         Loss settings: These influence how loss is calculated.
-            xi: Scale above which outliers are suppressed,
-            lam: Penalty for negative matter densities,
+            alpha: Scale above which outliers of \partial f / \partial t are suppressed,
+            lambda_: Strength of the penalty for negative matter densities,
+            beta: Scale above which outliers for negative matter densities are suppressed,
             mu: Penalty for positive matter densities,
+            gamma: Linear penalty for positive matter densities,
             l2: L2 penalty on weights in the models.
 
     Outputs:
@@ -724,12 +721,13 @@ def train_potential(
     # Split training/validation sample
     n_samples = df_data["eta"].shape[0]
     n_dim = df_data["eta"].shape[1] // 2
-    data = np.stack(
+    data = np.concatenate(
         [
             df_data["eta"][:, :n_dim].astype("f4"),  # q
             df_data["eta"][:, n_dim:].astype("f4"),  # p
             df_data["df_deta"][:, :n_dim].astype("f4"),  # df/dq
             df_data["df_deta"][:, n_dim:].astype("f4"),  # df/dp
+            df_data["f"][:,None].astype("f4"),  # f
         ],
         axis=1,
     )
@@ -761,16 +759,6 @@ def train_potential(
             [int(tf.size(param)) for param in frameshift_param]
         )
         print(f"{n_variables_frameshift} variables in the frameshift model.")
-
-    # Estimate typical scale of flows (with constant gravitational potential)
-    # delf_delt_scale = np.percentile(
-    #    np.abs(np.sum(
-    #        df_data['eta'][:,n_dim:] * df_data['df_deta'][:,:n_dim],
-    #        axis=1
-    #    )),
-    #    50.
-    # )
-    # print(f'Using del(f)/del(t) ~ {delf_delt_scale}')
 
     # Optimizer
     n_steps = n_epochs * n_samples // batch_size
@@ -861,7 +849,7 @@ def train_potential(
         print(f"Tracing training_step with batch shape {batch.shape} ...")
 
         # Unpack the data from the batch
-        q_b, p_b, df_dq_b, df_dp_b = [tf.squeeze(x) for x in tf.split(batch, 4, axis=1)]
+        q_b, p_b, df_dq_b, df_dp_b, f_value = [tf.squeeze(x) for x in tf.split(batch, (n_dim, n_dim, n_dim, n_dim, 1), axis=1)]
 
         # Calculate the loss and its gradients w.r.t. the parameters
         loss, loss_noreg, dloss_dparam = get_phi_loss_gradients(
@@ -872,16 +860,18 @@ def train_potential(
             p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
-            xi=xi,
-            delf_delt_scale=1,  # delf_delt_scale,
-            lam=lam,
+            f_value=f_value,
+            alpha=alpha,
+            beta=beta,
+            lambda_=lambda_,
             mu=mu,
+            gamma=gamma,
             l2=l2,
             return_loss_noreg=True,
         )
 
         dloss_dparam, global_norm = tf.clip_by_global_norm(dloss_dparam, 1.0)
-        tf.print("\nglobal norm:", global_norm)
+        #tf.print("\nglobal norm:", global_norm)
 
         # Take step using optimizer
         opt.apply_gradients(zip(dloss_dparam, phi_param + frameshift_param))
@@ -893,7 +883,7 @@ def train_potential(
         print(f"Tracing validation step with batch shape {batch.shape} ...")
 
         # Unpack the data from the batch
-        q_b, p_b, df_dq_b, df_dp_b = [tf.squeeze(x) for x in tf.split(batch, 4, axis=1)]
+        q_b, p_b, df_dq_b, df_dp_b, f_value = [tf.squeeze(x) for x in tf.split(batch, (n_dim, n_dim, n_dim, n_dim, 1), axis=1)]
 
         # Calculate the loss and its gradients w.r.t. the parameters
         loss, loss_noreg = get_phi_loss_gradients(
@@ -904,10 +894,12 @@ def train_potential(
             p_b,
             df_dq=df_dq_b,
             df_dp=df_dp_b,
-            xi=xi,
-            delf_delt_scale=1,  # delf_delt_scale,
-            lam=lam,
+            f_value=f_value,
+            alpha=alpha,
+            beta=beta,
+            lambda_=lambda_,
             mu=mu,
+            gamma=gamma,
             l2=l2,
             return_grads=False,
             return_loss_noreg=True,

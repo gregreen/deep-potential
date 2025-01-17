@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 matplotlib.rcParams["text.usetex"] = True
 import matplotlib.pyplot as plt
 from matplotlib import colors
+import cmasher as cmr
 
 import h5py
 import progressbar
@@ -34,258 +35,107 @@ import utils
 dpi = 200
 
 
-def plot_rho(
-    phi_model,
-    coords_train,
-    fig_dir,
-    dim1, dim2, dimz,
-    z,
-    attrs,
-    padding=0.95,
-    fig_fmt=("svg",),
-    save=True,
-):
+def plot_2d_slice_pot(phi_model, coords_ref, dim1, dim2, dim_plot, fig_dir, z_fill=0, attrs=None, fig_fmt=('pdf',), logscale=True, lims=None, fname_mask=None):
+    """
+    Currently only supports cartesian.
+    """
     labels = [
-        "$x\mathrm{\ [kpc]}$",
-        "$y\mathrm{\ [kpc]}$",
-        "$z\mathrm{\ [kpc]}$",
+        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$',
     ]
-    keys = ["x", "y", "z"]
+    keys = ['x', 'y', 'z']
+    labels = {k:l for k,l in zip(keys,labels)}
+    ikeys = {k:i for i, k in enumerate(keys)}
 
-    labels = {k: l for k, l in zip(keys, labels)}
-    ikeys = {k: i for i, k in enumerate(keys)}
-
-    fig, axs = plot_potential.plot_rho(
-        phi_model,
-        coords_train,
-        fig_dir,
-        dim1, dim2, dimz,
-        z,
-        padding=padding,
-        attrs=attrs,
-        fig_fmt=fig_fmt,
-        save=False,
-    )
-
-    ax_p, cax_p = axs[1, 0], axs[0, 0]
-    ax_r, cax_r = axs[1, 1], axs[0, 1]
-    ax_e, cax_e = axs[1, 2], axs[0, 2]
-    main_axs = [ax_p, ax_r, ax_e]
-
-    cax_p.set_title(r"$\Phi^*$", fontsize=10)
-    cax_r.set_title(r"$\rho^*\mathrm{\ [M_\odot/pc^3]}$", fontsize=10)
-    cax_e.set_title(r"$\rho_\mathrm{train}\mathrm{\ [1/pc^3]}$", fontsize=10)
-
-    for ax in main_axs:
-        ax.set_xlabel(labels[dim1], labelpad=0)
-
-    ax_p.set_ylabel(labels[dim2], labelpad=2)
-
-    if save:
-        for fmt in fig_fmt:
-            fname = os.path.join(fig_dir, f"phi_rho_{dim1}_{dim2}.{fmt}")
-            fig.savefig(fname, dpi=dpi, bbox_inches="tight")
-        plt.close(fig)
-    else:
-        return fig, axs
-
-
-def plot_force_2d_slice(
-    phi_model,
-    coords_train,
-    fig_dir,
-    dim1, dim2, dimz,
-    z,
-    attrs,
-    padding=0.95,
-    fig_fmt=("svg",),
-    save=True,
-):
-    labels = [
-        "$x\mathrm{\ [kpc]}$",
-        "$y\mathrm{\ [kpc]}$",
-        "$z\mathrm{\ [kpc]}$",
-    ]
     titles = [
-        "$F_x^*\:\mathrm{[10^4 km^2/(kpc\cdot s^2)]}$",
-        "$F_y^*\:\mathrm{[10^4 km^2/(kpc\cdot s^2)]}$",
-        "$F_z^*\:\mathrm{[10^4 km^2/(kpc\cdot s^2)]}$",
+        r'$\rho_\mathrm{model}\mathrm{\ (M_\odot/pc^3)}$',
+        r'$\Phi_\mathrm{model}\mathrm{\ (km^2/s^2)}$',
+        r'$a_x^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$',
+        r'$a_y^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$',
+        r'$a_z^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$',
     ]
-    keys = ["x", "y", "z"]
+    plot_keys = ['rho', 'phi', 'ax', 'ay', 'az']
+    titles = {k:t for k,t in zip(plot_keys, titles)}
+    iplot_keys = {k:i for i, k in enumerate(plot_keys)}
 
-    labels = {k: l for k, l in zip(keys, labels)}
-    ikeys = {k: i for i, k in enumerate(keys)}
 
-    fig, axs = plot_potential.plot_force_2d_slice(
-        phi_model,
-        coords_train,
-        fig_dir,
-        dim1, dim2, dimz,
-        z,
-        padding=padding,
-        attrs=attrs,
-        fig_fmt=fig_fmt,
-        save=False,
+    for dim in [dim1, dim2]:
+        if dim not in keys:
+            raise ValueError(f'dimension {dim} not supported')
+
+    fig, axs = plt.subplots(
+        2, 1,
+        figsize=(3, 3*1.1),
+        dpi=140,
+        gridspec_kw=dict(height_ratios=[0.2, 2])
     )
+    cax, ax = axs
 
-    ax_x, cax_x = axs[1, 0], axs[0, 0]
-    ax_y, cax_y = axs[1, 1], axs[0, 1]
-    ax_z, cax_z = axs[1, 2], axs[0, 2]
-    main_axs = [ax_x, ax_y, ax_z]
-    main_caxs = [cax_x, cax_y, cax_z]
+    # Determine the limits
+    if lims is None:
+        lims = []
+        k = 0.20
+        for x in coords_ref[dim1], coords_ref[dim2]:
+            xlim = (np.min(x), np.max(x))
+            lims.append(xlim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
 
-    for i, ax in enumerate(main_axs):
-        cax = main_caxs[i]
-        cax.set_title(titles[i])
+    # Generate the grid
+    grid_size = 128
+    x = np.linspace(xmin, xmax, grid_size + 1)
+    y = np.linspace(ymin, ymax, grid_size + 1)
+    X, Y = np.meshgrid(0.5*(x[1:]+x[:-1]), 0.5*(y[1:]+y[:-1]))
 
-    for ax in main_axs:
-        ax.set_xlabel(labels[dim1], labelpad=0)
-
-    ax_x.set_ylabel(labels[dim2], labelpad=2)
-
-    if save:
-        for fmt in fig_fmt:
-            fname = os.path.join(fig_dir, f"phi_force_slice_{dim1}_{dim2}.{fmt}")
-            fig.savefig(fname, dpi=dpi, bbox_inches="tight")
-        plt.close(fig)
+    q_grid = np.full(shape=(X.size, 3), fill_value=z_fill, dtype='f4')
+    q_grid[:,ikeys[dim1]] = X.ravel()
+    q_grid[:,ikeys[dim2]] = Y.ravel()
+    if fname_mask is not None:
+        mask = ~utils.get_mask_eta(q_grid, fname_mask, r_min=attrs['r_in'])[0]
     else:
-        return fig, axs
+        r_grid = np.sum(q_grid**2, axis=1)**0.5
+        mask = ~((r_grid < attrs['r_out']) & (r_grid > attrs['r_in']))
 
+    # Calculate the model rho
+    phi, acc, rho = utils.get_model_values(phi_model, q_grid)
+    phi = phi.flatten()
+    if dim_plot == 'phi':
+        values = phi
+    elif dim_plot == 'rho':
+        values = rho
+    elif dim_plot in ['ax', 'ay', 'az']:
+        values = acc[:,iplot_keys[dim_plot] - 2]
 
-def plot_force_1d_slice(
-    phi_model,
-    coords_train,
-    fig_dir,
-    dim1, dimy,
-    y, z,
-    dimforce,
-    attrs,
-    fig_fmt=("svg",),
-    save=True,
-):
-    labels = [
-        "$x\mathrm{\ [kpc]}$",
-        "$y\mathrm{\ [kpc]}$",
-        "$z\mathrm{\ [kpc]}$",
-    ]
-    force_labels = [
-        "$F_x^*\:\mathrm{[10^4 km^2/(kpc\cdot s^2)]}$",
-        "$F_y^*\:\mathrm{[10^4 km^2/(kpc\cdot s^2)]}$",
-        "$\Sigma_z^*\:\mathrm{[M_\odot/pc^2]}$",
-    ]
+    values = np.ma.masked_where(mask, values)
+    values = np.reshape(values, X.shape)
 
-    keys = ["x", "y", "z"]
-
-    labels = {k: l for k, l in zip(keys, labels)}
-    force_labels = {k: l for k, l in zip(keys, force_labels)}
-    ikeys = {k: i for i, k in enumerate(keys)}
-
-    fig, ax = plt.subplots(figsize=(3, 3), dpi=200)
-
-    # Get the plot limits
-    k = 0.2
-    xlim = np.percentile(coords_train[dim1], [1.0, 99.0])
-    w = xlim[1] - xlim[0]
-    xlim = [xlim[0] - k * w, xlim[1] + k * w]
-    xmin, xmax = xlim
-
-    x_plot = np.linspace(xmin, xmax, 512)
-    eta_plot = np.full(shape=(len(x_plot), 3), fill_value=z, dtype="f4")
-    eta_plot[:, ikeys[dimy]] = y
-    eta_plot[:, ikeys[dim1]] = x_plot
-
-    _, dphi_dq, d2phi_dq2 = potential_tf.calc_phi_derivatives(
-        phi_model["phi"], eta_plot, return_phi=True
-    )
-    Z_plot = -dphi_dq[:, ikeys[dimforce]].numpy()
-
-    if dim1 == "z" and dimforce == "z":
-        # with F_z - z, plot the implied surface density instead
-        Z_plot *= -367.5
-
-    if attrs["has_spatial_cut"]:
+    # Apply a spatial cut, if passed
+    if attrs is not None:
         # Visualise the boundaries
-        plot_flow_projections.add_1dpopulation_boundaries([ax], dim1, attrs)
+        plot_flow_projections.add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color='black')
 
-        # Mask for the area for which phi and rho are plotted
-        r2 = x_plot**2 + y**2 + z**2
-        if dim1 == "z":
-            actual_z = x_plot
-        elif dimy == "z":
-            actual_z = y
-        else:
-            actual_z = z
-        R2 = r2 - actual_z**2
-
-        mask_ = utils.get_index_of_points_inside_attrs(
-            None, attrs, r2**0.5, R2**0.5, actual_z
-        )
-
-        ax.plot(
-            x_plot[~mask_ & (x_plot > 0)],
-            Z_plot[~mask_ & (x_plot > 0)],
-            color="tab:blue",
-        )
-        ax.plot(
-            x_plot[~mask_ & (x_plot < 0)],
-            Z_plot[~mask_ & (x_plot < 0)],
-            color="tab:blue",
-        )
+    if logscale:
+        kw = dict(cmap='cubehelix', norm=colors.LogNorm(), rasterized=True)
     else:
-        ax.plot(x_plot, Z_plot, color="tab:blue")
+        vmin, vmax = np.nanpercentile(values.compressed(), [1, 99])
+        w = vmax - vmin
+        kw = dict(cmap='cmr.rainforest', vmin=vmin - 0.1*w, vmax=vmax + 0.1*w, rasterized=True)
+    # Plot model values
+    hh = ax.pcolormesh(x, y, values, **kw)
+    # Set the colorbar
+    cb = fig.colorbar(hh, cax=cax, orientation='horizontal')
+    cb.ax.xaxis.set_ticks_position('top')
 
-    # ax.set_xlim(-r_max, r_max)
-    # ax.set_ylim(-r_max, r_max)
-    ax.set_xlabel(labels[dim1])
-    ax.set_ylabel(f"{force_labels[dimforce]}")
+    cax.set_title(titles[dim_plot], fontsize=10)
 
-    # Plot the ideal curves
-    if dim1 == "z" and dimforce == "z":
-        z0 = 255.6  # [pc]
-        rho0 = 0.0474  # [1/(M_sun*pc^3)]
-        sigma_z = 68 * x_plot / 1.1
-        # sigma_z = 2*xs/np.abs(xs)*rho0*z0*(1 - np.exp(-np.abs(xs)*1000/z0))
-        # print(az)
-        ax.plot(
-            x_plot,
-            sigma_z,
-            color="tab:red",
-            label=r"Bovy\&Rix 2013, $\Sigma_{z=1.1\mathrm{kpc}}=68\pm 4 M_\odot/\mathrm{pc}^2$",
-        )
-        ax.fill_between(
-            x_plot, 64 * x_plot / 1.1, 72 * x_plot / 1.1, alpha=0.3, color="tab:red"
-        )
-        ax.axhline(0, color="black", lw=0.5)
-        ax.axvline(0, color="black", lw=0.5)
-    if dim1 == "x" and dimforce == "x":
-        u = 2.2  # Approximate rotation curve in MW [100 km/s]
-        r0 = 8.3  # Distance to MW centre [kpc]
-        # Plot the forces assuming constant velocity profile
-        ax.plot(
-            x_plot,
-            u**2 / r0 * (1 + x_plot / r0),
-            color="tab:red",
-            label="ideal constant rotation curve",
-        )
-    if dim1 == "y" and dimforce == "y":
-        u = 2.2  # Approximate rotation curve in MW [100 km/s]
-        r0 = 8.3  # Distance to MW centre [kpc]
-        # Plot the forces assuming constant velocity profile
-        ax.plot(
-            x_plot,
-            -(u**2) / r0**2 * x_plot,
-            color="tab:red",
-            label="ideal constant rotation curve",
-        )
+    ax.set_xlabel(labels[dim1], labelpad=0)
+    ax.set_ylabel(labels[dim2], labelpad=2)
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
 
-    ax.legend()
-    if save:
-        for fmt in fig_fmt:
-            fname = os.path.join(fig_dir, f"phi_force_slice_{dim1}.{fmt}")
-            fig.savefig(fname, dpi=dpi, bbox_inches="tight")
-        plt.close(fig)
-    else:
-        return fig, ax
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'2d_slice_{dim1}_{dim2}_{dim_plot}.{fmt}')
+        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
 
 
 def plot_dfdt_comparison(
@@ -679,6 +529,231 @@ def plot_custom_potential_marginal(
     return
 
 
+def generate_grid(r_out, r_in, n_bins=200, fname_mask=None):
+    a_spacing = 2 * r_out / n_bins
+
+    print(f'Generating a grid with spacing {a_spacing*1000:.1f} pc')
+    volume_total = 4/3*np.pi*(r_out**3 - r_in**3)
+
+    n_grid = int(volume_total / a_spacing**3)
+
+    def centered_spacing(minv, maxv, step):
+        # Makes it so 0 is always included as one of the center-points
+        return np.concatenate([np.arange(-step, minv - 1e-9, step=-step)[::-1], np.arange(0, maxv + 1e-9, step=step)], axis=0)
+
+    x_grid = centered_spacing(-r_out, r_out, step=a_spacing)
+    y_grid = centered_spacing(-r_out, r_out, step=a_spacing)
+    z_grid = centered_spacing(-r_out, r_out, step=a_spacing)
+
+    X_grid, Y_grid, Z_grid = np.meshgrid(x_grid, y_grid, z_grid, indexing='ij')
+
+    q_grid = np.zeros(shape=(X_grid.size, 3), dtype='f4')
+    q_grid[:,0] = X_grid.ravel()
+    q_grid[:,1] = Y_grid.ravel()
+    q_grid[:,2] = Z_grid.ravel()
+
+    r_grid = np.sum(q_grid**2, axis=1)**0.5
+    idx = (r_grid < r_out) & (r_grid > r_in)
+    print(f'Grid total volume: {a_spacing**3*np.sum(idx):.4f} kpc^3')
+    if fname_mask is not None:
+        mask, hp = utils.get_mask_eta(q_grid, fname_mask, r_min=r_in, r_max=r_out)
+        print(np.sum(idx))
+        idx = idx & mask
+        print(np.sum(idx))
+        print(f'Masked grid total volume: {a_spacing**3*np.sum(idx):.4f} kpc^3')
+    q_grid = q_grid[idx]
+
+    return q_grid
+
+
+def plot_2dhist(
+    x, y, weights, dim1, dim2, fig_dir, fig_fmt, bins=(128, 128), xlim=None, ylim=None, cmap='cmr.rainforest', **kwargs
+):
+    labels = [
+        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$R\mathrm{\ (kpc)}$', r'$\varphi\mathrm{\ (rad)}$',
+        r'$\rho_\mathrm{model}\mathrm{\ (M_\odot/pc^3)}$', r'$\Phi_\mathrm{model}\mathrm{\ (km^2/s^2)}$', r'$a_x^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$',
+        r'$a_y^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$', r'$a_z^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$',
+        r'$a_\varphi^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$', r'$a_R^*\mathrm{\ (10^4 km^2/(kpc\cdot s^2))}$'
+    ]
+    keys = [
+        'x', 'y', 'z', 'cylR', 'cylphi',
+        'rho', 'phi', 'ax',
+        'ay', 'az',
+        'acylphi', 'acylR'
+    ]
+    labels = {k:l for k,l in zip(keys,labels)}
+    ikeys = {k:i for i, k in enumerate(keys)}
+
+    fig, axs = plt.subplots(
+        2, 1,
+        figsize=(4, 4.2),
+        gridspec_kw=dict(width_ratios=[3], height_ratios=[0.2, 4]),
+        layout='compressed'
+    )
+    cax, ax = axs
+
+    # Get the plot limits
+    lims = []
+    for i, lim in enumerate([xlim, ylim]):
+        if lim is None:
+            lim = np.percentile([x, y][i], [1.0, 99.0])
+            w = lim[1] - lim[0]
+            lim = [lim[0] - 0.1 * w, lim[1] + 0.1 * w]
+        lims.append(lim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+
+    x_bins = np.linspace(xmin, xmax, bins[0])
+    y_bins = np.linspace(ymin, ymax, bins[1])
+
+    n = np.histogram2d(x, y, bins=[x_bins, y_bins])[0]
+    # # Normalize n along the y-axis
+    #n = n / np.max(n, axis=1, keepdims=True)
+    val_avg = binned_statistic(x, y, np.median, bins=x_bins).statistic
+    val_std = binned_statistic(x, y, lambda x: (np.percentile(x, 84.135) - np.percentile(x, 15.865))/2, bins=x_bins).statistic
+    x_bins_c = 0.5 * (x_bins[1:] + x_bins[:-1])
+    l = len(x_bins_c)
+    idx = (np.arange(l) > l / 4) & (np.arange(l) < 3 * l / 4)
+    peak_x = x_bins_c[idx][np.argmax(val_avg[idx], axis=0)]
+
+    im = ax.imshow(
+        n.T,
+        origin="lower",
+        extent=(xmin, xmax, ymin, ymax),
+        aspect="auto",
+        cmap=cmap,
+        vmin=0,
+        **kwargs,
+    )
+    cb = fig.colorbar(im, cax=cax, orientation="horizontal")
+
+    ax.plot(x_bins_c, val_avg, color='tab:red', lw=0.5, label=f'median, peak={peak_x:.3f}')
+    ax.fill_between(x_bins_c, val_avg - val_std, val_avg + val_std, lw=0.5, alpha=0.15, color='tab:red')
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.legend()
+
+    ax.set_xlabel(labels[dim1])
+    ax.set_ylabel(labels[dim2])
+    cb.ax.xaxis.set_ticks_position("top")
+    cb.ax.locator_params(nbins=5)
+
+    for fmt in fig_fmt:
+        fname = os.path.join(fig_dir, f'2d_hist_{dim1}_{dim2}.{fmt}')
+        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_2dhist_wrapper(
+    x, y, values=None, operation="count",
+    bins=(64, 64),
+    xlabel="$x$",
+    ylabel="$y$",
+    lims=None,
+    title=None,
+    cmap='cmr.rainforest',
+    fig=None, ax=None, cax=None,
+    normalize_along_axis=None,
+    **kwargs
+):
+    if fig is None:
+        fig, axs = plt.subplots(
+            2, 1,
+            figsize=(4, 4.2),
+            gridspec_kw=dict(width_ratios=[3], height_ratios=[0.1, 3]),
+            layout='compressed'
+        )
+    cax, ax = axs
+
+    # Get the plot limits
+    if lims is None:
+        lims = []
+        k = 1.1
+        for x_ in [x, y]:
+            xlim = np.percentile(x_, [1.0, 99.0])
+            w = xlim[1] - xlim[0]
+            xlim = [xlim[0] - 0.2 * w, xlim[1] + 0.2 * w]
+            lims.append(xlim)
+    xmin, xmax = lims[0]
+    ymin, ymax = lims[1]
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    x_bins = np.linspace(xmin, xmax, bins[0])
+    y_bins = np.linspace(ymin, ymax, bins[1])
+
+    ret = binned_statistic_2d(
+        x, y, values, statistic=operation, bins=[x_bins, y_bins]
+    ).statistic.T
+    if normalize_along_axis == 0:
+        ret /= (np.max(ret, axis=normalize_along_axis) + 1e-10)[None, :]
+    elif normalize_along_axis == 1:
+        ret /= (np.max(ret, axis=normalize_along_axis) + 1e-10)[:, None]
+
+    # Choose a suitable colormap
+    if operation == "count":
+        kwargs["vmin"] = 0
+
+    im = ax.imshow(
+        ret,
+        origin="lower",
+        extent=(xmin, xmax, ymin, ymax),
+        aspect="auto",
+        cmap=cmap,
+        **kwargs,
+    )
+    ret = binned_statistic(x, y, statistic=np.median, bins=x_bins).statistic # TODO not a proper median to weighing with f
+    n = binned_statistic(x, y, statistic='count', bins=x_bins).statistic
+    #print(x_bins, n)
+    #ax.plot(0.5*(x_bins[1:] + x_bins[:-1]), ret, label="median", lw=1, color='tab:red', alpha=1)
+    if cax is not None:
+        cb = fig.colorbar(im, cax=cax, orientation="horizontal")
+        cb.ax.xaxis.set_ticks_position("top")
+        cb.ax.locator_params(nbins=5)
+        # TODO: Title not appearing without cax
+        if title is not None:
+            cax.set_title(title)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    return fig, axs
+
+
+'''def plot_fourier_spectrum(q_grid, rho, fig_dir, fig_fmt):
+    """
+    Computes the fourier components along x-, y- and z-axes for the density field rho.
+    """
+    labels = ['$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$',]
+    keys = ['x', 'y', 'z']
+    labels = {k:l for k,l in zip(keys, labels)}
+    ikeys = {k:i for i,k in enumerate(keys)}
+
+    fig, axs = plt.subplots(
+        3, 1,
+        figsize=(6, 3),
+        dpi=200,
+        gridspec_kw=dict(height_ratios=[1, 1, 1])
+    )
+
+    for i, dim in enumerate(keys):
+        ax = axs[i]
+        ax.set_title(labels[dim])
+
+        # Compute the fourier spectrum
+        x = q_grid[:, i]
+
+
+        rho_grid = np.sum(rho_grid, axis=ikeys[dim])
+        rho_grid = np.fft.fftshift(rho_grid)
+        rho_grid = np.fft.ifftn(rho_grid)
+
+        # Plot the spectrum
+        ax.plot(rho_grid)
+        ax.set_yscale('log')
+    return'''
+
+
 def main():
     """
     Plots different diagnostics for the potential (with frameshift) and flows
@@ -707,7 +782,15 @@ def main():
         "--df-grads-fname",
         type=str,
         default="data/df_gradients.h5",
+        required=True,
         help="Directory in which to store the flow samples (positions and f gradients).",
+    )
+    parser.add_argument(
+        "--fname-mask",
+        type=str,
+        required=False,
+        default=None,
+        help="Filename for the mask for the samples. The mask is in max distance - healpix format.",
     )
     parser.add_argument(
         "--fig-dir", type=str, default="plots", help="Directory to put figures in."
@@ -730,7 +813,7 @@ def main():
         "--fig-fmt",
         type=str,
         nargs="+",
-        default=("svg",),
+        default=("png",),
         help="Formats in which to save figures (svg, png, pdf, etc.).",
     )
     parser.add_argument(
@@ -742,15 +825,28 @@ def main():
         help="Automatically saves/loads samples and chooses fig dir. Incompatible with fig-dir.\
             The saving location is in plots/ in a subdir deduced from the potential directory.",
     )
+    parser.add_argument(
+        "--potential-mask",
+        type=str,
+        required=False,
+        default=None,
+        help="Filename for the mask for the potential. The mask is in distance - healpix format.",
+    )
     args = parser.parse_args()
 
-    # Load in the custom style sheet for scientific plotting
-    plt.style.use("scientific")
+    params = {
+        'text.usetex': True,
+        'font.size': 10,
+        'font.family': 'lmodern',
+        'figure.dpi': 250
+    }
+    plt.rcParams.update(params)
+
     if args.dark:
         plt.style.use("dark_background")
 
     if args.autosave:
-        # Infer the place to store the samples and figures
+        # Infer the place to store the figures
         fname_pot = args.potential
         if os.path.isdir(fname_pot):
             fname_index = tf.train.latest_checkpoint(fname_pot)
@@ -765,30 +861,56 @@ def main():
             )
 
         print(fname_loss_pdf, os.path.isfile(fname_loss_pdf))
-        Path(fig_dir).mkdir(parents=True, exist_ok=True)
+        print(fig_dir)
+        os.makedirs(fig_dir, exist_ok=True)
         if os.path.isfile(fname_loss_pdf):
             # Copy the latest loss over to the plots dir
             shutil.copy(fname_loss_pdf, fig_dir)
             shutil.copy(fname_loss_pdf[:-4] + "_noreg.pdf", fig_dir)
-
         args.fig_dir = fig_dir
+    else:
+        fig_dir = args.fig_dir
 
+    # Loading in data
     print("Loading training data ...")
     data_train, attrs_train = utils.load_training_data(args.input, cut_attrs=True)
-    eta_train = data_train["eta"]
+    print(f"  --> Training data shape = {data_train['eta'].shape}")
 
-    n_train = eta_train.shape[0]
-    print(f"  --> Training data shape = {eta_train.shape}")
+    print("Loading in distribution function gradients ...")
+    df_data = utils.load_flow_samples(args.df_grads_fname, attrs_to_cut_by=attrs_train)
+
+    if args.fname_mask is not None:
+        # Update df_data to include only the data within the mask
+        print("Applying mask to the samples ...")
+        mask = utils.get_mask_eta(data_train['eta'], args.fname_mask, r_min=attrs_train['r_in'])[0]
+        data_train['eta'] = data_train['eta'][mask]
+        if 'weights' in data_train:
+            data_train['weights'] = data_train['weights'][mask]
+
+        mask = utils.get_mask_eta(df_data['eta'], args.fname_mask, r_min=attrs_train['r_in'])[0]
+        df_data['eta'] = df_data['eta'][mask]
+        df_data['df_deta'] = df_data['df_deta'][mask]
+        if 'f' in df_data:
+            df_data['f'] = df_data['f'][mask]
+
+    q_grid = generate_grid(attrs_train['r_out'], attrs_train['r_in'], fname_mask=args.fname_mask)
 
     print("Loading potential")
     phi_model = utils.load_potential(args.potential)
     if phi_model["fs"] is not None:
         phi_model["fs"].debug()
 
+    print("Calculating/loading potential values ...")
+    fname = 'potential_values'
+    phi, acc, rho = utils.get_model_values(phi_model, df_data['eta'][:,:3], fig_dir=fig_dir, fname=fname)
+    phi_grid, acc_grid, rho_grid = utils.get_model_values(phi_model, q_grid, fig_dir=fig_dir, fname=fname+'_grid')
+
     print("Calculating cylindrical & spherical coordinates ...")
-    coords_train = plot_flow_projections.calc_coords(
-        eta_train, args.spherical_origin, args.cylindrical_origin
-    )
+    acc_components = utils.calc_coords(df_data['eta'][:,:3], args.spherical_origin, args.cylindrical_origin, acc)
+    acc_components_grid = utils.calc_coords(q_grid, args.spherical_origin, args.cylindrical_origin, acc_grid)
+    coords_train_eta = utils.calc_coords(data_train['eta'], args.spherical_origin, args.cylindrical_origin)
+    coords_df_eta = utils.calc_coords(df_data['eta'], args.spherical_origin, args.cylindrical_origin)
+    coords_grid = utils.calc_coords(q_grid, args.spherical_origin, args.cylindrical_origin)
 
     print("Plotting potential parameter evolution ...")
     fname_params_hist = (
@@ -804,162 +926,49 @@ def main():
         )
 
     print("Plotting 2D slices of matter density ...")
-    dims = [
-        ("x", "y", "z", 0.0),
-        ("x", "z", "y", 0.0),
-        ("y", "z", "x", 0.0),
+    for dim_val in ['rho', 'phi', 'ax', 'ay', 'az']:
+        jobs = [
+            ("x", "y", 0.0),
+            ("x", "z", 0.0),
+            ("y", "z", 0.0),
+        ]
+        for dim1, dim2, z in jobs:
+            print(f"  --> ({dim1}, {dim2})")
+            plot_2d_slice_pot(
+                phi_model, coords_train_eta, dim1, dim2, dim_val, args.fig_dir, z_fill=z, attrs=attrs_train, fig_fmt=args.fig_fmt, logscale=False, lims=None, fname_mask=args.fname_mask
+            )
+
+    jobs = [
+        ('cylphi', 'acylphi', acc_components['cylphi'], None),
+        ('cylR', 'acylR', acc_components['cylR'], None),
+        ('z', 'az', acc_components['z'], None),
+        ('cylR', 'rho', rho, (0., 0.15)),
+        ('z', 'rho', rho, (0., 0.15)),
+        ('cylphi', 'rho', rho, (0., 0.15)),
     ]
-    for dim1, dim2, dimz, z in dims:
-        print(f"  --> ({dim1}, {dim2})")
-        plot_rho(
-            phi_model,
-            coords_train,
-            args.fig_dir,
-            dim1, dim2, dimz,
-            z,
-            attrs=attrs_train,
-            padding=0.95,
-            fig_fmt=args.fig_fmt,
+    for dim1, dim2, val, ylim in jobs:
+        plot_2dhist(
+            coords_df_eta[dim1], val, df_data['f'], dim1, dim2, fig_dir, fig_fmt=args.fig_fmt, ylim=ylim
         )
 
-    print("Plotting 2D slices of forces ...")
-    dims = [
-        ("x", "y", "z", 0.0),
-        ("x", "z", "y", 0.0),
-        ("y", "z", "x", 0.0),
-    ]
-    for dim1, dim2, dimz, z in dims:
-        print(f"  --> ({dim1}, {dim2})")
-        plot_force_2d_slice(
-            phi_model,
-            coords_train,
-            args.fig_dir,
-            dim1, dim2, dimz,
-            z,
-            attrs=attrs_train,
-            padding=0.95,
-            fig_fmt=args.fig_fmt,
-        )
-
-    print("Plotting 1D slices of forces ...")
-    dims = [
-        ("x", "y", 0, 0, "x"),
-        ("y", "z", 0, 0, "y"),
-        ("z", "x", 0, 0, "z"),
-    ]
-    for dim1, dimy, y, z, dimforce in dims:
-        print(f"  --> ({dim1}, {dimy}={y}, {z})")
-        plot_force_1d_slice(
-            phi_model,
-            coords_train,
-            args.fig_dir,
-            dim1, dimy,
-            y, z,
-            dimforce,
-            attrs=attrs_train,
-            fig_fmt=args.fig_fmt,
-        )
-
-    print("Plotting 1D marginals of the potential ...")
-    dims = [
-        ("z", "rho"),
-        ("z", "sigmaz"),
-    ]
-    for dim1, quantity in dims:
-        print(f"  --> ({dim1}: {quantity})")
-        plot_custom_potential_marginal(
-            phi_model,
-            args.fig_dir,
-            dim1,
-            quantity,
-            attrs=attrs_train,
-            padding=0.95,
-            fig_fmt=args.fig_fmt,
-        )
+    # Plot implied v_circ
+    R, a_R = coords_grid['cylR'], -acc_components_grid['cylR']
+    omega = phi_model['fs']._omega.numpy()
+    fig, axs = plot_2dhist_wrapper(
+        R, np.sqrt(R*a_R)*100, np.ones(len(rho_grid)), operation=np.sum,
+        xlabel="$R\mathrm{{\>(kpc)}}$", ylabel="$v_\mathrm{circ}\mathrm{{\>(km/s))}}$",
+        vmin=0, bins=(111, 128),
+        lims=None,
+        normalize_along_axis=0,
+        title=f'whole volume $\\Omega={omega}$'
+    )
+    for fmt in args.fig_fmt:
+        fname = os.path.join(fig_dir, f'2d_hist_vcirc_cylR.{fmt}')
+        fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
 
     print("Saving Potential parameter values in a text file ...")
     plot_potential.save_phi_variables(phi_model, args.fig_dir)
-
-    # Extra diagnostics if flow samples are also passed
-    if os.path.isfile(args.df_grads_fname) and phi_model["fs"] is not None:
-        df_data = utils.load_flow_samples(
-            args.df_grads_fname, attrs_to_cut_by=attrs_train
-        )
-        # coords_sample = plot_flow_projections.calc_coords(df_data['eta'], args.spherical_origin, args.cylindrical_origin)
-
-        print("Plotting marginals of v_circ ...")
-        model_u0 = np.array(
-            (
-                phi_model["fs"]._u_x.numpy(),
-                phi_model["fs"]._u_y.numpy(),
-                phi_model["fs"]._u_z.numpy(),
-            )
-        )
-        model_r_c = phi_model["fs"]._r_c.numpy()
-        eta_gc_train = eta_train.copy()
-        eta_gc_train[:, 3:] -= model_u0
-        eta_gc_sample = df_data["eta"].copy()
-        eta_gc_sample[:, 3:] -= model_u0
-        coords_gc_sample = plot_flow_projections.calc_coords(
-            eta_gc_sample, args.spherical_origin, args.cylindrical_origin
-        )
-        coords_gc_train = plot_flow_projections.calc_coords(
-            eta_gc_train, args.spherical_origin, args.cylindrical_origin
-        )
-        plot_vcirc_marginals(
-            phi_model,
-            coords_gc_train,
-            coords_gc_sample,
-            fig_dir,
-            attrs=attrs_train,
-            fig_fmt=args.fig_fmt,
-        )
-
-        print("Plotting 2D slices of v_circ ...")
-        dims = [
-            ("x", "y", "z", 0),
-            ("x", "z", "y", 0),
-            ("y", "z", "x", 0),
-        ]
-        for dim1, dim2, dimz, z in dims:
-            print(f"  --> ({dim1}, {dim2}, {dimz}={z})")
-            plot_vcirc_2d_slice(
-                phi_model,
-                coords_gc_train, coords_gc_sample,
-                fig_dir,
-                dim1, dim2, dimz,
-                z,
-                attrs=attrs_train,
-                padding=0.95,
-                fig_fmt=args.fig_fmt,
-            )
-
-        print("Plotting 2D marginals of \partial f/\partial t ...")
-        dims = [
-            ("x", "y"),
-            ("x", "z"),
-            ("y", "z"),
-            ("vx", "vy"),
-            ("vx", "vz"),
-            ("vy", "vz"),
-        ]
-        print("  Calculating Phi gradients (might take a while) ...")
-        _, dphi_dq, _ = potential_tf.calc_phi_derivatives(
-            phi_model["phi"], df_data["eta"][:, :3], return_phi=True
-        )
-        for dim1, dim2 in dims:
-            print(f"  --> ({dim1}, {dim2})")
-            plot_dfdt_comparison(
-                phi_model,
-                df_data,
-                dphi_dq,
-                args.fig_dir,
-                dim1, dim2,
-                attrs=attrs_train,
-                fig_fmt=args.fig_fmt,
-            )
-    else:
-        print("Couldn't find df gradients.")
 
     return 0
 

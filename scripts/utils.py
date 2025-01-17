@@ -11,6 +11,7 @@ import progressbar
 import pandas as pd
 import os
 import h5py
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -37,10 +38,10 @@ def load_training_data(fname, cut_attrs=False):
             data (padding is done for helping flow training by avoiding sharp
             cut-offs).
     """
-    def cut(eta, attrs):
+    def get_inside_index(eta, attrs):
         # Don't perform a cut if there are no attrs
         if attrs == {}:
-            return eta
+            return np.ones(len(eta), dtype=bool)
 
         # Cuts eta based on attrs
         r2 = np.sum(eta[:, :3] ** 2, axis=1)
@@ -72,7 +73,7 @@ def load_training_data(fname, cut_attrs=False):
                     (np.abs(z) <= H_out)
                 )
 
-        return eta[idx]
+        return idx
 
     _, ext = os.path.splitext(fname)
     attrs = None
@@ -85,21 +86,25 @@ def load_training_data(fname, cut_attrs=False):
             if "weights" in f.keys():
                 data["weights"] = f["weights"][:].astype("f4")
 
-            if cut_attrs:
-                data["eta"] = cut(data["eta"], attrs)
-
             # Check if the train-validation split has been passed
             if "eta_train" in f.keys() and "eta_val" in f.keys():
                 print("Loaded in training and validation data")
                 data["eta_train"] = f["eta_train"][:].astype("f4")
                 data["eta_val"] = f["eta_val"][:].astype("f4")
-
-                if cut_attrs:
-                    data["eta_train"] = cut(data["eta_train"], attrs)
-                    data["eta_val"] = cut(data["eta_val"], attrs)
             if "weights_train" in f.keys() and "weights_val" in f.keys():
                 data["weights_train"] = f["weights_train"][:].astype("f4")
                 data["weights_val"] = f["weights_val"][:].astype("f4")
+
+            if cut_attrs:
+                if "weights" in data:
+                    data["weights"] = data["weights"][get_inside_index(data["eta"], attrs)]
+                if "weights_train" in data and "weights_val" in data:
+                    data["weights_train"] = data["weights_train"][get_inside_index(data["eta_train"], attrs)]
+                    data["weights_val"] = data["weights_val"][get_inside_index(data["eta_val"], attrs)]
+                if "eta_train" in data and "eta_val" in data:
+                    data["eta_train"] = data["eta_train"][get_inside_index(data["eta_train"], attrs)]
+                    data["eta_val"] = data["eta_val"][get_inside_index(data["eta_val"], attrs)]
+                data["eta"] = data["eta"][get_inside_index(data["eta"], attrs)]
 
             attrs["has_spatial_cut"] = True if attrs != {} else False
             attrs["n"] = len(data["eta"])
@@ -107,6 +112,95 @@ def load_training_data(fname, cut_attrs=False):
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
 
     return data, attrs
+
+
+'''def load_mask(fname):
+    """
+    Loads in the mask from a file. The mask is a boolean array of shape (m, n)
+    where m is the number of radial bins and n the number of healpixels.
+    The mask is used to specify which datapoints are to be used for training the potential.
+    """
+    _, ext = os.path.splitext(fname)
+    mask = None
+    if ext in (".h5", ".hdf5"):
+        with h5py.File(fname, "r") as f:
+            mask = f["mask"][:].astype("bool")
+            distance_edges = f['distance_edges'][:].astype('f4')
+    else:
+        raise ValueError(f'Unrecognized input file extension: "{ext}"')
+
+    return distance_edges, mask
+
+
+def mask_eta(eta, fname_mask, hp=None, r_max=None):
+    """
+    Masks eta based on the mask specified in fname_mask. The mask is a boolean
+    array of shape (m, n) where m is the number of radial bins and n the number
+    of healpixels. The mask is used to specify which datapoints are to be used
+    for training the potential.
+    """
+    distance_edges, mask = load_mask(fname_mask)
+
+    r = np.sum(eta[:, :3]**2, axis=1)**0.5
+    l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
+    b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
+
+    mask = np.pad(mask, ((0, 1), (0, 0)), mode='constant', constant_values=False)
+    idx_distance = np.digitize(r, distance_edges) - 1
+
+    # Set the stars with negative parallax (i.e. nan r) to be as far away as possible
+
+    if hp is None:
+        nside = int((mask.shape[1]/12)**0.5)
+        from astropy_healpix import HEALPix
+        hp = HEALPix(nside=nside, order='nested')
+    import astropy.units as u
+    hpix_idx = hp.lonlat_to_healpix(l_*u.deg, b*u.deg)
+
+    mask = mask[idx_distance, hpix_idx]
+    if r_max is not None:
+        mask[np.sum(eta[:, :3]**2, axis=1)**0.5 > r_max] = False
+
+    return mask, hp'''
+
+
+def get_mask(l_, b, r, max_distance, hp=None):
+    '''
+    Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
+    Max distance is a healpixel map indicating the maximal distance for each healpixel.
+    '''
+    from astropy_healpix import HEALPix
+    from astropy import units as u
+    if hp is None:
+        nside = int((max_distance.shape[0]/12)**0.5)
+        hp = HEALPix(nside=nside, order='nested')
+    hpix_idx = hp.lonlat_to_healpix(l_*u.deg, b*u.deg)
+    return max_distance[hpix_idx] > r, hp
+
+
+def load_mask(fname):
+    with h5py.File(fname, "r") as f:
+        max_distance = f['max_distance'][:].astype('f4')
+        nside = f['max_distance'].attrs['nside']
+    return max_distance, nside
+
+
+def get_mask_eta(eta, fname_mask, hp=None, r_min=None, r_max=None):
+    '''
+    Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
+    Max distance is a healpixel map indicating the maximal distance for each healpixel.
+    '''
+    max_distance, nside = load_mask(fname_mask)
+
+    r = np.sum(eta[:, :3]**2, axis=1)**0.5
+    l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
+    b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
+    mask, hp = get_mask(l_, b, r, max_distance, hp)
+    if r_min is not None:
+        mask = mask & (r > r_min)
+    if r_max is not None:
+        mask = mask & (r < r_max)
+    return mask, hp
 
 
 def load_flow_samples(fname, recalc_avg=None, attrs_to_cut_by=None):
@@ -427,9 +521,15 @@ def append_to_potential_params_history(phi, fs, potential_params_hist={}):
         ("u_y0", "_u_y"),
         ("u_x0", "_u_x"),
         ("u_z0", "_u_z"),
-        ("mn_amp", "_mn_logamp"),
-        ("mn_a", "_mn_loga"),
-        ("mn_b", "_mn_logb"),
+        ("mn1_amp", "_mn1_logamp"),
+        ("mn1_a", "_mn1_loga"),
+        ("mn1_b", "_mn1_logb"),
+        ("mn2_amp", "_mn2_logamp"),
+        ("mn2_a", "_mn2_loga"),
+        ("mn2_b", "_mn2_logb"),
+        ("mn3_amp", "_mn3_logamp"),
+        ("mn3_a", "_mn3_loga"),
+        ("mn3_b", "_mn3_logb"),
         ("halo_amp", "_halo_logamp"),
         ("halo_a", "_halo_loga"),
         ("bulge_amp", "_bulge_logamp"),
@@ -676,7 +776,7 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
         e_sph_phi = np.concatenate([-y, x, zeros], axis=1)/R
         sph = {
             "sphR": dot(e_sph_r, vector_field),
-            "sphth": dot(e_sph_th, vector_field),
+            "sphth": np.nan_to_num(dot(e_sph_th, vector_field)),
             "sphphi": dot(e_sph_phi, vector_field),
         }
     else:
@@ -692,6 +792,8 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
         cyl_R = np.linalg.norm(eta[:, :2] - cyl_x0[:2], axis=1)
         cyl_z = eta[:, 2] - cyl_x0[2]
         cyl_phi = np.arctan2(eta[:, 1] - cyl_x0[1], eta[:, 0] - cyl_x0[0])
+        # Convert cyl_phi to be between 0 and 2pi
+        cyl_phi = np.mod(cyl_phi, 2*np.pi)
         cyl_cos_phi = (eta[:, 0] - cyl_x0[0]) / cyl_R
         cyl_sin_phi = (eta[:, 1] - cyl_x0[1]) / cyl_R
 
@@ -707,7 +809,7 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
         sph_R = np.linalg.norm(eta[:, :2] - sph_x0[:2], axis=1)
         phi = np.arctan2(eta[:, 1] - sph_x0[1], eta[:, 0] - sph_x0[0])
 
-        sph = {"r": r, "cth": costheta, "phi": phi}
+        sph = {"r": r, "cth": np.nan_to_num(costheta), "phi": phi}
 
         if has_velocities:
             # Cartesian
@@ -731,7 +833,7 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
     return dict(**cart, **cyl, **sph)
 
 
-def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=None):
+def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=None, full_fname=None):
     """
     Calculate the potential, acceleration and density implied by the
     differentiable model of the potential. If specified, the results are saved to a file
@@ -767,7 +869,9 @@ def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=N
     n0 = len(q_eval)
     q_eval = tf.data.Dataset.from_tensor_slices(q_eval).batch(batch_size)
 
-    if fname is not None:
+    if full_fname is not None:
+        fname = full_fname
+    elif fname is not None:
         fname = os.path.join(fig_dir, f'data/{fname}_{n0}.npz')
     if fname is None or (fname is not None and not os.path.exists(fname)):
         rhos = []
@@ -780,7 +884,7 @@ def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=N
                 phi_model['phi'], b, return_phi=True
             )
             rhos.append(2.325*d2phi_dq2.numpy()/(4*np.pi)) # [M_Sun/pc^3]
-            accs.append(-dphi_dq) # (100 km/s)^2/kpc
+            accs.append(-dphi_dq) # [(100 km/s)^2/kpc]
             phis.append(phi)
             bar(iteration)
             iteration += 1
@@ -788,7 +892,7 @@ def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=N
         accs = np.concatenate(accs)
         phis = np.concatenate(phis)
         if fname is not None:
-            os.makedirs(os.path.join(fig_dir, 'data'), exist_ok=True)
+            Path(fname).parent.mkdir(parents=True, exist_ok=True)
             np.savez(fname, phi=phis, acc=accs, rho=rhos)
     else:
         npzfile = np.load(fname)

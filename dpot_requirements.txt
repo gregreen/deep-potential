@@ -4,7 +4,6 @@ tensorflow-probability==0.22.1
 tensorflow-addons==0.23.0
 tensorboard
 keras==2.14.0
-numpy
 scipy
 matplotlib
 h5py
