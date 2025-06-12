@@ -173,7 +173,6 @@ def get_phi_loss_gradients(
         likelihood = tf.math.asinh(alpha * tf.math.abs(null_hyp)) / alpha
 
         if phi._name == "PhiNNAnalytic":
-            # Analytic potentials currently Not supported
             tf.print(type(phi))
 
         if lambda_ != 0:

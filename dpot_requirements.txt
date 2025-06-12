@@ -11,7 +11,6 @@ astropy
 progressbar2
 cerberus
 dm-sonnet
-pandas
 scikit-learn
 astropy-healpix
 reproject

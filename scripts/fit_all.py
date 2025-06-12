@@ -16,12 +16,18 @@ tfd = tfp.distributions
 import numpy as np
 import scipy
 import scipy.stats
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+from matplotlib.gridspec import GridSpec
 
-from time import time
+from time import time, sleep
 from pathlib import Path
 import json
 import h5py
 import progressbar
+from glob import glob
+import gc
 import cerberus
 import os.path
 
