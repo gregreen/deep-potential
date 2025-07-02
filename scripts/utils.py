@@ -114,56 +114,6 @@ def load_training_data(fname, cut_attrs=False):
     return data, attrs
 
 
-'''def load_mask(fname):
-    """
-    Loads in the mask from a file. The mask is a boolean array of shape (m, n)
-    where m is the number of radial bins and n the number of healpixels.
-    The mask is used to specify which datapoints are to be used for training the potential.
-    """
-    _, ext = os.path.splitext(fname)
-    mask = None
-    if ext in (".h5", ".hdf5"):
-        with h5py.File(fname, "r") as f:
-            mask = f["mask"][:].astype("bool")
-            distance_edges = f['distance_edges'][:].astype('f4')
-    else:
-        raise ValueError(f'Unrecognized input file extension: "{ext}"')
-
-    return distance_edges, mask
-
-
-def mask_eta(eta, fname_mask, hp=None, r_max=None):
-    """
-    Masks eta based on the mask specified in fname_mask. The mask is a boolean
-    array of shape (m, n) where m is the number of radial bins and n the number
-    of healpixels. The mask is used to specify which datapoints are to be used
-    for training the potential.
-    """
-    distance_edges, mask = load_mask(fname_mask)
-
-    r = np.sum(eta[:, :3]**2, axis=1)**0.5
-    l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
-    b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
-
-    mask = np.pad(mask, ((0, 1), (0, 0)), mode='constant', constant_values=False)
-    idx_distance = np.digitize(r, distance_edges) - 1
-
-    # Set the stars with negative parallax (i.e. nan r) to be as far away as possible
-
-    if hp is None:
-        nside = int((mask.shape[1]/12)**0.5)
-        from astropy_healpix import HEALPix
-        hp = HEALPix(nside=nside, order='nested')
-    import astropy.units as u
-    hpix_idx = hp.lonlat_to_healpix(l_*u.deg, b*u.deg)
-
-    mask = mask[idx_distance, hpix_idx]
-    if r_max is not None:
-        mask[np.sum(eta[:, :3]**2, axis=1)**0.5 > r_max] = False
-
-    return mask, hp'''
-
-
 def get_mask(l_, b, r, max_distance, hp=None):
     '''
     Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
