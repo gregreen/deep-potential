@@ -313,7 +313,7 @@ class PhiNN(snt.Module):
             or not checkpoint_name.rsplit("-", 1)[1].isdigit()
         ):
             raise ValueError("PhiNN checkpoint name doesn't follow the correct syntax.")
-        spec_name = checkpoint_name.rsplit("-", 1)[0] + "_spec.json"
+        spec_name = checkpoint_name.rsplit('-', 1)[0] + "_spec.json"
 
         # Load network specs
         with open(spec_name, "r") as f:

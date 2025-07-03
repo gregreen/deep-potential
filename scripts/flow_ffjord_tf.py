@@ -442,7 +442,7 @@ def train_flow(
             keep_checkpoint_every_n_hours=checkpoint_hours,
         )
 
-        # Look for latest extisting checkpoint
+        # Look for latest existing checkpoint
         latest = chkpt_manager.latest_checkpoint
         if latest is not None:
             print(f"Restoring from checkpoint {latest} ...")
