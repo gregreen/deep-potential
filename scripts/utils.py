@@ -11,6 +11,7 @@ import progressbar
 import pandas as pd
 import os
 import h5py
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -37,10 +38,10 @@ def load_training_data(fname, cut_attrs=False):
             data (padding is done for helping flow training by avoiding sharp
             cut-offs).
     """
-    def cut(eta, attrs):
+    def get_inside_index(eta, attrs):
         # Don't perform a cut if there are no attrs
         if attrs == {}:
-            return eta
+            return np.ones(len(eta), dtype=bool)
 
         # Cuts eta based on attrs
         r2 = np.sum(eta[:, :3] ** 2, axis=1)
@@ -50,7 +51,14 @@ def load_training_data(fname, cut_attrs=False):
         z = eta[:, 2]
 
         if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-            r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+            if "r_out" in attrs:
+                r_out = attrs["r_out"]
+            else:
+                r_out = 1 / attrs["parallax_min"]
+            if "r_in" in attrs:
+                r_in = attrs["r_in"]
+            else:
+                r_in = 1 / attrs["parallax_max"]
             idx = (r2 > r_in**2) & (r2 < r_out**2)
         elif attrs["volume_type"] == "cylinder":
             R_out, H_out = attrs["R_out"], attrs["H_out"]
@@ -65,7 +73,7 @@ def load_training_data(fname, cut_attrs=False):
                     (np.abs(z) <= H_out)
                 )
 
-        return eta[idx]
+        return idx
 
     _, ext = os.path.splitext(fname)
     attrs = None
@@ -75,19 +83,28 @@ def load_training_data(fname, cut_attrs=False):
             attrs = dict(f["eta"].attrs.items())
 
             data["eta"] = f["eta"][:].astype("f4")
-
-            if cut_attrs:
-                data["eta"] = cut(data["eta"], attrs)
+            if "weights" in f.keys():
+                data["weights"] = f["weights"][:].astype("f4")
 
             # Check if the train-validation split has been passed
             if "eta_train" in f.keys() and "eta_val" in f.keys():
                 print("Loaded in training and validation data")
                 data["eta_train"] = f["eta_train"][:].astype("f4")
                 data["eta_val"] = f["eta_val"][:].astype("f4")
+            if "weights_train" in f.keys() and "weights_val" in f.keys():
+                data["weights_train"] = f["weights_train"][:].astype("f4")
+                data["weights_val"] = f["weights_val"][:].astype("f4")
 
-                if cut_attrs:
-                    data["eta_train"] = cut(data["eta_train"], attrs)
-                    data["eta_val"] = cut(data["eta_val"], attrs)
+            if cut_attrs:
+                if "weights" in data:
+                    data["weights"] = data["weights"][get_inside_index(data["eta"], attrs)]
+                if "weights_train" in data and "weights_val" in data:
+                    data["weights_train"] = data["weights_train"][get_inside_index(data["eta_train"], attrs)]
+                    data["weights_val"] = data["weights_val"][get_inside_index(data["eta_val"], attrs)]
+                if "eta_train" in data and "eta_val" in data:
+                    data["eta_train"] = data["eta_train"][get_inside_index(data["eta_train"], attrs)]
+                    data["eta_val"] = data["eta_val"][get_inside_index(data["eta_val"], attrs)]
+                data["eta"] = data["eta"][get_inside_index(data["eta"], attrs)]
 
             attrs["has_spatial_cut"] = True if attrs != {} else False
             attrs["n"] = len(data["eta"])
@@ -95,6 +112,45 @@ def load_training_data(fname, cut_attrs=False):
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
 
     return data, attrs
+
+
+def get_mask(l_, b, r, max_distance, hp=None):
+    '''
+    Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
+    Max distance is a healpixel map indicating the maximal distance for each healpixel.
+    '''
+    from astropy_healpix import HEALPix
+    from astropy import units as u
+    if hp is None:
+        nside = int((max_distance.shape[0]/12)**0.5)
+        hp = HEALPix(nside=nside, order='nested')
+    hpix_idx = hp.lonlat_to_healpix(l_*u.deg, b*u.deg)
+    return max_distance[hpix_idx] > r, hp
+
+
+def load_mask(fname):
+    with h5py.File(fname, "r") as f:
+        max_distance = f['max_distance'][:].astype('f4')
+        nside = f['max_distance'].attrs['nside']
+    return max_distance, nside
+
+
+def get_mask_eta(eta, fname_mask, hp=None, r_min=None, r_max=None):
+    '''
+    Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
+    Max distance is a healpixel map indicating the maximal distance for each healpixel.
+    '''
+    max_distance, nside = load_mask(fname_mask)
+
+    r = np.sum(eta[:, :3]**2, axis=1)**0.5
+    l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
+    b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
+    mask, hp = get_mask(l_, b, r, max_distance, hp)
+    if r_min is not None:
+        mask = mask & (r > r_min)
+    if r_max is not None:
+        mask = mask & (r < r_max)
+    return mask, hp
 
 
 def load_flow_samples(fname, recalc_avg=None, attrs_to_cut_by=None):
@@ -415,9 +471,15 @@ def append_to_potential_params_history(phi, fs, potential_params_hist={}):
         ("u_y0", "_u_y"),
         ("u_x0", "_u_x"),
         ("u_z0", "_u_z"),
-        ("mn_amp", "_mn_logamp"),
-        ("mn_a", "_mn_loga"),
-        ("mn_b", "_mn_logb"),
+        ("mn1_amp", "_mn1_logamp"),
+        ("mn1_a", "_mn1_loga"),
+        ("mn1_b", "_mn1_logb"),
+        ("mn2_amp", "_mn2_logamp"),
+        ("mn2_a", "_mn2_loga"),
+        ("mn2_b", "_mn2_logb"),
+        ("mn3_amp", "_mn3_logamp"),
+        ("mn3_a", "_mn3_loga"),
+        ("mn3_b", "_mn3_logb"),
         ("halo_amp", "_halo_logamp"),
         ("halo_a", "_halo_loga"),
         ("bulge_amp", "_bulge_logamp"),
@@ -440,7 +502,7 @@ def append_to_potential_params_history(phi, fs, potential_params_hist={}):
                 potential_params_hist[param_name] = []
             if "log" in attr:
                 value = np.exp(value)
-            if type(value) == np.ndarray:
+            if type(value) is np.ndarray:
                 potential_params_hist[param_name].append(value[0])
             else:
                 potential_params_hist[param_name].append(value)
@@ -593,7 +655,14 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
         R = np.sum(eta[:, :2] ** 2, axis=1) ** 0.5
         z = eta[:, 2]
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         idx = (r >= r_in) & (r <= r_out)
     elif attrs["volume_type"] == "cylinder":
         R_out, H_out = attrs["R_out"], attrs["H_out"]
@@ -608,6 +677,180 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
                 & (np.abs(z) <= H_out)
             )
     return idx
+
+
+def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vector_field=None):
+    """Calculate components in different coordinate systems. If a vector field is specified, then the function
+    returns the components of the vector field in Cartesian, Spherical, and Cylindrical coordinates. This assumes
+    that the positions of the vector fields values are specified by eta (eta is in Cartesian). If vector_field is
+    None, then the function returns the coordinates of eta in different coordinates.
+
+    Cartesian coordinates: x, y, z, vx, vy, vz
+    Spherical coordiantes: r, cos(theta), phi, v_radial, v_theta (v_phi is missing)
+    Cylindrical coordinates: cyl_R, cyl_z, cyl_phi, cyl_vR, cyl_vz, cyl_vT
+    """
+    def dot(a, b):
+        # a and b are of shape (n, 3)
+        return np.sum(a*b, axis=1)
+
+    sph_x0 = np.array(spherical_origin)
+    cyl_x0 = np.array(cylindrical_origin)
+
+    if vector_field is not None:
+        # Cartesian
+        zeros = np.zeros((len(eta), 1))
+        cart = {
+            "x": vector_field[:,0],
+            "y": vector_field[:,1],
+            "z": vector_field[:,2],
+        }
+
+        # Cylindrical
+        x, y, z = np.split(eta[:,:3] - cyl_x0, 3, axis=1)
+        R = (x**2 + y**2)**0.5
+        e_cyl_R = np.concatenate([x, y, zeros], axis=1)/R
+        e_cyl_z = np.concatenate([zeros, zeros, np.ones((len(x), 1))], axis=1)
+        e_cyl_phi = np.concatenate([-y, x, zeros], axis=1)/R
+        cyl = {
+            "cylR": dot(e_cyl_R, vector_field),
+            "cylz": dot(e_cyl_z, vector_field),
+            "cylphi": dot(e_cyl_phi, vector_field),
+        }
+
+        # Spherical
+        x, y, z = np.split(eta[:,:3] - sph_x0, 3, axis=1)
+        R = (x**2 + y**2)**0.5
+        r = (x**2 + y**2 + z**2)**0.5
+        e_sph_r = np.concatenate([x, y, z], axis=1)/r
+        e_sph_th = np.concatenate([x*z, y*z, -R**2], axis=1)/r/R
+        e_sph_phi = np.concatenate([-y, x, zeros], axis=1)/R
+        sph = {
+            "sphR": dot(e_sph_r, vector_field),
+            "sphth": np.nan_to_num(dot(e_sph_th, vector_field)),
+            "sphphi": dot(e_sph_phi, vector_field),
+        }
+    else:
+        # Cartesian
+        x = eta[:, 0] - sph_x0[0]
+        y = eta[:, 1] - sph_x0[1]
+        z = eta[:, 2] - sph_x0[2]
+        cart = {"x": x, "y": y, "z": z}
+
+        has_velocities = eta.shape[1] == 6
+
+        # Cylindrical
+        cyl_R = np.linalg.norm(eta[:, :2] - cyl_x0[:2], axis=1)
+        cyl_z = eta[:, 2] - cyl_x0[2]
+        cyl_phi = np.arctan2(eta[:, 1] - cyl_x0[1], eta[:, 0] - cyl_x0[0])
+        # Convert cyl_phi to be between 0 and 2pi
+        cyl_phi = np.mod(cyl_phi, 2*np.pi)
+        cyl_cos_phi = (eta[:, 0] - cyl_x0[0]) / cyl_R
+        cyl_sin_phi = (eta[:, 1] - cyl_x0[1]) / cyl_R
+
+        cyl = {
+            "cylR": cyl_R,
+            "cylz": cyl_z,
+            "cylphi": cyl_phi,
+        }
+
+        # Spherical
+        r = np.linalg.norm(eta[:, :3] - sph_x0, axis=1)
+        costheta = z / r
+        sph_R = np.linalg.norm(eta[:, :2] - sph_x0[:2], axis=1)
+        phi = np.arctan2(eta[:, 1] - sph_x0[1], eta[:, 0] - sph_x0[0])
+
+        sph = {"r": r, "cth": np.nan_to_num(costheta), "phi": phi}
+
+        if has_velocities:
+            # Cartesian
+            vz = eta[:, 5]
+            cart = {**cart, **{"vx": eta[:, 3], "vy": eta[:, 4], "vz": vz}}
+
+            # Cylindrical
+            cyl_vR = eta[:, 3] * cyl_cos_phi + eta[:, 4] * cyl_sin_phi
+            cyl_vT = -eta[:, 3] * cyl_sin_phi + eta[:, 4] * cyl_cos_phi
+            cyl_vz = eta[:, 5]
+            cyl = {**cyl, **{"cylvR": cyl_vR, "cylvT": cyl_vT, "cylvz": cyl_vz}}
+
+            # Spherical
+            vr = np.sum((eta[:, :3] - sph_x0) * eta[:, 3:], axis=1) / r
+            vth = (z * vr - r * vz) / sph_R
+            cos_phi = (eta[:, 0] - sph_x0[0]) / cyl_R
+            sin_phi = (eta[:, 1] - sph_x0[1]) / cyl_R
+            vT = -eta[:, 3] * sin_phi + eta[:, 4] * cos_phi
+            sph = {**sph, **{"vth": vth, "vT": vT, "vr": vr}}
+
+    return dict(**cart, **cyl, **sph)
+
+
+def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=None, full_fname=None):
+    """
+    Calculate the potential, acceleration and density implied by the
+    differentiable model of the potential. If specified, the results are saved to a file
+    in a subdirectory of fig_dir, named data.
+    Currently, the spatial dimension is expected to be in units of kpc
+    and velocity dimension 100 km/s. The conversion factor for rho
+    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
+    (100 km/s)^2/kpc
+
+    Parameters:
+        phi_model (dict): The model of the potential to be used.
+        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
+        fig_dir (str): The directory where the data is to be saved
+        fname (str): The name of the file where the data is to be saved
+    """
+    def get_sampling_progressbar_fn(n_batches, n_samples):
+        # Progressbar to make the sampling progress visible and nice!
+        widgets = [
+            progressbar.Percentage(), ' | ',
+            progressbar.Timer(format='Elapsed: %(elapsed)s'), ' | ',
+            progressbar.AdaptiveETA(), ' | ',
+            progressbar.Variable('batches_done', width=6, precision=0), ', ',
+            progressbar.Variable('n_batches', width=6, precision=0), ', ',
+            progressbar.Variable('n_samples', width=8, precision=0)
+        ]
+        bar = progressbar.ProgressBar(max_value=n_batches, widgets=widgets)
+
+        def update_progressbar(i):
+            bar.update(i+1, batches_done=i+1, n_batches=n_batches, n_samples=n_samples)
+
+        return update_progressbar
+
+    n0 = len(q_eval)
+    q_eval = tf.data.Dataset.from_tensor_slices(q_eval).batch(batch_size)
+
+    if full_fname is not None:
+        fname = full_fname
+    elif fname is not None:
+        fname = os.path.join(fig_dir, f'data/{fname}_{n0}.npz')
+    if fname is None or (fname is not None and not os.path.exists(fname)):
+        rhos = []
+        accs = []
+        phis = []
+
+        bar, iteration = get_sampling_progressbar_fn(len(q_eval), n0), 0
+        for i, b in enumerate(q_eval):
+            phi,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
+                phi_model['phi'], b, return_phi=True
+            )
+            rhos.append(2.325*d2phi_dq2.numpy()/(4*np.pi)) # [M_Sun/pc^3]
+            accs.append(-dphi_dq) # [(100 km/s)^2/kpc]
+            phis.append(phi)
+            bar(iteration)
+            iteration += 1
+        rhos = np.concatenate(rhos)
+        accs = np.concatenate(accs)
+        phis = np.concatenate(phis)
+        if fname is not None:
+            Path(fname).parent.mkdir(parents=True, exist_ok=True)
+            np.savez(fname, phi=phis, acc=accs, rho=rhos)
+    else:
+        npzfile = np.load(fname)
+        rhos = npzfile['rho']
+        accs = npzfile['acc']
+        phis = npzfile['phi']
+
+    return phis, accs, rhos
 
 
 def main():

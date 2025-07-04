@@ -310,10 +310,12 @@ def train_flow(
     validation_frac=0.25,
     checkpoint_every=None,
     checkpoint_hours=None,
+    checkpoint_at_end=False,
     max_checkpoints=None,
     checkpoint_dir=r"checkpoints/ffjord",
     checkpoint_name="ffjord",
     neptune_run=None,
+    reset_flow_lr=False,
 ):
     """
     Trains a flow using the given data.
@@ -331,7 +333,7 @@ def train_flow(
           'checkpoints/ffjord/'.
       checkpoint_name (str): Name to save checkpoints under. Defaults
           to 'ffjord'.
-      checkpoint_every (int): Checkpoint every N steps. Defaults to 128.
+      checkpoint_every (int): Checkpoint every N epochs. Defaults to 128.
 
     Returns:
       loss_history (list of floats): Loss after each training iteration.
@@ -339,6 +341,8 @@ def train_flow(
 
     # Split training/validation sample.
     # Handle the case where training/validation split has been manually done
+    has_weights = False
+
     if "eta_train" in data and "eta_val" in data:
         print("Flow training/validation batches were passed in manually..")
         n_samples = data["eta_train"].shape[0]
@@ -347,6 +351,11 @@ def train_flow(
 
         data_train = tf.constant(data["eta_train"])
         data_val = tf.constant(data["eta_val"])
+        if 'weights_train' in data and 'weights_val' in data:
+            has_weights = True
+            # Append weights as the last column in data tensors
+            data_train = tf.concat([data_train, tf.expand_dims(data['weights_train'], 1)], axis=1)
+            data_val = tf.concat([data_val, tf.expand_dims(data['weights_val'], 1)], axis=1)
     else:
         print("Forming flow training/validation batches..")
         n_samples = data["eta"].shape[0]
@@ -357,18 +366,25 @@ def train_flow(
 
         data_val = tf.constant(data["eta"][:n_val])
         data_train = tf.constant(data["eta"][n_val:])
+        if 'weights' in data:
+            has_weights = True
+            # Append weights as the last column in data tensors
+            data_train = tf.concat([data_train, tf.expand_dims(data['weights'][n_val:], 1)], axis=1)
+            data_val = tf.concat([data_val, tf.expand_dims(data['weights'][:n_val], 1)], axis=1)
 
     print(f"Train/validation split: {data_train.shape[0]}/{data_val.shape[0]}")
+    if has_weights:
+        print("Using weights in training/validation data.")
 
     # Create Tensorflow datasets
     batches = tf.data.Dataset.from_tensor_slices(data_train)
     batches = batches.shuffle(n_samples, reshuffle_each_iteration=True)
-    batches = batches.repeat(n_epochs + 1)
+    batches = batches.repeat(n_epochs)
     batches = batches.batch(batch_size, drop_remainder=True)
 
     val_batches = tf.data.Dataset.from_tensor_slices(data_val)
     val_batches = val_batches.shuffle(n_val, reshuffle_each_iteration=True)
-    val_batches = val_batches.repeat(n_epochs + 1)
+    val_batches = val_batches.repeat(n_epochs)
     val_batches = val_batches.batch(val_batch_size, drop_remainder=True)
 
     n_steps = (n_epochs * n_samples) // batch_size
@@ -377,35 +393,30 @@ def train_flow(
     )  # Due to the way batches are repeated, the number of steps per epoch is not necessarily an integer..
     epoch_counter, rounded_epoch_duration = unrounded_steps_per_epoch, 0
 
-    print(
-        "\n\n\nIMPORTANT: ",
-        n_epochs,
-        n_samples,
-        batch_size,
-        n_steps,
-        n_samples // batch_size,
-    )
-
-    if isinstance(optimizer, str):
-        if lr_type == "exponential":
-            lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-                lr_init, n_steps, lr_final / lr_init, staircase=False
-            )
-        elif lr_type == "step":
-            lr_schedule = lr_init
-            steps_since_decline = 0
+    def get_optimizer():
+        if isinstance(optimizer, str):
+            if lr_type == "exponential":
+                lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+                    lr_init, n_steps, lr_final / lr_init, staircase=False
+                )
+            elif lr_type == "step":
+                lr_schedule = lr_init
+                steps_since_decline = 0
+            else:
+                raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
+            if optimizer == "RAdam":
+                opt = tfa.optimizers.RectifiedAdam(
+                    lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
+                )
+            elif optimizer == "SGD":
+                opt = keras.optimizers.SGD(learning_rate=lr_schedule, momentum=0.5)
+            else:
+                raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
         else:
-            raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
-        if optimizer == "RAdam":
-            opt = tfa.optimizers.RectifiedAdam(
-                lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
-            )
-        elif optimizer == "SGD":
-            opt = keras.optimizers.SGD(learning_rate=lr_schedule, momentum=0.5)
-        else:
-            raise ValueError(f'Unrecognized optimizer: "{optimizer}"')
-    else:
-        opt = optimizer
+            opt = optimizer
+        return opt
+    opt = get_optimizer()
+    steps_since_decline = 0
 
     print(f"Optimizer: {opt}")
 
@@ -438,15 +449,23 @@ def train_flow(
             checkpoint.restore(latest)
             print(f"Beginning from step {int(step)}.")
 
-            # Try to load loss history
-            loss_fname = f"{latest}_loss.txt"
-            (
-                train_loss_history,
-                val_loss_history,
-                lr_history,
-                _,
-                _,
-            ) = utils.load_loss_history(loss_fname)
+            if reset_flow_lr:
+                # Reset the learning rate, and also forgo loading loss history
+                # since the history is used for learning rate scheduling
+                # (TODO: this is bad practice!)
+                print("Resetting flow learning rate.")
+                opt = get_optimizer()
+                steps_since_decline = 0
+            else:
+                # Try to load loss history
+                loss_fname = f"{latest}_loss.txt"
+                (
+                    train_loss_history,
+                    val_loss_history,
+                    lr_history,
+                    _,
+                    _,
+                ) = utils.load_loss_history(loss_fname)
 
         # Convert from # of epochs to # of steps between checkpoints
         # checkpoint_steps = checkpoint_every * n_samples // batch_size
@@ -456,69 +475,55 @@ def train_flow(
     # Were it not for checkpointing, we could use i == 0.
     traced = False
 
-    @tf.function
-    def training_step(batch):
-        print(f"Tracing training_step with batch shape {batch.shape} ...")
-        variables = flow.trainable_variables
-        with tf.GradientTape() as g:
-            g.watch(variables)
-            train_loss = -tf.reduce_mean(flow.log_prob(batch))
-        grads = g.gradient(train_loss, variables)
-        # tf.print([(v.name,tf.norm(dv)) for v,dv in zip(variables,grads)])
-        grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
-        # grads,global_norm = tf.clip_by_global_norm(grads, 100.)
-        # tf.print('\nglobal_norm =', global_norm)
-        # tf.print([(v.name,tf.norm(v)) for v in grads])
-        # tf.print('loss =', loss)
-        opt.apply_gradients(zip(grads, variables))
-        return train_loss
+    if has_weights:
+        @tf.function
+        def training_step(batch):
+            print(f"Tracing training_step with batch shape {batch.shape} ...")
+            variables = flow.trainable_variables
+            with tf.GradientTape() as g:
+                g.watch(variables)
+                train_loss = -tf.reduce_mean(flow.log_prob(batch[:, :-1]) * batch[:, -1])
+            grads = g.gradient(train_loss, variables)
+            grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
+            opt.apply_gradients(zip(grads, variables))
+            return train_loss
 
-    @tf.function
-    def validation_step(batch):
-        print(f"Tracing validation_step with batch shape {batch.shape} ...")
-        val_loss = -tf.reduce_mean(flow.log_prob(batch))
-        return val_loss
+        @tf.function
+        def validation_step(batch):
+            print(f"Tracing validation_step with batch shape {batch.shape} ...")
+            val_loss = -tf.reduce_mean(flow.log_prob(batch[:, :-1]) * batch[:, -1])
+            return val_loss
+    else:
+        @tf.function
+        def training_step(batch):
+            print(f"Tracing training_step with batch shape {batch.shape} ...")
+            variables = flow.trainable_variables
+            with tf.GradientTape() as g:
+                g.watch(variables)
+                train_loss = -tf.reduce_mean(flow.log_prob(batch))
+            grads = g.gradient(train_loss, variables)
+            grads, global_norm = tf.clip_by_global_norm(grads, 10.0)
+            opt.apply_gradients(zip(grads, variables))
+            return train_loss
+
+        @tf.function
+        def validation_step(batch):
+            print(f"Tracing validation_step with batch shape {batch.shape} ...")
+            val_loss = -tf.reduce_mean(flow.log_prob(batch))
+            return val_loss
 
     update_bar = utils.get_training_progressbar_fn(n_steps, train_loss_history, opt)
+    t1 = None
 
     # Main training loop
+    # First we check for stopping conditions, then perform the training step
+    # and update the progress bar. The order is important in case we load in
+    # a checkpoint which has already satisfied the stopping conditions.
     for i, (y, y_val) in enumerate(zip(batches, val_batches), int(step)):
         if i >= n_steps:
             # Break if too many steps taken. This can occur
             # if we began from a checkpoint.
             break
-
-        train_loss = training_step(y)
-        val_loss = validation_step(y_val)
-
-        train_loss_history.append(float(train_loss))
-        val_loss_history.append(float(val_loss))
-        lr_history.append(float(opt._decayed_lr(tf.float32)))
-
-        if neptune_run is not None:
-            neptune_run["train/train_loss"].append(train_loss_history[-1])
-            neptune_run["train/val_loss"].append(val_loss_history[-1])
-            neptune_run["train/lr"].append(lr_history[-1])
-
-            epoch_counter -= 1
-            rounded_epoch_duration += 1
-            if epoch_counter <= -0.5:
-                # we say that a new epoch has started when
-                # integer*unrounded_steps_per_epoch \in [-0.5, 0.5]
-                neptune_run["train/epoch_train_loss"].append(
-                    np.mean(train_loss_history[-rounded_epoch_duration:])
-                )
-                neptune_run["train/epoch_val_loss"].append(
-                    np.mean(val_loss_history[-rounded_epoch_duration:])
-                )
-                neptune_run["train/epoch_lr"].append(
-                    np.mean(lr_history[-rounded_epoch_duration:])
-                )
-                epoch_counter += unrounded_steps_per_epoch
-                rounded_epoch_duration = 0
-
-        # Progress bar
-        update_bar(i)
 
         # Adjust learning rate?
         if lr_type == "step":
@@ -568,15 +573,45 @@ def train_flow(
             else:
                 steps_since_decline += 1
 
+        train_loss = training_step(y)
+        val_loss = validation_step(y_val)
+
+        train_loss_history.append(float(train_loss))
+        val_loss_history.append(float(val_loss))
+        lr_history.append(float(opt._decayed_lr(tf.float32)))
+
+        if neptune_run is not None:
+            neptune_run["train/train_loss"].append(train_loss_history[-1])
+            neptune_run["train/val_loss"].append(val_loss_history[-1])
+            neptune_run["train/lr"].append(lr_history[-1])
+
+            epoch_counter -= 1
+            rounded_epoch_duration += 1
+            if epoch_counter <= -0.5:
+                # we say that a new epoch has started when
+                # integer*unrounded_steps_per_epoch \in [-0.5, 0.5]
+                neptune_run["train/epoch_train_loss"].append(
+                    np.mean(train_loss_history[-rounded_epoch_duration:])
+                )
+                neptune_run["train/epoch_val_loss"].append(
+                    np.mean(val_loss_history[-rounded_epoch_duration:])
+                )
+                neptune_run["train/epoch_lr"].append(
+                    np.mean(lr_history[-rounded_epoch_duration:])
+                )
+                epoch_counter += unrounded_steps_per_epoch
+                rounded_epoch_duration = 0
+
+        # Progress bar
+        update_bar(i)
+
         if not traced:
             # Get time after gradients function is first traced
             traced = True
             t1 = time()
-        else:
-            t1 = None
 
-        # Checkpoint
-        if (checkpoint_every is not None) and i and not (i % checkpoint_steps):
+        # Checkpoint periodically or at the very end
+        if (checkpoint_at_end and i == n_steps - 1) or ((checkpoint_every is not None) and i and not (i % checkpoint_steps)):
             print("Checkpointing ...")
             step.assign(i + 1)
             chkpt_fname = chkpt_manager.save()
@@ -612,29 +647,82 @@ def train_flow(
 
 
 def main():
-    flow = FFJORDFlow(2, 4, 16)
+    from scipy.stats import multivariate_normal
+    test_weights = True
 
-    n_samples = 8 * 1024
-    mu = [[-2.0, 0.0], [2.0, 0.0]]
+    flow = FFJORDFlow(n_dim=2, n_hidden=5, hidden_size=20, n_bij=1)
+
+    # If directory checkpoints exists, delete it
+    if os.path.exists("checkpoints/ffjord"):
+        import shutil
+
+        shutil.rmtree("checkpoints/ffjord")
+
+    n_samples = 16 * 1024
+    mu = [[-2, 0.0], [2, 0.0]]
     cov = [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]]]
-    data = tf.concat(
-        [
-            np.random.multivariate_normal(m, c, n_samples // 2).astype("f4")
-            for m, c in zip(mu, cov)
-        ],
-        axis=0,
+
+    data = {}
+    if test_weights:
+        # Uniformly sample a grid between -4 and 4 and -3 and 3
+        x = np.linspace(-4, 4, int(n_samples**0.5))
+        y = np.linspace(-3, 3, int(n_samples**0.5))
+        print(int(n_samples**0.5))
+        x, y = np.meshgrid(x, y)
+        x = x.flatten()
+        y = y.flatten()
+        data['eta'] = np.vstack([x, y]).T
+
+        # Calculate the weights
+        weights = (multivariate_normal.pdf(data['eta'], mean=mu[0], cov=cov[0]) +
+                   multivariate_normal.pdf(data['eta'], mean=mu[1], cov=cov[1]))/2
+        data['weights'] = weights
+        # Shuffle the data
+        perm = np.random.permutation(n_samples)
+        data['eta'] = tf.constant(data['eta'][perm].astype('f4'))
+        data['weights'] = tf.constant(data['weights'][perm].astype('f4'))
+
+        plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], weights=data['weights'], bins=128, cmap="Blues")
+        plt.savefig("data_weights.png")
+    else:
+        data['eta'] = tf.concat(
+            [
+                np.random.multivariate_normal(m, c, n_samples // 2).astype("f4")
+                for m, c in zip(mu, cov)
+            ],
+            axis=0,
+        )
+
+        # Shuffle the data
+        data['eta'] = tf.random.shuffle(data['eta'])
+        plt.hist2d(data['eta'][:, 0], data['eta'][:, 1], bins=128, cmap="Blues")
+        plt.savefig("data.png")
+
+    train_flow(
+        flow, data, batch_size=1024, n_epochs=16, checkpoint_every=256,
+        optimizer='RAdam', checkpoint_at_end=True, lr_init=0.02, lr_patience=16
     )
 
-    train_flow(flow, data, batch_size=1024, n_epochs=1, checkpoint_every=256)
+    fname = "checkpoints/ffjord/"
+    flow.save_specs('checkpoints/ffjord/ffjord')
+    flow2 = FFJORDFlow.load_latest(fname)
 
-    fname = flow.save("checkpoints/ffjord/ffjord_test")
-    flow2 = FFJORDFlow.load(fname)
+    samples = flow.sample(32 * 1024)
+    plt.hist2d(samples[:, 0], samples[:, 1], bins=128, cmap="Blues")
+    fname = "samples.png" if not test_weights else "samples_weights.png"
+    plt.savefig(fname)
 
     x = tf.random.normal([5, 2])
+
+    theoretical_y = np.log(
+        (multivariate_normal.pdf(x, mean=mu[0], cov=cov[0]) +
+         multivariate_normal.pdf(x, mean=mu[1], cov=cov[1]))/2
+    )
     y = flow.log_prob(x)
     y2 = flow2.log_prob(x)
-    print(y)
-    print(y2)
+    print(theoretical_y)
+    print(y.numpy())
+    print(y2.numpy())
 
     # for i in range(10):
     #    eta = tf.random.normal([1024,2])

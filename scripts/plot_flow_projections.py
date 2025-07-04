@@ -126,7 +126,7 @@ def sample_from_flows(flow_list, n_samples, attrs, batch_size=1024):
 
 
 def plot_1d_marginals(
-    coords_train, coords_sample, fig_dir, loss=None, coordsys="cart", fig_fmt=("svg",)
+    coords_train, coords_sample, fig_dir, weights_train=None, weights_sample=None, loss=None, coordsys="cart", fig_fmt=("svg",)
 ):
     if coordsys == "cart":
         labels = ["$x$", "$y$", r"$z$", "$v_x$", "$v_y$", "$v_z$"]
@@ -158,9 +158,9 @@ def plot_1d_marginals(
 
         kw = dict(range=(np.min(xlim), np.max(xlim)), bins=101, density=True)
 
-        ax.hist(coords_train[k], label=r"$\mathrm{train}$", alpha=0.7, **kw)
+        ax.hist(coords_train[k], label=r"$\mathrm{train}$", alpha=0.7, weights=weights_train, **kw)
         ax.hist(
-            coords_sample[k], histtype="step", alpha=0.8, label=r"$\mathrm{NF}$", **kw
+            coords_sample[k], histtype="step", alpha=0.8, label=r"$\mathrm{NF}$", weights=weights_sample, **kw
         )
         ax.set_xlim(xlim)
 
@@ -197,6 +197,7 @@ def plot_2d_marginal(
     eta_train, eta_sample,
     fig_dir,
     dim1, dim2,
+    weights_train=None,
     logscale=False,
     fig_fmt=("svg",),
 ):
@@ -253,14 +254,14 @@ def plot_2d_marginal(
         rasterized=True,
     )
 
-    n_train = len(x_train)
+    n_train = len(x_train) if weights_train is None else np.sum(weights_train)
     n_sample = len(x_sample)
 
     if logscale:
         kw_col = dict(cmap="cubehelix", norm=LogNorm(vmin=1))
     else:
         kw_col = dict(cmap="viridis")
-    nt, _, _, _ = ax_t.hist2d(x_train, y_train, **kw, **kw_col)
+    nt, _, _, _ = ax_t.hist2d(x_train, y_train, weights=weights_train, **kw, **kw_col)
 
     if logscale:
         kw_col["norm"] = LogNorm(
@@ -323,7 +324,14 @@ def add_1dpopulation_boundaries(axs, dim1, attrs):
     valid_keys = ["x", "y", "z", "cylR"]
     plot_sph, plot_cyl = [], []
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         plot_sph = [r_in, r_out]
     elif attrs["volume_type"] == "cylinder":
         if "r_in" in attrs:
@@ -357,7 +365,14 @@ def add_2dpopulation_boundaries(axs, dim1, dim2, attrs, color="white"):
 
     plot_sph, plot_cyl = [], []
     if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-        r_in, r_out = 1 / attrs["parallax_max"], 1 / attrs["parallax_min"]
+        if "r_out" in attrs:
+            r_out = attrs["r_out"]
+        else:
+            r_out = 1 / attrs["parallax_min"]
+        if "r_in" in attrs:
+            r_in = attrs["r_in"]
+        else:
+            r_in = 1 / attrs["parallax_max"]
         plot_sph = [r_in, r_out]
     elif attrs["volume_type"] == "cylinder":
         if "r_in" in attrs:
@@ -430,6 +445,7 @@ def plot_2d_slice(
     dim1, dim2, dimz,
     z, dz,
     attrs,
+    weights_train=None,
     fig_fmt=("svg",),
     verbose=False,
 ):
@@ -454,6 +470,7 @@ def plot_2d_slice(
     idx_sample = (coords_sample[dimz] > z - dz) & (coords_sample[dimz] < z + dz)
     x_train, x_sample = coords_train[dim1][idx_train], coords_sample[dim1][idx_sample]
     y_train, y_sample = coords_train[dim2][idx_train], coords_sample[dim2][idx_sample]
+    weights_train = weights_train[idx_train]
 
     labels = {k: l for k, l in zip(keys, labels)}
 
@@ -481,10 +498,10 @@ def plot_2d_slice(
         rasterized=True,
     )
 
-    n_train = len(x_train)
+    n_train = len(x_train) if weights_train is None else np.sum(weights_train)
     n_sample = len(x_sample)
 
-    nt, _, _, _ = ax_t.hist2d(x_train, y_train, **kw)
+    nt, _, _, _ = ax_t.hist2d(x_train, y_train, weights=weights_train, **kw)
     norm = Normalize(vmin=0, vmax=np.max(nt) * n_sample / n_train)
     ns, _, _, _ = ax_s.hist2d(x_sample, y_sample, norm=norm, **kw)
 
@@ -547,15 +564,20 @@ def plot_2d_slice(
     plt.close(fig)
 
 
-def evaluate_loss(flow_list, eta_train, batch_size=1024):
+def evaluate_loss(flow_list, eta, weights=None, batch_size=16384):
+    def weighted_std(values, weights):
+        average = np.average(values, weights=weights)
+        variance = np.average((values - average)**2, weights=weights)
+        return np.sqrt(variance)
+    
     n_flows = len(flow_list)
-    n_samples = eta_train.shape[0]
+    n_samples = eta.shape[0]
 
     # Sample from ensemble of flows
     # n_batches = n_samples // batch_size
-    # eta_batches = np.reshape(eta_train, (n_batches,batch_size,6)).astype('f4')
+    # eta_batches = np.reshape(eta, (n_batches,batch_size,6)).astype('f4')
     # eta_batches = [
-    #    eta_train[i0:i0+batch_size].astype('f4')
+    #    eta[i0:i0+batch_size].astype('f4')
     #    for i0 in range(0,n_samples,batch_size)
     # ]
     # n_batches = len(eta_batches)
@@ -563,24 +585,34 @@ def evaluate_loss(flow_list, eta_train, batch_size=1024):
     if np.mod(n_samples, batch_size) > 0:
         n_batches += 1
 
+    std = []
     loss = []
     bar = progressbar.ProgressBar(max_value=n_batches * n_flows)
+    print(weights)
+    if weights is None:
+        weights = np.ones(n_samples)
 
     for i, flow in enumerate(flow_list):
         loss_i = []
         weight_i = []
 
         @tf.function
-        def logp_batch(eta):
+        def logp_batch(eta, weights=None):
             print("Tracing logp_batch ...")
-            return -tf.math.reduce_mean(flow.log_prob(eta))
+            return -tf.math.reduce_mean(flow.log_prob(eta) * weights)
 
         for k in range(0, n_samples, batch_size):
-            eta = eta_train[k: k + batch_size].astype("f4")
-            loss_i.append(logp_batch(tf.constant(eta)).numpy())
-            weight_i.append(eta.shape[0])
+            eta_k = eta[k: k + batch_size].astype("f4")
+            weight_k = weights[k: k + batch_size].astype("f4")
+            loss_i.append(logp_batch(tf.constant(eta_k), tf.constant(weight_k)))
+            weight_i.append(np.sum(weight_k))
             bar.update(i * n_batches + k // batch_size + 1)
 
+        print(weight_i)
+        print(loss_i)
+        print(np.array(loss_i).shape)
+        print(np.array(loss_i).shape)
+        std.append(weighted_std(loss_i, weights=weight_i))
         loss.append(np.average(loss_i, weights=weight_i))
 
     loss_std = np.std(loss)
@@ -766,6 +798,7 @@ def plot_1d_slice(
     dim1, dimy, dimz,
     y, dy, z, dz,
     attrs,
+    weights_train=None,
     fig_fmt=("svg",),
     verbose=False,
 ):
@@ -822,10 +855,10 @@ def plot_1d_slice(
 
     kw = dict(range=(lim_min, lim_max), bins=64)
 
-    n_train = len(x_train)
+    n_train = len(x_train) if weights_train is None else np.sum(weights_train)
     n_sample = len(x_sample)
 
-    nt, bins, _ = ax_h.hist(x_train, histtype="step", **kw, label="train")
+    nt, bins, _ = ax_h.hist(x_train, histtype="step", weights=weights_train, **kw, label="train")
     ns, *_ = ax_h.hist(
         x_sample,
         histtype="step",
@@ -880,6 +913,54 @@ def plot_1d_slice(
     plt.close(fig)
 
 
+def calculate_and_store_loss(data, flows, fig_dir, batch_size=16384):
+    # Extract train and validation sets
+    fname = os.path.join(fig_dir, "loss.txt")
+    if not os.path.exists(fname):
+        weights_val, weights_train = None, None
+        if "eta_train" in data and "eta_val" in data:
+            print("Flow training/validation batches were passed in manually..")
+            n_samples = data["eta_train"].shape[0]
+            n_val = data["eta_val"].shape[0]
+            val_batch_size = int(n_val / (n_samples + n_val) * batch_size)
+
+            eta_train = data["eta_train"]
+            eta_val = data["eta_val"]
+            if "weights_val" and "weights_train" in data:
+                weights_val = data["weights_val"]
+                weights_train = data["weights_train"]
+        else:
+            print("Forming flow training/validation batches..")
+            n_samples = data["eta"].shape[0]
+            n_val = int(0.25 * n_samples)
+
+            val_batch_size = int(0.25 * batch_size)
+            n_samples -= n_val
+
+            eta_val = data["eta"][:n_val]
+            eta_train = data["eta"][n_val:]
+            if "weights" in data:
+                weights_val = data["weights"][:n_val]
+                weights_train = data["weights"][n_val:]
+
+        train_loss, train_loss_std = evaluate_loss(flows, eta_train, weights_train, batch_size)
+        val_loss, val_loss_std = evaluate_loss(flows, eta_val, weights_val, batch_size)
+
+        # Save the train loss into a txt
+        with open(fname, "w") as f:
+            f.write(f"train_loss = {train_loss:.6f} +/- {train_loss_std:.6f}\n")
+            f.write(f"  val_loss = {val_loss:.6f} +/- {val_loss_std:.6f}\n")
+    else:
+        print(f"Loss file already exists at {fname}.")
+        with open(fname, "r") as f:
+            lines = f.readlines()
+            train_loss = float(lines[0].split()[2])
+            train_loss_std = float(lines[0].split()[4])
+            val_loss = float(lines[1].split()[2])
+            val_loss_std = float(lines[1].split()[4])
+        print(f"train_loss = {train_loss:.6f} +/- {train_loss_std:.6f}")
+
+
 def main():
     """
     Plots different diagnostics for the flow and the training data.
@@ -919,6 +1000,13 @@ def main():
         type=float,
         default=1,
         help="Draw oversample*(# of training samples) samples from flows.",
+    )
+    parser.add_argument(
+        "--mask-fname",
+        type=str,
+        required=False,
+        default=None,
+        help="Filename for the mask for the samples. The mask is in max distance - healpix format.",
     )
     parser.add_argument(
         "--spherical-origin",
@@ -994,6 +1082,8 @@ def main():
                 + "/"
             )
 
+        if args.mask_fname is not None:
+            fig_dir = fig_dir[:-1] + '_masked/'
         sample_fname = fig_dir + "samples.h5"
         print(fname_loss_pdf, os.path.isfile(fname_loss_pdf))
         if os.path.isfile(fname_loss_pdf):
@@ -1007,42 +1097,28 @@ def main():
     print("Loading training data ...")
     data_train, attrs_train = utils.load_training_data(args.input, cut_attrs=True)
     eta_train = data_train["eta"]
+    weights_train = data_train["weights"] if "weights" in data_train else None
     n_train = eta_train.shape[0]
 
     print(attrs_train)
     print(f"  --> Training data shape = {eta_train.shape}")
 
     flows = None
+    if flows is None:
+        print("Loading flows ...")
+        flows = utils.load_flows(args.flows)
+        calculate_and_store_loss(data_train, flows, args.fig_dir)
 
     df_deta_sample = None
     if args.store_samples is not None and os.path.isfile(args.store_samples):
         print("Loading pre-generated samples ...")
         with h5py.File(args.store_samples, "r") as f:
             eta_sample = f["eta"][:]
-            loss_mean = (
-                f["eta"].attrs["loss_training"]
-                if "loss_training" in f["eta"].attrs
-                else 0
-            )
-            loss_std = (
-                f["eta"].attrs["loss_std_training"]
-                if "loss_std_training" in f["eta"].attrs
-                else 0
-            )
             if "df_deta" in f and args.plot_leastsq:
                 print("Loading in pre-generated sample gradients ...")
                 df_deta_sample = f["df_deta"][:]
-
-        print(f"  --> loss = {loss_mean:.5f} +- {loss_std:.5f}")
         print(f"  --> {len(eta_sample)} samples")
     else:
-        if flows is None:
-            print("Loading flows ...")
-            flows = utils.load_flows(args.flows)
-
-        print("Evaluating loss ...")
-        loss_mean, loss_std = evaluate_loss(flows, eta_train)
-        print(f"  --> loss = {loss_mean:.5f} +- {loss_std:.5f}")
         print("Sampling from flows ...")
         eta_sample = sample_from_flows(
             flows, int(args.oversample * n_train), attrs_train
@@ -1056,8 +1132,19 @@ def main():
                 dset = f.create_dataset(
                     "eta", data=eta_sample, chunks=True, compression="lzf"
                 )
-                dset.attrs["loss_training"] = loss_mean
-                dset.attrs["loss_std_training"] = loss_std
+
+    if args.mask_fname is not None:
+        # Update df_data to include only the data within the mask
+        print("Applying mask to the samples ...")
+        mask = utils.get_mask_eta(eta_sample, args.mask_fname)[0]
+        eta_sample = eta_sample[mask]
+        if df_deta_sample is not None:
+            df_deta_sample = df_deta_sample[mask]
+        mask = utils.get_mask_eta(eta_train, args.mask_fname)[0]
+        eta_train = eta_train[mask]
+        n_train = len(eta_train)
+        if weights_train is not None:
+            weights_train = weights_train[mask]
 
     if args.plot_leastsq:
         if df_deta_sample is None:
@@ -1109,8 +1196,6 @@ def main():
                     dset = f.create_dataset(
                         "eta", data=eta_sample, chunks=True, compression="lzf"
                     )
-                    dset.attrs["loss_training"] = loss_mean
-                    dset.attrs["loss_std_training"] = loss_std
                     f.create_dataset(
                         "df_deta", data=df_deta_sample, chunks=True, compression="lzf"
                     )
@@ -1141,7 +1226,8 @@ def main():
         plot_1d_marginals(
             coords_train, coords_sample,
             args.fig_dir,
-            loss=loss_mean,
+            weights_train=weights_train,
+            #loss=loss_mean,
             coordsys=coordsys,
             fig_fmt=args.fig_fmt,
         )
@@ -1175,6 +1261,7 @@ def main():
             eta_train, eta_sample,
             args.fig_dir,
             dim1, dim2,
+            weights_train=weights_train,
             logscale=args.logscale,
             fig_fmt=args.fig_fmt,
         )
@@ -1196,6 +1283,7 @@ def main():
             args.fig_dir,
             dim1, dim2, dimz,
             z, dz,
+            weights_train=weights_train,
             attrs=attrs_train,
             fig_fmt=args.fig_fmt,
             verbose=True,
@@ -1217,6 +1305,7 @@ def main():
                 args.fig_dir,
                 dim1, dimy, dimz,
                 y, dy, z, dz,
+                weights_train=weights_train,
                 attrs=attrs_train,
                 fig_fmt=args.fig_fmt,
                 verbose=True,
@@ -1225,6 +1314,7 @@ def main():
             print("  --> Failed to plot 1d slice! Probably because the slice is empty.")
 
     if args.plot_leastsq:
+        # TODO: Support weights for the least squares estimate
         print(
             "Plotting 2D least square estimates of \partial f/\partial t with omega=v_0=0 ..."
         )
