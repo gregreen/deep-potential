@@ -679,7 +679,7 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
     return idx
 
 
-def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vector_field=None):
+def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), spherical_vel_origin=(0,0,0), cylindrical_vel_origin=(0,0,0), vector_field=None):
     """Calculate components in different coordinate systems. If a vector field is specified, then the function
     returns the components of the vector field in Cartesian, Spherical, and Cylindrical coordinates. This assumes
     that the positions of the vector fields values are specified by eta (eta is in Cartesian). If vector_field is
@@ -695,6 +695,8 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
 
     sph_x0 = np.array(spherical_origin)
     cyl_x0 = np.array(cylindrical_origin)
+    sph_v0 = np.array(spherical_vel_origin)
+    cyl_v0 = np.array(cylindrical_vel_origin)
 
     if vector_field is not None:
         # Cartesian
@@ -767,17 +769,23 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), vecto
             cart = {**cart, **{"vx": eta[:, 3], "vy": eta[:, 4], "vz": vz}}
 
             # Cylindrical
-            cyl_vR = eta[:, 3] * cyl_cos_phi + eta[:, 4] * cyl_sin_phi
-            cyl_vT = -eta[:, 3] * cyl_sin_phi + eta[:, 4] * cyl_cos_phi
-            cyl_vz = eta[:, 5]
+            vx = eta[:, 3] - cyl_v0[0]
+            vy = eta[:, 4] - cyl_v0[1]
+            vz = eta[:, 5] - cyl_v0[2]
+            cyl_vR = vx * cyl_cos_phi + vy * cyl_sin_phi
+            cyl_vT = -vx * cyl_sin_phi + vy * cyl_cos_phi
+            cyl_vz = vz
             cyl = {**cyl, **{"cylvR": cyl_vR, "cylvT": cyl_vT, "cylvz": cyl_vz}}
 
             # Spherical
-            vr = np.sum((eta[:, :3] - sph_x0) * eta[:, 3:], axis=1) / r
+            vx = eta[:, 3] - sph_v0[0]
+            vy = eta[:, 4] - sph_v0[1]
+            vz = eta[:, 5] - sph_v0[2]
+            vr = np.sum((eta[:, :3] - sph_x0) * (eta[:, 3:] - sph_v0), axis=1) / r
             vth = (z * vr - r * vz) / sph_R
             cos_phi = (eta[:, 0] - sph_x0[0]) / cyl_R
             sin_phi = (eta[:, 1] - sph_x0[1]) / cyl_R
-            vT = -eta[:, 3] * sin_phi + eta[:, 4] * cos_phi
+            vT = -vx * sin_phi + vy * cos_phi
             sph = {**sph, **{"vth": vth, "vT": vT, "vr": vr}}
 
     return dict(**cart, **cyl, **sph)
