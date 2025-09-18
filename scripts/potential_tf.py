@@ -7,7 +7,6 @@ import tensorflow as tf
 
 print(f"Tensorflow version {tf.__version__}")
 from tensorflow import keras
-import tensorflow_addons as tfa
 import tensorflow_probability as tfp
 
 print(f"Tensorflow Probability version {tfp.__version__}")
@@ -774,6 +773,7 @@ def train_potential(
         else:
             raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
         if optimizer == "RAdam":
+            import tensorflow_addons as tfa
             opt = tfa.optimizers.RectifiedAdam(
                 lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
             )

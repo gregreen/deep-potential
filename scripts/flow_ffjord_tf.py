@@ -16,7 +16,6 @@ import tensorflow_probability as tfp
 
 tfb = tfp.bijectors
 tfd = tfp.distributions
-import tensorflow_addons as tfa
 import sonnet as snt
 
 # Misc imports
@@ -405,6 +404,7 @@ def train_flow(
             else:
                 raise ValueError(f'Unknown lr_type: "{lr_type}" ("exponential" or "step")')
             if optimizer == "RAdam":
+                import tensorflow_addons as tfa
                 opt = tfa.optimizers.RectifiedAdam(
                     lr_schedule, total_steps=n_steps, warmup_proportion=warmup_proportion
                 )
