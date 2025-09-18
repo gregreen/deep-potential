@@ -7,7 +7,6 @@ import tensorflow as tf
 print(f"Tensorflow version {tf.__version__}")
 # tf.debugging.set_log_device_placement(True)
 from tensorflow import keras
-import tensorflow_addons as tfa
 import tensorflow_probability as tfp
 
 print(f"Tensorflow Probability version {tfp.__version__}")
@@ -57,6 +56,7 @@ def train_flows(
     checkpoint_hours=None,
     max_checkpoints=None,
     neptune_run=None,
+    reset_flow_lr=False,
 ):
     n_samples = data["eta"].shape[0]
     n_steps = n_samples * n_epochs // batch_size
@@ -71,7 +71,7 @@ def train_flows(
 
     for i in range(n_flows):
         print(f"Training flow {i+1} of {n_flows} ...")
-
+        
         flow_model = flow_ffjord_tf.FFJORDFlow(
             6,
             n_hidden,
@@ -105,6 +105,7 @@ def train_flows(
             checkpoint_dir=checkpoint_dir,
             checkpoint_name=checkpoint_name,
             neptune_run=neptune_run,
+            reset_flow_lr=reset_flow_lr,
             **lr_kw,
         )
 
@@ -116,8 +117,10 @@ def train_potential(
     fname,
     n_hidden=3,
     hidden_size=256,
-    xi=1.0,
-    lam=1.0,
+    alpha=1.0,
+    beta=1.0,
+    lambda_=1.0,
+    gamma=0.0,
     l2=0,
     n_epochs=4096,
     batch_size=1024,
@@ -195,9 +198,11 @@ def train_potential(
         frameshift_model=frameshift_model,
         n_epochs=n_epochs,
         batch_size=batch_size,
-        xi=xi,
-        lam=lam,
+        alpha=alpha,
+        beta=beta,
+        lambda_=lambda_,
         l2=l2,
+        gamma=gamma,
         validation_frac=validation_frac,
         optimizer=optimizer,
         warmup_proportion=warmup_proportion,
@@ -385,8 +390,10 @@ def load_params(fname):
                 "sample_batch_size": {"type": "integer", "default": 1024},
                 "n_hidden": {"type": "integer", "default": 3},
                 "hidden_size": {"type": "integer", "default": 256},
-                "xi": {"type": "float", "default": 1.0},
-                "lam": {"type": "float", "default": 1.0},
+                "alpha": {"type": "float", "default": 1.0},
+                "beta": {"type": "float", "default": 1.0},
+                "lambda_": {"type": "float", "default": 1.0},
+                "gamma": {"type": "float", "default": 0.0},
                 "l2": {"type": "float", "default": 0.01},
                 "n_epochs": {"type": "integer", "default": 64},
                 "batch_size": {"type": "integer", "default": 1024},
@@ -426,22 +433,28 @@ def load_params(fname):
                     "schema": {
                         "dz": {"type": "float", "default": 0.0},
                         "dz_trainable": {"type": "boolean", "default": False},
-                        "mn_amp": {"type": "float", "default": 0.0},
-                        "mn_amp_trainable": {"type": "boolean", "default": False},
-                        "mn_a": {"type": "float", "default": 0.0},
-                        "mn_a_trainable": {"type": "boolean", "default": False},
-                        "mn_b": {"type": "float", "default": 0.0},
-                        "mn_b_trainable": {"type": "boolean", "default": False},
+                        "mn1_amp": {"type": "float", "default": 0.0},
+                        "mn1_amp_trainable": {"type": "boolean", "default": False},
+                        "mn1_a": {"type": "float", "default": 0.0},
+                        "mn1_a_trainable": {"type": "boolean", "default": False},
+                        "mn1_b": {"type": "float", "default": 0.0},
+                        "mn1_b_trainable": {"type": "boolean", "default": False},
+                        "mn2_amp": {"type": "float", "default": 0.0},
+                        "mn2_amp_trainable": {"type": "boolean", "default": False},
+                        "mn2_a": {"type": "float", "default": 0.0},
+                        "mn2_a_trainable": {"type": "boolean", "default": False},
+                        "mn2_b": {"type": "float", "default": 0.0},
+                        "mn2_b_trainable": {"type": "boolean", "default": False},
+                        "mn3_amp": {"type": "float", "default": 0.0},
+                        "mn3_amp_trainable": {"type": "boolean", "default": False},
+                        "mn3_a": {"type": "float", "default": 0.0},
+                        "mn3_a_trainable": {"type": "boolean", "default": False},
+                        "mn3_b": {"type": "float", "default": 0.0},
+                        "mn3_b_trainable": {"type": "boolean", "default": False},
                         "halo_amp": {"type": "float", "default": 0.0},
                         "halo_amp_trainable": {"type": "boolean", "default": False},
                         "halo_a": {"type": "float", "default": 0.0},
                         "halo_a_trainable": {"type": "boolean", "default": False},
-                        "bulge_amp": {"type": "float", "default": 0.0},
-                        "bulge_amp_trainable": {"type": "boolean", "default": False},
-                        "bulge_rcut": {"type": "float", "default": 0.0},
-                        "bulge_rcut_trainable": {"type": "boolean", "default": False},
-                        "bulge_alpha": {"type": "float", "default": 0.0},
-                        "bulge_alpha_trainable": {"type": "boolean", "default": False},
                     },
                 },
                 "analytic_potential_barmodel": {
@@ -498,10 +511,22 @@ def main():
         help="Filename pattern to store flows in.",
     )
     parser.add_argument(
+        "--reset-flow-lr",
+        action="store_true",
+        help="Reset the learning rate of the flow in the beginning (this is useful when loading in an old model).",
+    )
+    parser.add_argument(
         "--potential-fname",
         type=str,
         default="models/Phi/Phi",
         help="Filename to store potential in.",
+    )
+    parser.add_argument(
+        "--potential-mask",
+        type=str,
+        required=False,
+        default=None,
+        help="Filename for the mask for the potential. The mask is in distance - healpix format.",
     )
     parser.add_argument(
         "--potential-frameshift",
@@ -590,9 +615,12 @@ def main():
 
             # Train and save normalizing flows
             print("Training normalizing flows ...")
+            t0 = time()
             flows = train_flows(
-                data, args.flow_fname, **params["df"], neptune_run=neptune_run
+                data, args.flow_fname, **params["df"], neptune_run=neptune_run, reset_flow_lr=args.reset_flow_lr
             )
+            dt0 = time() - t0
+            print(f"Training took {time()-t0:.2f} s.")
         # Re-load the flows (this removes the regularization terms)
         flows = load_flows(args.flow_fname)
 
@@ -606,6 +634,7 @@ def main():
     else:
         # Sample from the flows and calculate gradients
         print("Sampling from flows ...")
+        t0 = time()
         n_samples = params["Phi"].pop("n_samples")
         grad_batch_size = params["Phi"].pop("grad_batch_size")
         sample_batch_size = params["Phi"].pop("sample_batch_size")
@@ -630,12 +659,23 @@ def main():
                 sample_batch_size=sample_batch_size,
                 f_reduce=np.median if args.flow_median else utils.clipped_vector_mean,
             )
+        dt1 = time() - t0
+        print(f"Sampling took {time()-t0:.2f} s.")
         save_df_data(df_data, args.df_grads_fname)
 
     # ================= Training the potential =================
     if not args.no_potential_training:
         print(params["Phi"])
         print("Fitting the potential ...")
+        t0 = time()
+
+        if args.potential_mask is not None:
+            # Update df_data to include only the data within the mask
+            mask = utils.get_mask_eta(df_data["eta"], args.potential_mask)[0]
+            df_data["eta"] = df_data["eta"][mask]
+            df_data["df_deta"] = df_data["df_deta"][mask]
+            if "f" in df_data:
+                df_data["f"] = df_data["f"][mask]
 
         phi_model = train_potential(
             df_data,
@@ -646,7 +686,16 @@ def main():
             use_analytic_potential_barmodel=args.analytic_potential_barmodel,
             **params["Phi"],
         )
+        dt2 = time() - t0
+        print(f"Training took {time()-t0:.2f} s.")
 
+    print("Runtime summary:")
+    if "dt0" in locals():
+        print(f"Flow training took {dt0:.2f} s.")
+    if "dt1" in locals():
+        print(f"Flow sampling took {dt1:.2f} s.")
+    if "dt2" in locals():
+        print(f"Potential training took {dt2:.2f} s.")
     return 0
 
 
