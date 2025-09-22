@@ -1,53 +1,30 @@
-import tensorflow as tf
-
-print(f"Tensorflow version {tf.__version__}")
-# tf.debugging.set_log_device_placement(True)
-from tensorflow import keras
-import tensorflow_addons as tfa
-import tensorflow_probability as tfp
-
-print(f"Tensorflow Probability version {tfp.__version__}")
-
-import progressbar
+from tqdm import tqdm
 import time
 import numpy as np
 
 import utils
 
+import equinox as eqx
+import jax
+import jax.nn as jnn
+import jax.numpy as jnp
 
-def get_sampling_progressbar_fn(n_batches, n_samples):
-    widgets = [
-        progressbar.Bar(),
-        progressbar.Percentage(),
-        " | ",
-        progressbar.Timer(format="Elapsed: %(elapsed)s"),
-        " | ",
-        progressbar.AdaptiveETA(),
-        " | ",
-        progressbar.Variable("batches_done", width=6, precision=0),
-        ", ",
-        progressbar.Variable("n_batches", width=6, precision=0),
-        ", ",
-        progressbar.Variable("n_samples", width=8, precision=0),
-    ]
-    bar = progressbar.ProgressBar(max_value=n_batches, widgets=widgets)
-    # n_batches = n_batches
-    # n_samples = n_samples
 
-    def update_progressbar(i):
-        bar.update(i + 1, batches_done=i + 1, n_batches=n_batches,
-                   n_samples=n_samples)
 
-    return update_progressbar
+@eqx.filter_jit
+def sample_batch_fn(model, sample_key, batch_size):
+    return model.sample(sample_key, (batch_size,))
 
+def value_and_grad_fn(model, eta_batch):
+    return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
 
 def sample_from_different_flows(
+    key,
     flow_list,
     attrs_list,
     n_samples,
-    return_indiv=False,
-    grad_batch_size=128,
-    sample_batch_size=128,
+    grad_batch_size=500,
+    sample_batch_size=5000,
 ):
     """
     Returns a combined sample from different flows, while respecting their own
@@ -63,69 +40,66 @@ def sample_from_different_flows(
     nflow_batches = [
         -(-nflow_samples[i] // sample_batch_size) for i in range(len(nflow_samples))
     ]
+    total_iters = sum(nflow_batches)
 
     eta = []
-    bar = get_sampling_progressbar_fn(sum(nflow_batches), n_samples)
-    iteration = 0
     print("Sampling eta..")
-    for i, flow in enumerate(flow_list):
-        attrs = attrs_list[i]
 
-        @tf.function
-        def sample_batch():
-            # print('Tracing sample_batch ...')
-            return flow.sample([sample_batch_size])
+    with tqdm(total=total_iters, desc="Sampling flows") as pbar:
+        for i, flow in enumerate(flow_list):
+            attrs = attrs_list[i]
 
-        for k in range(nflow_batches[i]):
-            n_sample = min(sample_batch_size, nflow_samples[i] - k * sample_batch_size)
-            eta_sample = sample_batch().numpy().astype("f4")[:n_sample]
-            # Reject samples that are outside the range of validity
+            n_processed = 0
+            while True:
+                key, sample_key = jax.random.split(key)
+                eta_sample = np.array(sample_batch_fn(flow, sample_key, sample_batch_size))
+                # Reject samples that are outside the range of validity
 
-            if attrs["has_spatial_cut"]:
-                idx = utils.get_index_of_points_inside_attrs(eta_sample, attrs)
+                if attrs["has_spatial_cut"]:
+                    idx = utils.get_index_of_points_inside_attrs(eta_sample, attrs)
+                    idx_size = eta_sample[idx].shape[0]
+                    n_keep = min(nflow_samples[i] - n_processed, idx_size)
+                    n_processed += n_keep
 
-                eta.append(eta_sample[idx])
-            else:
-                eta.append(eta_sample)
-            bar(iteration)
-            iteration += 1
+                    eta.append(eta_sample[idx][:n_keep])
+                else:
+                    n_processed += eta_sample.shape[0]
+                    eta.append(eta_sample)
+                # If we have enough samples, we can stop
+                if n_processed >= nflow_samples[i]:
+                    break
+
+                pbar.update(1)
     # All eta will have at least one flow in their region of validity
     eta = np.concatenate(eta, axis=0)
+    print(f'Shape of sampled eta: {eta.shape}')
 
     # Do ceiling divide
     # https://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python
-    n_batches = -(-len(eta) // grad_batch_size)
-    bar = get_sampling_progressbar_fn(len(flow_list) * n_batches, n_samples)
-    iteration = 0
     print("Sampling gradients of eta..")
+    nflow_batches = [
+        -(-nflow_samples[i] // grad_batch_size) for i in range(len(nflow_samples))
+    ]
+    total_iters = sum(nflow_batches)
 
     df_deta_indiv = np.zeros((len(flow_list),) + eta.shape, dtype="f4")
-    for i, flow in enumerate(flow_list):
+    with tqdm(total=total_iters, desc="Calculating f, df/deta") as pbar:
+        for i, flow in enumerate(flow_list):
+            df_deta = []
+            prob = []
+            for k in range(nflow_batches[i]):
+                eta_batch = eta[k * grad_batch_size: (k + 1) * grad_batch_size]
+                logp_batch, dlogp_deta_batch = value_and_grad_fn(flow, eta_batch)
+                prob.append(np.exp(logp_batch))
+                df_deta.append(dlogp_deta_batch * np.exp(logp_batch)[:, None])
 
-        @tf.function
-        def calc_grads(batch):
-            # print(f'Tracing calc_grads with shape = {batch.shape}')
-            with tf.GradientTape(watch_accessed_variables=False) as g:
-                g.watch(batch)
-                f = flow.prob(batch)
-            df_deta = g.gradient(f, batch)
-            return df_deta, f
+                pbar.update(1)
 
-        eta_dataset = tf.data.Dataset.from_tensor_slices(eta).batch(grad_batch_size)
-        df_deta = []
-        prob = []
-        for k, b in enumerate(eta_dataset):
-            df_deta_batch, prob_batch = calc_grads(b)
-            df_deta.append(df_deta_batch)
-            prob.append(prob_batch)
-            bar(iteration)
-            iteration += 1
+            df_deta = np.concatenate([np.array(b) for b in df_deta])
+            prob = np.concatenate([np.array(b) for b in prob])
+            df_deta_indiv[i] = df_deta
 
-        df_deta = np.concatenate([b.numpy() for b in df_deta])
-        prob = np.concatenate([b.numpy() for b in prob])
-        df_deta_indiv[i] = df_deta
-
-    if len(flow_list) > 1:
+    '''if len(flow_list) > 1:
         # Collapse!
         probs_indiv = np.zeros((len(flow_list), len(eta)), dtype="f4")
         n_batches = -(-len(eta) // sample_batch_size)
@@ -174,5 +148,7 @@ def sample_from_different_flows(
         ret = {"eta": eta, "df_deta": df_deta_indiv[0], "f": prob}
     if return_indiv:
         ret["df_deta_indiv"] = df_deta_indiv
+    '''
+    ret = {"eta": eta, "df_deta": df_deta, "f": prob}
 
     return ret

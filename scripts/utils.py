@@ -1,23 +1,97 @@
-#!/usr/bin/env python
-
 from __future__ import print_function, division
+
+import matplotlib.colors as colors
+import matplotlib.ticker as ticker
 
 import json
 import glob
-import tensorflow as tf
 import numpy as np
 import scipy.ndimage
-import progressbar
 import pandas as pd
 import os
 import h5py
 from pathlib import Path
+import time
 
 import matplotlib.pyplot as plt
+from tqdm import trange, tqdm
 
-import potential_tf
-import potential_analytic_tf
-import flow_ffjord_tf
+
+def warmup_cosine_restarts_schedule(
+    init_value: float = 0.0,
+    peak_value: float = 1e-4,
+    warmup_steps: int = 1000,
+    cycle_length: int = 10000,
+    num_cycles: int = 3,
+    decay_factor: float = 0.8,
+    min_value_ratio: float = 0.1
+):
+    import jax.numpy as jnp
+    """
+    Create a learning rate schedule with multiple warmup-cosine cycles.
+
+    Args:
+        init_value: Initial learning rate (usually 0.0)
+        peak_value: Peak learning rate for the first cycle
+        warmup_steps: Steps for warmup in each cycle
+        cycle_length: Total steps per cycle
+        num_cycles: Number of cycles to run
+        decay_factor: Factor to reduce peak_value each cycle (0.8 means 80% of previous)
+        min_value_ratio: Minimum LR as ratio of peak_value in each cycle
+
+    Returns:
+        Schedule function that takes step and returns learning rate
+    """
+
+    def schedule_fn(step: int) -> float:
+        # Determine which cycle we're in
+        cycle_step = step % cycle_length
+        cycle_num = step // cycle_length
+
+        # Clamp cycle number to prevent going beyond num_cycles
+        cycle_num = jnp.minimum(cycle_num, num_cycles - 1)
+
+        # Calculate peak value for current cycle
+        current_peak = peak_value * (decay_factor ** cycle_num)
+        current_min = current_peak * min_value_ratio
+
+        # Within cycle: warmup then cosine decay
+        warmup_lr = init_value + (current_peak - init_value) * cycle_step / warmup_steps
+
+        # Cosine decay phase
+        decay_steps = cycle_length - warmup_steps
+        decay_progress = (cycle_step - warmup_steps) / decay_steps
+        cosine_lr = current_min + (current_peak - current_min) * 0.5 * (1 + jnp.cos(jnp.pi * decay_progress))
+
+        # Choose based on position in cycle
+        lr = jnp.where(cycle_step < warmup_steps, warmup_lr, cosine_lr)
+
+        # After all cycles, maintain minimum learning rate
+        final_lr = current_min
+        return jnp.where(step < num_cycles * cycle_length, lr, final_lr)
+
+    return schedule_fn
+
+
+class TimeLogger:
+    def __init__(self):
+        self.times = {}
+        self.start_times = {}  # Track start time for each key
+
+    def start(self, key):
+        if key not in self.times:
+            self.times[key] = 0
+        self.start_times[key] = time.time()
+
+    def stop(self, key):
+        if key not in self.start_times:
+            raise ValueError(f"Timer for key '{key}' was not started")
+        elapsed = time.time() - self.start_times[key]
+        self.times[key] += elapsed
+        del self.start_times[key]
+
+    def get_duration(self, key, default_value=0.0):
+        return self.times.get(key, default_value)
 
 
 def load_training_data(fname, cut_attrs=False):
@@ -108,10 +182,33 @@ def load_training_data(fname, cut_attrs=False):
 
             attrs["has_spatial_cut"] = True if attrs != {} else False
             attrs["n"] = len(data["eta"])
+    elif ext == '.npz':
+        with np.load(fname) as d:
+            data['eta'] = np.array(d["x"])
+            data['weights'] = np.array(d["weights"], dtype=np.float32)
+        attrs = {'has_spatial_cut': False, 'n': len(data['eta'])}
     else:
         raise ValueError(f'Unrecognized input file extension: "{ext}"')
 
     return data, attrs
+
+
+def split_data(data, val_split=0.25):
+    """Splits the data into training and validation sets."""
+    n_total = data['eta'].shape[0]
+    n_val = int(n_total * val_split)
+
+    train_data = {"eta": data["eta"][n_val:], "weights": data["weights"][n_val:]}
+    val_data = {"eta": data["eta"][:n_val], "weights": data["weights"][:n_val]}
+    return train_data, val_data
+
+
+# --- Data Loading ---
+def load_and_split_data(path: Path, val_split: float = 0.25):
+    """Loads data, splits into train/validation, and converts to jax arrays."""
+    print(f"Loading data from {path}...")
+    data, attrs = load_training_data(path)
+    return split_data(data, val_split)
 
 
 def get_mask(l_, b, r, max_distance, hp=None):
@@ -140,12 +237,15 @@ def get_mask_eta(eta, fname_mask, hp=None, r_min=None, r_max=None):
     Returns if a point with coordinates l, b, r is inside the mask defined by max_distance.
     Max distance is a healpixel map indicating the maximal distance for each healpixel.
     '''
-    max_distance, nside = load_mask(fname_mask)
-
     r = np.sum(eta[:, :3]**2, axis=1)**0.5
-    l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
-    b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
-    mask, hp = get_mask(l_, b, r, max_distance, hp)
+    if fname_mask is None:
+        mask, hp = np.ones(len(eta), dtype=bool), None
+    else:
+        max_distance, nside = load_mask(fname_mask)
+
+        l_ = np.arctan2(eta[:, 1], eta[:, 0]) * 180 / np.pi
+        b = np.arcsin(eta[:, 2] / r) * 180 / np.pi
+        mask, hp = get_mask(l_, b, r, max_distance, hp)
     if r_min is not None:
         mask = mask & (r > r_min)
     if r_max is not None:
@@ -186,80 +286,80 @@ def load_flow_samples(fname, recalc_avg=None, attrs_to_cut_by=None):
     return d
 
 
-def load_potential(fname):
+def get_model_values(phi_model, q_eval, batch_size=131072, fname=None, disable_tqdm=False):
     """
-    Returns a potential, automatically handling FrameShift (by checking if
-    fspec exists). If fname is a directory, load the latest one from there,
-    otherwise expects an .index of the checkpoint
+    Calculate the potential, acceleration and density implied by the
+    differentiable model of the potential. If specified, the results are saved to a file
+    in a subdirectory of fig_dir, named data.
+    Currently, the spatial dimension is expected to be in units of kpc
+    and velocity dimension 100 km/s. The conversion factor for rho
+    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
+    (100 km/s)^2/kpc
+
+    Parameters:
+        phi_model (dict): The model of the potential to be used.
+        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
+        fig_dir (str): The directory where the data is to be saved
+        fname (str): The name of the file where the data is to be saved
     """
-    # Make sure that the trailing slash is there for a directory
-    if os.path.isdir(fname):
-        fname = os.path.join(fname, "")
+    import jax
+    import jax.numpy as jnp
+    import equinox as eqx
 
-    directory, tail = os.path.split(fname)
+    @eqx.filter_jit
+    def calc_phi_derivatives(phi_func, q):
+        """Calculates higher order derivatives of the potential at q."""
+        phi = phi_func(q)
+        dphi_dq = jax.grad(phi_func)(q)
 
-    has_frameshift = False
-    if len(glob.glob(directory + "/*_fspec.json")) > 0:
-        has_frameshift = True
+        # Laplacian of phi
+        hessian_phi = jax.hessian(phi_func)(q)
+        d2phi_dq2 = jnp.trace(hessian_phi)
 
-    is_guided = False
-    spec_fname = glob.glob(directory + "/*_spec.json")[0]
-    with open(spec_fname, "r") as f:
-        is_guided = True if "Guided" in json.load(f)["name"] else False
+        return phi, dphi_dq, d2phi_dq2
+    # If phi_model is an instance of class PotentialModel, then extract the phi function
+    if hasattr(phi_model, 'phi_model'):
+        phi_model = phi_model.phi_model
+    # vmap the function w.r.t. q
+    jit_phi_derivs = jax.vmap(calc_phi_derivatives, in_axes=(None, 0))
 
-    is_analytic_potential = False
-    with open(spec_fname, "r") as f:
-        is_analytic_potential = (
-            True if "PhiNNAnalytic" in json.load(f)["name"] else False
-        )
+    n0 = len(q_eval)
 
-    if os.path.isdir(fname):
-        if is_analytic_potential:
-            phi = potential_analytic_tf.PhiNNAnalytic.load_latest(fname)
-        elif is_guided:
-            phi = potential_tf.PhiNNGuided.load_latest(fname)
-        else:
-            phi = potential_tf.PhiNN.load_latest(fname)
-        fs = potential_tf.FrameShift.load_latest(fname) if has_frameshift else None
+    if fname is not None:
+        fname = Path(fname)
+        # Append the number of datapoints at the end of the file name
+        fname = fname.with_name(f"{fname.stem}_{n0}{'.npz'}")
+
+    if fname is None or (fname is not None and not fname.exists()):
+        rhos = []
+        accs = []
+        phis = []
+
+        for i in (pbar := tqdm(range(0, n0, batch_size), disable=disable_tqdm)):
+            b = q_eval[i: i + batch_size]
+
+            phi,dphi_dq,d2phi_dq2 = jit_phi_derivs(
+                phi_model, b
+            )
+            rhos.append(2.325*d2phi_dq2/(4*np.pi)) # [M_Sun/pc^3]
+            accs.append(-dphi_dq) # [(100 km/s)^2/kpc]
+            phis.append(phi)
+
+            pbar.set_description("Calculating model values")
+        rhos = np.concatenate(rhos)
+        accs = np.concatenate(accs)
+        phis = np.concatenate(phis)
+        if fname is not None:
+            # Make sure save_path directory exists
+            fname.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(fname, phi=phis, acc=accs, rho=rhos)
     else:
-        if is_analytic_potential:
-            phi = potential_analytic_tf.PhiNNAnalytic.load(fname[:-6])
-        elif is_guided:
-            phi = potential_tf.PhiNNGuided.load(fname[:-6])
-        else:
-            phi = potential_tf.PhiNN.load(fname[:-6])
-        fs = potential_tf.FrameShift.load(fname[:-6]) if has_frameshift else None
+        npzfile = np.load(fname)
+        rhos = npzfile['rho']
+        accs = npzfile['acc']
+        phis = npzfile['phi']
 
-    return {"phi": phi, "fs": fs}
-
-
-def load_flows(fname_patterns):
-    """
-    Loads in a list of flows from a list of file patterns. If the pattern
-    matches a directory, the latest checkpoint is loaded from there, otherwise
-    the .index file is expected.
-    """
-    flow_list = []
-
-    fnames = []
-    print(fname_patterns)
-    for fn in fname_patterns:
-        fnames += glob.glob(fn)
-    fnames = sorted(fnames)
-    if len(fnames) == 0:
-        raise ValueError("Can't find any flows!")
-
-    for i, fn in enumerate(fnames):
-        print(f"Loading flow {i+1} of {len(fnames)} ...")
-        if os.path.isdir(fn):
-            print(f"  Loading latest checkpoint from directory {fn} ...")
-            flow = flow_ffjord_tf.FFJORDFlow.load_latest(fn)
-        else:
-            print(f"  Loading {fn} ...")
-            flow = flow_ffjord_tf.FFJORDFlow.load(fn[:-6])
-        flow_list.append(flow)
-
-    return flow_list
+    return phis, accs, rhos
 
 
 def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
@@ -283,34 +383,6 @@ def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
         v_mean = np.ma.mean(v_samp_ma, axis=0)
 
     return v_mean
-
-
-def get_training_progressbar_fn(n_steps, loss_history, opt):
-    """
-    Returns a function which can be called to update the progressbar for
-    training. The function takes a single argument, the current training step,
-    and updates the progressbar accordingly.
-    """
-    widgets = [
-        progressbar.Bar(),
-        progressbar.Percentage(),
-        " |",
-        progressbar.Timer(format="Elapsed: %(elapsed)s"),
-        "|",
-        progressbar.AdaptiveETA(),
-        "|",
-        progressbar.Variable("loss", width=6, precision=4),
-        ", ",
-        progressbar.Variable("lr", width=8, precision=3),
-    ]
-    bar = progressbar.ProgressBar(max_value=n_steps, widgets=widgets)
-
-    def update_progressbar(i):
-        loss = np.mean(loss_history[-50:])
-        lr = float(opt._decayed_lr(tf.float32))
-        bar.update(i + 1, loss=loss, lr=lr)
-
-    return update_progressbar
 
 
 def plot_loss(train_loss_hist, val_loss_hist=None, lr_hist=None, smoothing="auto"):
@@ -439,6 +511,67 @@ def plot_loss(train_loss_hist, val_loss_hist=None, lr_hist=None, smoothing="auto
                 )
 
     return fig
+
+
+def plot_loss_new(loss_history, fname, final_train_loss=None, final_val_loss=None, share_loss_axis=True, w=10):
+    # Save loss curve
+    fig, axs = plt.subplots(2, 1, figsize=(8, 6), layout='compressed')
+
+    def moving_average(x, w):
+        ret = np.convolve(x, np.ones(w), 'valid') / w
+        # Pad both sides with zeros
+        pad_left = (w - 1) // 2
+        pad_right = w - 1 - pad_left
+        return np.pad(ret, (pad_left, pad_right), mode='edge')
+    if final_train_loss is None:
+        final_train_loss = loss_history["train"][-1]
+    if final_val_loss is None:
+        final_val_loss = loss_history["val"][-1]
+
+    alpha = 0.8
+    for i, ax in enumerate(axs):
+        x = np.arange(len(loss_history["train"])) + 0.5
+        ax.plot(x, moving_average(loss_history["train"], w), label="Train Loss", alpha=alpha)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Train loss")
+        # Also plot lr_history on the sample plot but with secondary y-axis
+        if "lr" in loss_history:
+            ax2 = ax.twinx()
+            ax2.plot(x, loss_history["lr"], label="Learning Rate", color='grey', linestyle='--', alpha=0.4)
+            #ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1e'))
+            ax2.legend(loc='upper center', frameon=False)
+            ax2.tick_params(axis='y', which='both', left=False, right=False)
+            ax2.set_yticklabels([])
+            #ax2.set_ylabel('Learning rate')
+        if not share_loss_axis:
+            ax3 = ax.twinx()
+            ax3.plot(x, moving_average(loss_history["val"], w), label="Validation Loss", color='tab:orange', alpha=alpha)
+            ax3.set_ylabel('Validation loss')
+            ax3.legend(loc=(0.7, 0.85), frameon=False)
+        else:
+            ax.plot(x, moving_average(loss_history["val"], w), label="Validation Loss", color='tab:orange', alpha=alpha)
+            ax.set_ylabel("Loss")
+
+        ax.legend(loc=(0.7, 0.75), frameon=False)
+        ax.grid(True)
+
+        if i == 1:
+            lims_train = np.percentile(loss_history["train"], [5, 95])
+            lims_val = np.percentile(loss_history["val"], [5, 95])
+            if not share_loss_axis:
+                ax.set_ylim(lims_train)
+                ax3.set_ylim(lims_val)
+            else:
+                ax.set_ylim((min(lims_train[0], lims_val[0]), max(lims_train[1], lims_val[1])))
+
+    if final_val_loss is not None:
+        axs[0].set_title(f"Final Val Loss: {final_val_loss}. Smoothing w={w} epochs.")
+    if final_train_loss is not None:
+        axs[1].set_title(f"Final Train Loss: {final_train_loss}")
+    # Set ylim for second axis to be 95% percentile of the loss values
+    plt.savefig(fname, dpi=150)
+    plt.close()
+    print(f"Saved loss plot to {fname}")
 
 
 def save_loss_history(
@@ -789,101 +922,3 @@ def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), spher
             sph = {**sph, **{"vth": vth, "vT": vT, "vr": vr}}
 
     return dict(**cart, **cyl, **sph)
-
-
-def get_model_values(phi_model, q_eval, batch_size=131072, fig_dir=None, fname=None, full_fname=None):
-    """
-    Calculate the potential, acceleration and density implied by the
-    differentiable model of the potential. If specified, the results are saved to a file
-    in a subdirectory of fig_dir, named data.
-    Currently, the spatial dimension is expected to be in units of kpc
-    and velocity dimension 100 km/s. The conversion factor for rho
-    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
-    (100 km/s)^2/kpc
-
-    Parameters:
-        phi_model (dict): The model of the potential to be used.
-        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
-        fig_dir (str): The directory where the data is to be saved
-        fname (str): The name of the file where the data is to be saved
-    """
-    def get_sampling_progressbar_fn(n_batches, n_samples):
-        # Progressbar to make the sampling progress visible and nice!
-        widgets = [
-            progressbar.Percentage(), ' | ',
-            progressbar.Timer(format='Elapsed: %(elapsed)s'), ' | ',
-            progressbar.AdaptiveETA(), ' | ',
-            progressbar.Variable('batches_done', width=6, precision=0), ', ',
-            progressbar.Variable('n_batches', width=6, precision=0), ', ',
-            progressbar.Variable('n_samples', width=8, precision=0)
-        ]
-        bar = progressbar.ProgressBar(max_value=n_batches, widgets=widgets)
-
-        def update_progressbar(i):
-            bar.update(i+1, batches_done=i+1, n_batches=n_batches, n_samples=n_samples)
-
-        return update_progressbar
-
-    n0 = len(q_eval)
-    q_eval = tf.data.Dataset.from_tensor_slices(q_eval).batch(batch_size)
-
-    if full_fname is not None:
-        fname = full_fname
-    elif fname is not None:
-        fname = os.path.join(fig_dir, f'data/{fname}_{n0}.npz')
-    if fname is None or (fname is not None and not os.path.exists(fname)):
-        rhos = []
-        accs = []
-        phis = []
-
-        bar, iteration = get_sampling_progressbar_fn(len(q_eval), n0), 0
-        for i, b in enumerate(q_eval):
-            phi,dphi_dq,d2phi_dq2 = potential_tf.calc_phi_derivatives(
-                phi_model['phi'], b, return_phi=True
-            )
-            rhos.append(2.325*d2phi_dq2.numpy()/(4*np.pi)) # [M_Sun/pc^3]
-            accs.append(-dphi_dq) # [(100 km/s)^2/kpc]
-            phis.append(phi)
-            bar(iteration)
-            iteration += 1
-        rhos = np.concatenate(rhos)
-        accs = np.concatenate(accs)
-        phis = np.concatenate(phis)
-        if fname is not None:
-            Path(fname).parent.mkdir(parents=True, exist_ok=True)
-            np.savez(fname, phi=phis, acc=accs, rho=rhos)
-    else:
-        npzfile = np.load(fname)
-        rhos = npzfile['rho']
-        accs = npzfile['acc']
-        phis = npzfile['phi']
-
-    return phis, accs, rhos
-
-
-def main():
-    rng = np.random.default_rng()
-
-    x = [rng.uniform(0.0, 0.1, 1000), rng.uniform(0.0, 1.0, 1000)]
-    y = [rng.uniform(0.0, 1.0, 1000), rng.uniform(0.0, 0.1, 1000)]
-    c = [np.ones(1000), -1 * np.ones(1000)]
-
-    x = np.hstack(x)
-    y = np.hstack(y)
-    c = np.hstack(c)
-
-    fig, ax = plt.subplots(1, 1, figsize=(4, 3), dpi=200)
-
-    im = hist2d_mean(
-        ax, x, y, c, vmin=-1, vmax=1, cmap="coolwarm_r", bins=10, range=[(0, 1), (0, 1)]
-    )
-
-    fig.colorbar(im, ax=ax)
-
-    fig.savefig("hist2d_mean_example.png", dpi=200)
-
-    return 0
-
-
-if __name__ == "__main__":
-    main()
