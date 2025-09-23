@@ -2,16 +2,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import tensorflow as tf
 
-print(f"Tensorflow version {tf.__version__}")
-# tf.debugging.set_log_device_placement(True)
-from tensorflow import keras
-import tensorflow_probability as tfp
-
-print(f"Tensorflow Probability version {tfp.__version__}")
-tfb = tfp.bijectors
-tfd = tfp.distributions
 
 import numpy as np
 import scipy
@@ -26,466 +17,333 @@ from pathlib import Path
 import json
 import h5py
 import progressbar
-from glob import glob
-import gc
-import cerberus
-import os.path
 
-import potential_tf
-import potential_analytic_tf
-import flow_ffjord_tf
-import flow_sampling
+import jax.numpy as jnp
+import jax
+import optax
+from optax.contrib import reduce_on_plateau
+
+import flow_ot_flow_matching
 import utils
+import flow_benchmarking
+import potential_benchmarking
+import flow_sampling
+import potential
+
+# limit jax gpu usage to be adaptive
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
-def train_flows(
+def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
+    """
+    Configures and returns an Optax optimizer and learning rate schedule.
+
+    Supports three types of schedules:
+    - "CosineAnnealing": A cosine schedule with warm-up and optional restarts.
+    - "step": A constant schedule with warm-up, combined with reduce-on-plateau.
+    - "warmup_cosine_decay": A standard warm-up followed by cosine decay (default).
+
+    Args:
+        options_lr (dict): A dictionary of learning rate options.
+        steps_per_epoch (int): The number of training steps in one epoch.
+        epochs (int): The total number of training epochs.
+
+    Returns:
+        tuple: A tuple containing the configured Optax optimizer and the schedule function.
+    """
+    if options_lr["type"] == "CosineAnnealing":
+        cycle_length = epochs * steps_per_epoch // options_lr["num_cycles"]
+        schedule = utils.warmup_cosine_restarts_schedule(
+            peak_value=options_lr["init"],
+            warmup_steps=options_lr["warmup_epochs"]*steps_per_epoch,
+            cycle_length=cycle_length,
+            num_cycles=options_lr["num_cycles"],
+            decay_factor=options_lr["decay_factor"],
+            min_value_ratio=options_lr["lr_factor"]
+        )
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.radam(schedule)
+        )
+        schedule = schedule
+    elif options_lr["type"] == "step":
+        n_warmup = options_lr["warmup_epochs"] * steps_per_epoch
+        warmup_schedule = optax.linear_schedule(
+            init_value=0.0,
+            end_value=options_lr["init"],
+            transition_steps=n_warmup
+        )
+        main_schedule = optax.constant_schedule(options_lr["init"])
+        schedule = optax.join_schedules(
+            schedules=[warmup_schedule, main_schedule],
+            boundaries=[n_warmup]
+        )
+        # Accumulation defines the number of steps per evaluation
+        # Patience is the number of evaluation steps before reducing lr
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.radam(learning_rate=schedule),
+            reduce_on_plateau(
+                factor=0.5,
+                patience=options_lr["patience_epochs"],
+                atol=options_lr["loss_min_delta"],
+                rtol=0.0,
+                min_scale=options_lr["final"],
+                accumulation_size=options_lr["accumulation_epochs"] * steps_per_epoch,
+            )
+        )
+    else:
+        # Schedule has warm-up for one epoch, then cosine decay
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=options_lr["init"],
+            warmup_steps=options_lr["warmup_epochs"]*steps_per_epoch,
+            decay_steps=epochs*steps_per_epoch,
+            peak_value=options_lr["init"],
+            end_value=options_lr["final"]
+        )
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.radam(schedule)
+        )
+    return optimizer, schedule
+
+
+def train_flow(
     data,
-    fname_pattern,
-    n_flows=1,
-    n_hidden=4,
-    hidden_size=32,
-    n_bij=1,
-    n_epochs=128,
-    batch_size=1024,
+    flow_dir,
+    ot_pairings_path_stem=None,
+    time_scheduler_type="uniform",
+    seed=0,
+    n_epochs=100,
+    batch_size=5000,
     validation_frac=0.25,
-    reg={},
-    lr={},
-    optimizer="RAdam",
-    warmup_proportion=0.1,
-    checkpoint_every=None,
-    checkpoint_hours=None,
-    max_checkpoints=None,
-    neptune_run=None,
+    sb_constant=0.0,
+    lr_opts={},
+    vector_field_opts={},
+    time_logger=None,
     reset_flow_lr=False,
+    checkpoint_frequency_epochs=-1,
 ):
-    n_samples = data["eta"].shape[0]
-    n_steps = n_samples * n_epochs // batch_size
-    print(f"n_steps = {n_steps}")
+    """
+    Initializes and trains a normalizing flow model for the distribution function.
 
-    flow_list = []
+    This function sets up the model, data, optimizer, and then calls the main
+    training routine from `flow_ot_flow_matching`.
 
-    data_mean = np.mean(data["eta"], axis=0)
-    data_std = np.std(data["eta"], axis=0)
+    Args:
+        data (dict): The training data, containing 'eta' and 'weights'.
+        flow_dir (str): Directory to save the trained model and checkpoints.
+        ot_pairings_path_stem (str): Base path for precomputed Optimal Transport pairings.
+        time_scheduler_type (str): Type of time scheduler for flow matching.
+        seed (int): Random seed for reproducibility.
+        n_epochs (int): Number of training epochs.
+        batch_size (int): Number of samples per training batch.
+        validation_frac (float): Fraction of data to use for validation.
+        sb_constant (float): Schrödinger Bridge constant. If > 0, uses SB loss.
+        lr_opts (dict): Dictionary of learning rate options.
+        vector_field_opts (dict): Options for the vector field neural network.
+        time_logger (utils.TimeLogger): Optional logger for timing operations.
+        model_type (str): The type of flow model to train.
+        reset_flow_lr (bool): Whether to reset the learning rate when resuming.
+        checkpoint_frequency_epochs (int): Frequency (in epochs) for saving checkpoints.
+
+    Returns:
+        tuple: A tuple containing the trained flow model and the loss history.
+    """
+    key = jax.random.key(seed)
+
+    train_data, val_data = utils.split_data(data, validation_frac)
+    n_samples = train_data["eta"].shape[0]
+    dim = train_data["eta"].shape[1]
+
+    data_mean = np.mean(train_data["eta"], axis=0)
+    data_std = np.std(train_data["eta"], axis=0)
     print(f"Using mean: {data_mean}")
     print(f"       std: {data_std}")
 
-    for i in range(n_flows):
-        print(f"Training flow {i+1} of {n_flows} ...")
-        
-        flow_model = flow_ffjord_tf.FFJORDFlow(
-            6,
-            n_hidden,
-            hidden_size,
-            n_bij,
-            reg_kw=reg,
-            base_mean=data_mean,
-            base_std=data_std,
-        )
-        flow_list.append(flow_model)
-
-        flow_fname = fname_pattern.format(i)
-
-        checkpoint_dir, checkpoint_name = os.path.split(flow_fname)
-        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-        flow_model.save_specs(flow_fname)
-
-        lr_kw = {f"lr_{k}": lr[k] for k in lr}
-
-        train_loss_history, val_loss_history, lr_history = flow_ffjord_tf.train_flow(
-            flow_model,
-            data,
-            n_epochs=n_epochs,
-            batch_size=batch_size,
-            validation_frac=validation_frac,
-            optimizer=optimizer,
-            warmup_proportion=warmup_proportion,
-            checkpoint_every=checkpoint_every,
-            checkpoint_hours=checkpoint_hours,
-            max_checkpoints=max_checkpoints,
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_name=checkpoint_name,
-            neptune_run=neptune_run,
-            reset_flow_lr=reset_flow_lr,
-            **lr_kw,
-        )
-
-    return flow_list
-
-
-def train_potential(
-    df_data,
-    fname,
-    n_hidden=3,
-    hidden_size=256,
-    alpha=1.0,
-    beta=1.0,
-    lambda_=1.0,
-    gamma=0.0,
-    l2=0,
-    n_epochs=4096,
-    batch_size=1024,
-    validation_frac=0.25,
-    lr={},
-    optimizer="RAdam",
-    warmup_proportion=0.1,
-    checkpoint_every=None,
-    checkpoint_hours=None,
-    max_checkpoints=None,
-    include_frameshift=False,
-    frameshift={},
-    guided_potential=False,
-    use_analytic_potential=False,
-    analytic_potential={},
-    use_analytic_potential_barmodel=False,
-    analytic_potential_barmodel={},
-):
-    # Estimate typical spatial scale of DF data along each dimension
-    q_scale = np.std(df_data["eta"][:, :3], axis=0)
-
-    # The analytic and guided potentials are calculated with respect to the
-    # center defined by frameshift. If there is no frameshift, analytic and 
-    # guided potentials currently can't be initialized
-    if "r_c0" in frameshift:
-        r_c = frameshift["r_c0"]
-    if "r_c0" not in frameshift and (
-        use_analytic_potential or guided_potential or use_analytic_potential_barmodel
-    ):
-        raise ValueError("Analytic and guided potentials require frameshift")
-
-    # Create model
-    if use_analytic_potential:
-        phi_model = potential_analytic_tf.PhiNNAnalytic(
-            n_dim=3, **analytic_potential, name="PhiNNAnalytic", r_c=r_c
-        )
-    elif use_analytic_potential_barmodel:
-        phi_model = potential_analytic_tf.PhiNNAnalyticBarmodel(
-            n_dim=3,
-            **analytic_potential_barmodel,
-            name="PhiNNAnalyticBarmodel",
-            r_c=r_c,
-        )
-    elif guided_potential:
-        phi_model = potential_tf.PhiNNGuided(
-            n_dim=3,
-            n_hidden=n_hidden,
-            hidden_size=hidden_size,
-            scale=q_scale,
-            name="PhiNNGuided",
-            r_c=r_c,
-        )
-    else:
-        phi_model = potential_tf.PhiNN(
-            n_dim=3,
-            n_hidden=n_hidden,
-            hidden_size=hidden_size,
-            name="Phi",
-            scale=q_scale,
-        )
-    checkpoint_dir, checkpoint_name = os.path.split(fname)
-    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-    phi_model.save_specs(fname)
-
-    frameshift_model = None
-    if include_frameshift:
-        frameshift_model = potential_tf.FrameShift(n_dim=3, **frameshift)
-        frameshift_model.save_specs(fname)
-
-    lr_kw = {f"lr_{k}": lr[k] for k in lr}
-
-    loss_history = potential_tf.train_potential(
-        df_data,
-        phi_model,
-        frameshift_model=frameshift_model,
-        n_epochs=n_epochs,
-        batch_size=batch_size,
-        alpha=alpha,
-        beta=beta,
-        lambda_=lambda_,
-        l2=l2,
-        gamma=gamma,
-        validation_frac=validation_frac,
-        optimizer=optimizer,
-        warmup_proportion=warmup_proportion,
-        checkpoint_every=checkpoint_every,
-        checkpoint_hours=checkpoint_hours,
-        max_checkpoints=max_checkpoints,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_name=checkpoint_name,
-        **lr_kw,
+    # NormalizingFlow is a wrapper around a flowjax flow which itself is equipped with
+    # a base distribution and a bijection.
+    # The bijection is made up of an affine component responsible for data normalization,
+    # then a vector field that integrates the source distribution to the target, and finally
+    # an affine layer that inverts the first transformation.
+    # We optimize the middle vector field using flow matching.
+    key, subkey = jax.random.split(key)
+    vector_field_opts["pos_mean"], vector_field_opts["pos_std"] = data_mean[:dim//2], data_std[:dim//2]
+    flow_model = flow_ot_flow_matching.NormalizingFlow(
+        key=subkey,
+        data_mean=data_mean,
+        data_std=data_std,
+        vector_field_params=vector_field_opts,
+        model_dir=flow_dir
     )
 
-    if include_frameshift:
-        return phi_model, frameshift_model
-    return phi_model
+    # TODO: Load the latest checkpoint if it exists
+    # # flow_dir defines the directory the flow is in
+    # if type(flow_dir) is not str:
+    #     flow_dir = Path(flow_dir)
+    # # Make sure the directory exists
+    # checkpoint_dir = flow_dir.parent
+    # checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set up the optimizer
+    optimizer, schedule = get_optimizer_and_schedule(
+        options_lr=lr_opts,
+        steps_per_epoch=n_samples // batch_size,
+        epochs=n_epochs
+    )
+    loss_history = {'train': [], 'val': [], 'lr': []}
 
-def batch_calc_df_deta(flow, eta, batch_size):
-    n_data = eta.shape[0]
+    flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
+        key,
+        flow_model,
+        optimizer,
+        schedule,
+        lr_opts["type"],
+        train_data, val_data,
+        data_mean, data_std,
+        n_epochs,
+        batch_size,
+        ot_pairings_path_stem,
+        time_scheduler_type,
+        sb_constant,
+        time_logger=time_logger,
+        loss_history=loss_history,
+        checkpoint_frequency_epochs=checkpoint_frequency_epochs
+    )
+    # x_test = jnp.array([0.0, 0.1, 0.2, 0.0, 0.0, 0.0])
+    # print(flow_model.log_prob(x_test))
+    # flow_model_new, loss_history_new = flow_model.load(flow_dir, flow_model)
+    # print(flow_model_new.log_prob(x_test))
+    # exit()
 
-    @tf.function
-    def calc_grads(batch):
-        print(f"Tracing calc_grads with shape = {batch.shape}")
-        with tf.GradientTape(watch_accessed_variables=False) as g:
-            g.watch(batch)
-            f = flow.prob(batch)
-        df_deta = g.gradient(f, batch)
-        return df_deta
-
-    eta_dataset = tf.data.Dataset.from_tensor_slices(eta).batch(batch_size)
-
-    df_deta = []
-    bar = None
-    n_generated = 0
-    for k, b in enumerate(eta_dataset):
-        if k != 0:
-            if bar is None:
-                bar = progressbar.ProgressBar(max_value=n_data)
-            bar.update(n_generated)
-        df_deta.append(calc_grads(b))
-        n_generated += int(b.shape[0])
-
-    bar.update(n_data)
-
-    df_deta = np.concatenate([b.numpy() for b in df_deta])
-
-    return df_deta
-
-
-def sample_from_flows(
-    flow_list,
-    n_samples,
-    return_indiv=False,
-    grad_batch_size=1024,
-    sample_batch_size=1024,
-    f_reduce=np.median,
-):
-    n_flows = len(flow_list)
-
-    # Sample from ensemble of flows
-    eta = []
-    n_batches = n_samples // (n_flows * sample_batch_size)
-
-    for i, flow in enumerate(flow_list):
-        print(f"Sampling from flow {i+1} of {n_flows} ...")
-
-        @tf.function
-        def sample_batch():
-            print("Tracing sample_batch ...")
-            return flow.sample([sample_batch_size])
-
-        bar = progressbar.ProgressBar(max_value=n_batches)
-        for k in range(n_batches):
-            eta.append(sample_batch().numpy().astype("f4"))
-            bar.update(k + 1)
-
-    eta = np.concatenate(eta, axis=0)
-
-    # Calculate gradients
-    df_deta = np.zeros_like(eta)
-    if return_indiv:
-        df_deta_indiv = np.zeros((n_flows,) + eta.shape, dtype="f4")
-
-    for i, flow in enumerate(flow_list):
-        print(f"Calculating gradients of flow {i+1} of {n_flows} ...")
-
-        df_deta_indiv[i] = batch_calc_df_deta(flow, eta, batch_size=grad_batch_size)
-        # df_deta += df_deta_i / n_flows
-
-        # if return_indiv:
-        #    df_deta_indiv[i] = df_deta_i
-
-    # Average gradients
-    df_deta = f_reduce(df_deta_indiv, axis=0)
-
-    ret = {
-        "eta": eta,
-        "df_deta": df_deta,
-    }
-    if return_indiv:
-        ret["df_deta_indiv"] = df_deta_indiv
-        # ret['df_deta'] = df_deta#np.median(df_deta_indiv, axis=0)
-
-    return ret
-
-
-def load_flows(fname_patterns):
-    # Determine filenames
-    checkpoint_dirs = []
-
-    n_max = 9999
-    for i in range(n_max):
-        flow_dir = os.path.split(fname_patterns.format(i))[0]
-        if os.path.isdir(flow_dir) and flow_dir not in checkpoint_dirs:
-            checkpoint_dirs.append(flow_dir)
-
-    print(f"Found {len(checkpoint_dirs)} flows.")
-
-    # Load flows
-    flow_list = []
-
-    for i, checkpoint_dir in enumerate(checkpoint_dirs):
-        print(f"Loading flow {i+1} of {len(checkpoint_dirs)} ...")
-        print(checkpoint_dir)
-        flow = flow_ffjord_tf.FFJORDFlow.load_latest(checkpoint_dir=checkpoint_dir)
-        flow_list.append(flow)
-
-    return flow_list
+    return flow_model, loss_history
 
 
 def save_df_data(df_data, fname):
     # Make the directory if it doesn't exist
-    Path(os.path.split(fname)[0]).mkdir(parents=True, exist_ok=True)
+    fname.parent.mkdir(parents=True, exist_ok=True)
 
     kw = dict(compression="lzf", chunks=True)
     with h5py.File(fname, "w") as f:
         for key in df_data:
             f.create_dataset(key, data=df_data[key], **kw)
 
+def load_flow(flow_dir, params, load_history=False):
+    # Loads a trained NormalizingFlow model from a specified directory.
+    # This currently assumes that the input dimension is 6
+    flow_dir = Path(flow_dir)
+
+    model_opts = params["df"]["vector_field_opts"]
+    model_opts["pos_mean"] = jnp.zeros(3)
+    model_opts["pos_std"] = jnp.zeros(3)
+    flow_model = flow_ot_flow_matching.NormalizingFlow(
+        key=jax.random.PRNGKey(0), # Note that this key is rendundant but needed for initialization
+        data_mean=jnp.zeros(6),
+        data_std=jnp.zeros(6),
+        vector_field_params=model_opts,
+        model_dir=flow_dir
+    )
+    flow_model, loss_history = flow_model.load(flow_dir, flow_model)
+    if load_history:
+        return flow_model, loss_history
+    return flow_model
+
+
+def load_potential(potential_dir, params, load_history=False):
+    # Loads a trained PotentialModel from a specified directory.
+    # Currently assumes a 6D input
+    potential_dir = Path(potential_dir)
+
+    # Create an empty model
+    potential_model = potential.PotentialModel(
+        key=jax.random.PRNGKey(0), # Note that this key is rendundant but needed for initialization 
+        model_dir=potential_dir,
+        phi_params=params["potential_nn_opts"],
+        frameshift_params=params.get("frameshift_opts", None),
+    )
+
+    potential_model, loss_history = potential.PotentialModel.load(potential_dir, potential_model)
+
+    if load_history:
+        return potential_model, loss_history
+    return potential_model
+
+
+def train_potential(
+    df_data,
+    potential_dir,
+    seed=0,
+    loss_opts={},
+    potential_nn_opts={},
+    lr_opts={},
+    n_epochs=4096,
+    batch_size=1024,
+    validation_frac=0.25,
+    checkpoint_frequency_epochs=-1,
+    frameshift_opts=None,
+    selection_function_opts=None,
+):
+    """
+    Initializes and trains the gravitational potential model.
+
+    This function sets up the potential model, optimizer, and then runs the
+    training loop using the samples generated from the normalizing flow.
+
+    Args:
+        df_data (dict): Data containing 'eta' samples and 'df_deta' gradients.
+        potential_dir (Path): Directory to save the potential model.
+        seed (int): Random seed.
+        loss_opts (dict): Options for the loss function.
+        potential_nn_opts (dict): Options for the potential neural network.
+        lr_opts (dict): Options for the learning rate schedule.
+        n_epochs (int): Number of training epochs.
+        batch_size (int): Training batch size.
+        validation_frac (float): Fraction of data for validation.
+        checkpoint_frequency_epochs (int): Frequency for saving checkpoints.
+        frameshift_opts (dict): Options for applying a coordinate frame shift.
+        selection_function_opts (dict): Options for the selection function model.
+
+    Returns:
+        tuple: A tuple containing the trained potential model and the loss history.
+    """
+    key = jax.random.key(seed)
+    n_samples = df_data["eta"].shape[0]
+
+    # Make the model
+    key, subkey = jax.random.split(key)
+    n_val = int(validation_frac * n_samples)
+    potential_nn_opts["scale"] = np.std(df_data['eta'][n_val:,:3], axis=0)
+    potential_model = potential.PotentialModel(
+        subkey, potential_dir, phi_params=potential_nn_opts, frameshift_params=frameshift_opts,
+        selection_function_params=selection_function_opts
+    )
+
+    # Set up the optimizer
+    optimizer, schedule = get_optimizer_and_schedule(
+        options_lr=lr_opts,
+        steps_per_epoch=(n_samples - n_val) // batch_size,
+        epochs=n_epochs
+    )
+
+    potential_model, loss_history = potential.train_potential(
+        key,
+        potential_model,
+        optimizer,
+        schedule,
+        lr_opts["type"],
+        lr_opts.get("final", None),
+        df_data,
+        n_epochs,
+        batch_size, validation_frac, checkpoint_frequency_epochs, loss_opts
+    )
+    return potential_model, loss_history
+
 
 def load_params(fname):
-    d = {}
     if fname is not None:
         with open(fname, "r") as f:
-            d = json.load(f)
-    schema = {
-        "df": {
-            "type": "dict",
-            "schema": {
-                "n_flows": {"type": "integer", "default": 1},
-                "n_hidden": {"type": "integer", "default": 4},
-                "hidden_size": {"type": "integer", "default": 32},
-                "reg": {
-                    "type": "dict",
-                    "schema": {
-                        "dv_dt_reg": {"type": "float"},
-                        "kinetic_reg": {"type": "float"},
-                        "jacobian_reg": {"type": "float"},
-                    },
-                },
-                "lr": {
-                    "type": "dict",
-                    "schema": {
-                        "type": {"type": "string", "default": "step"},
-                        "init": {"type": "float", "default": 0.02},
-                        "final": {"type": "float", "default": 0.0001},
-                        "patience": {"type": "integer", "default": 32},
-                        "min_delta": {"type": "float", "default": 0.01},
-                    },
-                },
-                "n_epochs": {"type": "integer", "default": 64},
-                "batch_size": {"type": "integer", "default": 512},
-                "validation_frac": {"type": "float", "default": 0.25},
-                "optimizer": {"type": "string", "default": "RAdam"},
-                "warmup_proportion": {"type": "float", "default": 0.1},
-                "checkpoint_every": {"type": "integer"},
-                "checkpoint_hours": {"type": "float"},
-                "max_checkpoints": {"type": "integer"},
-            },
-        },
-        "Phi": {
-            "type": "dict",
-            "schema": {
-                "n_samples": {"type": "integer", "default": 524288},
-                "grad_batch_size": {"type": "integer", "default": 512},
-                "sample_batch_size": {"type": "integer", "default": 1024},
-                "n_hidden": {"type": "integer", "default": 3},
-                "hidden_size": {"type": "integer", "default": 256},
-                "alpha": {"type": "float", "default": 1.0},
-                "beta": {"type": "float", "default": 1.0},
-                "lambda_": {"type": "float", "default": 1.0},
-                "gamma": {"type": "float", "default": 0.0},
-                "l2": {"type": "float", "default": 0.01},
-                "n_epochs": {"type": "integer", "default": 64},
-                "batch_size": {"type": "integer", "default": 1024},
-                "lr": {
-                    "type": "dict",
-                    "schema": {
-                        "type": {"type": "string", "default": "step"},
-                        "init": {"type": "float", "default": 0.001},
-                        "final": {"type": "float", "default": 0.0001},
-                        "patience": {"type": "integer", "default": 32},
-                        "min_delta": {"type": "float", "default": 0.01},
-                    },
-                },
-                "validation_frac": {"type": "float", "default": 0.25},
-                "optimizer": {"type": "string", "default": "RAdam"},
-                "warmup_proportion": {"type": "float", "default": 0.1},
-                "checkpoint_every": {"type": "integer"},
-                "checkpoint_hours": {"type": "float"},
-                "max_checkpoints": {"type": "integer"},
-                "frameshift": {
-                    "type": "dict",
-                    "schema": {
-                        "omega0": {"type": "float", "default": 0.0},
-                        "omega0_trainable": {"type": "boolean", "default": True},
-                        "r_c0": {"type": "float", "default": 0.0},
-                        "r_c0_trainable": {"type": "boolean", "default": False},
-                        "u_x0": {"type": "float", "default": 0.0},
-                        "u_x0_trainable": {"type": "boolean", "default": True},
-                        "u_y0": {"type": "float", "default": 0.0},
-                        "u_y0_trainable": {"type": "boolean", "default": True},
-                        "u_z0": {"type": "float", "default": 0.0},
-                        "u_z0_trainable": {"type": "boolean", "default": True},
-                    },
-                },
-                "analytic_potential": {
-                    "type": "dict",
-                    "schema": {
-                        "dz": {"type": "float", "default": 0.0},
-                        "dz_trainable": {"type": "boolean", "default": False},
-                        "mn1_amp": {"type": "float", "default": 0.0},
-                        "mn1_amp_trainable": {"type": "boolean", "default": False},
-                        "mn1_a": {"type": "float", "default": 0.0},
-                        "mn1_a_trainable": {"type": "boolean", "default": False},
-                        "mn1_b": {"type": "float", "default": 0.0},
-                        "mn1_b_trainable": {"type": "boolean", "default": False},
-                        "mn2_amp": {"type": "float", "default": 0.0},
-                        "mn2_amp_trainable": {"type": "boolean", "default": False},
-                        "mn2_a": {"type": "float", "default": 0.0},
-                        "mn2_a_trainable": {"type": "boolean", "default": False},
-                        "mn2_b": {"type": "float", "default": 0.0},
-                        "mn2_b_trainable": {"type": "boolean", "default": False},
-                        "mn3_amp": {"type": "float", "default": 0.0},
-                        "mn3_amp_trainable": {"type": "boolean", "default": False},
-                        "mn3_a": {"type": "float", "default": 0.0},
-                        "mn3_a_trainable": {"type": "boolean", "default": False},
-                        "mn3_b": {"type": "float", "default": 0.0},
-                        "mn3_b_trainable": {"type": "boolean", "default": False},
-                        "halo_amp": {"type": "float", "default": 0.0},
-                        "halo_amp_trainable": {"type": "boolean", "default": False},
-                        "halo_a": {"type": "float", "default": 0.0},
-                        "halo_a_trainable": {"type": "boolean", "default": False},
-                    },
-                },
-                "analytic_potential_barmodel": {
-                    "type": "dict",
-                    "schema": {
-                        "dz": {"type": "float", "default": 0.0},
-                        "dz_trainable": {"type": "boolean", "default": False},
-                        "mn_amp": {"type": "float", "default": 0.0},
-                        "mn_amp_trainable": {"type": "boolean", "default": False},
-                        "mn_a": {"type": "float", "default": 0.0},
-                        "mn_a_trainable": {"type": "boolean", "default": False},
-                        "mn_b": {"type": "float", "default": 0.0},
-                        "mn_b_trainable": {"type": "boolean", "default": False},
-                        "halo_amp": {"type": "float", "default": 0.0},
-                        "halo_amp_trainable": {"type": "boolean", "default": False},
-                        "halo_a": {"type": "float", "default": 0.0},
-                        "halo_a_trainable": {"type": "boolean", "default": False},
-                        "A": {"type": "list", "default": [0.01, 0.01]},
-                        "A_trainable": {"type": "boolean", "default": False},
-                        "B": {"type": "list", "default": [0.01, 0.01]},
-                        "B_trainable": {"type": "boolean", "default": False},
-                        "C": {"type": "float", "default": 0.0},
-                        "C_trainable": {"type": "boolean", "default": False},
-                    },
-                },
-            },
-        },
-    }
-    validator = cerberus.Validator(schema, allow_unknown=False)
-    params = validator.normalized(d)
-    return params
+            return json.load(f)
 
 
 def main():
@@ -498,17 +356,16 @@ def main():
     )
     parser.add_argument("--input", "-i", type=str, required=False, help="Input data.")
     parser.add_argument(
-        "--df-grads-fname",
+        "--run-dir",
         type=str,
-        default="data/df_gradients.h5",
-        help="Directory in which to store the flow samples (positions and f \
-            gradients).",
+        default="",
+        help="Directory of the run. All subsequent model directories are relative to this one.",
     )
     parser.add_argument(
-        "--flow-fname",
+        "--flow-dir",
         type=str,
-        default="models/df/flow_{:02d}/flow",
-        help="Filename pattern to store flows in.",
+        default="models/df/flow",
+        help="Subdirectory to store flows in.",
     )
     parser.add_argument(
         "--reset-flow-lr",
@@ -516,10 +373,16 @@ def main():
         help="Reset the learning rate of the flow in the beginning (this is useful when loading in an old model).",
     )
     parser.add_argument(
-        "--potential-fname",
+        "--df-grads-fname",
         type=str,
-        default="models/Phi/Phi",
-        help="Filename to store potential in.",
+        default="data/df_gradients.h5",
+        help="Filename in which to store the flow samples (positions and flow gradients), relative to run_dir.",
+    )
+    parser.add_argument(
+        "--potential-dir",
+        type=str,
+        default="models/Phi",
+        help="Subdirectory to store the potential in.",
     )
     parser.add_argument(
         "--potential-mask",
@@ -527,11 +390,6 @@ def main():
         required=False,
         default=None,
         help="Filename for the mask for the potential. The mask is in distance - healpix format.",
-    )
-    parser.add_argument(
-        "--potential-frameshift",
-        action="store_true",
-        help="Fit potential assuming stationarity in a rotating frame of reference.",
     )
     parser.add_argument(
         "--no-potential-training",
@@ -549,153 +407,125 @@ def main():
         help="Do not sample the flow, load the samples in instead.",
     )
     parser.add_argument(
-        "--flow-sampling-cut",
+        "--basic-flow-benchmarking",
         action="store_true",
-        help="Perform cuts on the flow samples based on the attrs of the input data.",
+        help="Whether to compute basic flow benchmarks after the flow training is finished.",
     )
     parser.add_argument(
-        "--flow-median",
+        "--basic-potential-benchmarking",
         action="store_true",
-        help="Use the median of the flow gradients (default: use the mean).",
+        help="Whether to compute basic potential benchmarks after the potential training is finished.",
     )
-    parser.add_argument(
-        "--guided-potential",
-        action="store_true",
-        help="Try to help the training of the potential by providing guiding \
-            variables to the potential.",
-    )
-    parser.add_argument(
-        "--analytic-potential",
-        action="store_true",
-        help="Use an analytic representation of the potential (with no neural network).",
-    )
-    parser.add_argument(
-        "--analytic-potential-barmodel",
-        action="store_true",
-        help="Use an analytic representation of the potential for the barmodel \
-            case, with many mn disks with fourier components (and no neural network).",
-    )
-    parser.add_argument("--params", type=str, help="JSON with kwargs.")
+    parser.add_argument("--params", type=str, help="JSON with kwargs.", default="options.json")
     args = parser.parse_args()
 
-    params = load_params(args.params)
+    run_dir = Path(args.run_dir)
+    flow_dir = run_dir / args.flow_dir
+    potential_dir = run_dir / args.potential_dir
+    df_grads_fname = run_dir / args.df_grads_fname
+
+    params = load_params(run_dir / args.params)
     print("Options:")
     print(json.dumps(params, indent=2))
 
-    # Set up Neptune, if the necessary environmental variables are set
-    neptune_project = os.environ.get("NEPTUNE_PROJECT")
-    neptune_api_token = os.environ.get("NEPTUNE_API_TOKEN")
-    neptune_run = None
-    if neptune_project is not None and neptune_api_token is not None:
-        import neptune.new as neptune
+    time_logger = utils.TimeLogger()
 
-        print("Neptune credentials read from environmental variables..")
-        print(f"  Neptune project name: {neptune_project}")
-        print(f"  Neptune API token: {neptune_api_token}")
+    # Print the GPUs available with jax
+    print(f"JAX devices: {jax.devices()}")
 
-        project_id = os.environ.get("NEPTUNE_NAME")
-        if project_id is not None:
-            kw = dict(custom_run_id=project_id, name=project_id)
-        neptune_run = neptune.init_run(
-            project=neptune_project, api_token=neptune_api_token, **kw
-        )
-
-        neptune_run["parameters_flow"] = params["df"]
-        neptune_run["parameters_phi"] = params["Phi"]
+    # ================= Loading in training data ==================
+    # Attrs contain info basic spatial limits on the data
+    data, attrs = utils.load_training_data(args.input)
 
     # ================= Training/loading the flow =================
-    if not (not args.no_potential_training and args.no_flow_sampling):
-        # If there's a potential to be trained and the flow samples are already 
-        # available, the flow does not need to be trained/initialized
+    if not args.no_flow_training:
+        print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
-        if not args.no_flow_training:
-            # Load input phase-space positions to train the flow on
-            data, attrs = utils.load_training_data(args.input)
-            print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
+        # Infer the filename pattern of the OT pairing file based on the data file name
+        stem = Path(args.input).stem  # 'data_1000pc'
+        ot_pairings_path_stem = Path(args.input).parent / "ot_pairings" / f"pairings_{stem}"
 
-            # Train and save normalizing flows
-            print("Training normalizing flows ...")
-            t0 = time()
-            flows = train_flows(
-                data, args.flow_fname, **params["df"], neptune_run=neptune_run, reset_flow_lr=args.reset_flow_lr
-            )
-            dt0 = time() - t0
-            print(f"Training took {time()-t0:.2f} s.")
-        # Re-load the flows (this removes the regularization terms)
-        flows = load_flows(args.flow_fname)
+        # Train and save normalizing flows
+        print("Training normalizing flows ...")
+        time_logger.start('Flow training')
+        flow, loss_history = train_flow(
+            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr, time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
+        )
+        time_logger.stop('Flow training')
+        print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")
+
+    if args.no_flow_training and not args.no_flow_sampling:
+        flow, loss_history = load_flow(flow_dir, params, load_history=True)
+
+    # ================= Basic flow benchmarking =================
+    if args.basic_flow_benchmarking:
+        # If flow has not been read in, read it
+        if 'flow' not in locals():
+            flow, loss_history = load_flow(flow_dir, params, load_history=True)
+        validation_frac = params["df"]["validation_frac"]
+        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history)
 
     # ================= Sampling the flow/loading samples =================
+    n_samples = params["Phi"].pop("n_samples")
+    sample_batch_size = params["Phi"].pop("sample_batch_size")
+    grad_batch_size = params["Phi"].pop("grad_batch_size")
     if args.no_flow_sampling:
         print("Loading DF gradients ...")
-        df_data = utils.load_flow_samples(args.df_grads_fname)
-        params["Phi"].pop("n_samples")
-        params["Phi"].pop("grad_batch_size")
-        params["Phi"].pop("sample_batch_size")
+        df_data = utils.load_flow_samples(df_grads_fname)
     else:
         # Sample from the flows and calculate gradients
         print("Sampling from flows ...")
-        t0 = time()
-        n_samples = params["Phi"].pop("n_samples")
-        grad_batch_size = params["Phi"].pop("grad_batch_size")
-        sample_batch_size = params["Phi"].pop("sample_batch_size")
-        if args.flow_sampling_cut:
-            # Cut the flow samples to the limits specified by the attributes in 
-            # training data. Supports one flow
-            _, attrs = utils.load_training_data(args.input)
-            df_data = flow_sampling.sample_from_different_flows(
-                flows,
-                [attrs],
-                n_samples,
-                return_indiv=True,
-                grad_batch_size=grad_batch_size,
-                sample_batch_size=sample_batch_size,
-            )
-        else:
-            df_data = sample_from_flows(
-                flows,
-                n_samples,
-                return_indiv=True,
-                grad_batch_size=grad_batch_size,
-                sample_batch_size=sample_batch_size,
-                f_reduce=np.median if args.flow_median else utils.clipped_vector_mean,
-            )
-        dt1 = time() - t0
-        print(f"Sampling took {time()-t0:.2f} s.")
-        save_df_data(df_data, args.df_grads_fname)
+        time_logger.start('Flow sampling')
+        # Cut the flow samples to the limits specified by the attributes in 
+        # training data. Supports one flow
+        df_data = flow_sampling.sample_from_different_flows(
+            jax.random.key(params["Phi"]["seed"]),
+            [flow],
+            [attrs],
+            n_samples,
+            grad_batch_size=grad_batch_size,
+            sample_batch_size=sample_batch_size,
+        )
+        time_logger.stop('Flow sampling')
+        print(f"Sampling took {time_logger.get_duration('Flow sampling'):.2f} s.")
+        save_df_data(df_data, df_grads_fname)
+
+    # ================= Applying a spatial mask ================
+    if args.potential_mask is not None:
+        # Update df_data to include only the data within the mask
+        mask = utils.get_mask_eta(df_data["eta"], args.potential_mask)[0]
+        df_data["eta"] = df_data["eta"][mask]
+        df_data["df_deta"] = df_data["df_deta"][mask]
+        if "f" in df_data:
+            df_data["f"] = df_data["f"][mask]
 
     # ================= Training the potential =================
     if not args.no_potential_training:
         print(params["Phi"])
         print("Fitting the potential ...")
-        t0 = time()
+        time_logger.start('Potential training')
 
-        if args.potential_mask is not None:
-            # Update df_data to include only the data within the mask
-            mask = utils.get_mask_eta(df_data["eta"], args.potential_mask)[0]
-            df_data["eta"] = df_data["eta"][mask]
-            df_data["df_deta"] = df_data["df_deta"][mask]
-            if "f" in df_data:
-                df_data["f"] = df_data["f"][mask]
-
-        phi_model = train_potential(
+        phi_model, loss_history = train_potential(
             df_data,
-            args.potential_fname,
-            include_frameshift=args.potential_frameshift,
-            guided_potential=args.guided_potential,
-            use_analytic_potential=args.analytic_potential,
-            use_analytic_potential_barmodel=args.analytic_potential_barmodel,
+            potential_dir,
             **params["Phi"],
         )
-        dt2 = time() - t0
-        print(f"Training took {time()-t0:.2f} s.")
+        time_logger.stop('Potential training')
+        print(f"Training took {time_logger.get_duration('Potential training'):.2f} s.")
 
-    print("Runtime summary:")
-    if "dt0" in locals():
-        print(f"Flow training took {dt0:.2f} s.")
-    if "dt1" in locals():
-        print(f"Flow sampling took {dt1:.2f} s.")
-    if "dt2" in locals():
-        print(f"Potential training took {dt2:.2f} s.")
+    # ================= Basic potential benchmarking =================
+    if args.basic_potential_benchmarking:
+        # If potential has not been read in, read it
+        if 'phi_model' not in locals():
+            phi_model, loss_history = load_potential(potential_dir, params['Phi'], load_history=True)
+        fname_mask = args.potential_mask
+        validation_frac = params["df"]["validation_frac"]
+        spherical_origin = (0, 0, 0)
+        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        potential_benchmarking.benchmark_potential(
+            phi_model, loss_history, fname_mask, data, attrs, df_data, spherical_origin, cylindrical_origin
+        )
+
     return 0
 
 
