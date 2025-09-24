@@ -29,6 +29,7 @@ import flow_benchmarking
 import potential_benchmarking
 import flow_sampling
 import potential
+from flow_ot_dataset_loader_maker import precompute_ot_indices
 
 # limit jax gpu usage to be adaptive
 import os
@@ -354,7 +355,8 @@ def main():
         add_help=True,
         formatter_class=ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input", "-i", type=str, required=False, help="Input data.")
+    parser.add_argument("--input", "-i", type=str,
+                        required=False, help="Input data.")
     parser.add_argument(
         "--run-dir",
         type=str,
@@ -416,7 +418,8 @@ def main():
         action="store_true",
         help="Whether to compute basic potential benchmarks after the potential training is finished.",
     )
-    parser.add_argument("--params", type=str, help="JSON with kwargs.", default="options.json")
+    parser.add_argument("--params", type=str,
+                        help="JSON with kwargs.", default="options.json")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -441,15 +444,75 @@ def main():
     if not args.no_flow_training:
         print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
-        # Infer the filename pattern of the OT pairing file based on the data file name
+        # Infer the filename pattern of the OT pairing file based on
+        # the data file name
         stem = Path(args.input).stem  # 'data_1000pc'
-        ot_pairings_path_stem = Path(args.input).parent / "ot_pairings" / f"pairings_{stem}"
+        ot_pairings_path_stem = (
+            Path(args.input).parent / "ot_pairings" / f"pairings_{stem}"
+        )
+
+        df_opts = params.get("df", {})
+        ot_opts = df_opts.pop("ot_pairing_opts", {})
+
+        # If precomputed OT indices are missing, generate them using
+        # the parameters supplied in `params['df']`.
+        path_train_ot = ot_pairings_path_stem.with_name(ot_pairings_path_stem.name + "_train_epochs")
+        path_val_ot = ot_pairings_path_stem.with_name(ot_pairings_path_stem.name + "_val_epochs")
+
+        def _has_ot_files(path: Path) -> bool:
+            # Look for any matching npz files produced by precompute_ot_indices
+            return any(path.parent.glob(f"{path.name}_*_*.npz"))
+
+        if not _has_ot_files(path_train_ot) or not _has_ot_files(path_val_ot):
+            print("Precomputed OT indices not found; running precompute_ot_indices...")
+            save_dir = Path(args.input).parent / "ot_pairings"
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            # Split the already-loaded data into train/val for precomputation
+            validation_frac = params["df"].get("validation_frac", 0.25)
+            train_data, val_data = utils.split_data(data, validation_frac)
+
+            # Normalization used by precompute script
+            data_mean = np.mean(train_data["eta"], axis=0)
+            data_std = np.std(train_data["eta"], axis=0)
+
+            n_epochs = int(ot_opts.get("n_epochs", 1024))
+            ot_batch_size = int(ot_opts.get("batch_size", 256))
+            batch_size_storing_epochs = int(ot_opts.get("batch_size_storing_epochs", n_epochs))
+            n_workers = int(ot_opts.get("n_workers", 1))
+
+            # Run precomputation for train and val sets. Use separate PRNGKeys.
+            precompute_ot_indices(
+                num_epochs=n_epochs,
+                train_data=train_data,
+                batch_size=ot_batch_size,
+                batch_size_storing_epochs=batch_size_storing_epochs,
+                norm_mean=data_mean,
+                norm_std=data_std,
+                fname_prefix=save_dir / f"pairings_{stem}_train",
+                num_workers=n_workers,
+                key=jax.random.PRNGKey(df_opts.get("seed", 0)),
+            )
+            precompute_ot_indices(
+                num_epochs=n_epochs,
+                train_data=val_data,
+                batch_size=ot_batch_size,
+                batch_size_storing_epochs=batch_size_storing_epochs,
+                norm_mean=data_mean,
+                norm_std=data_std,
+                fname_prefix=save_dir / f"pairings_{stem}_val",
+                num_workers=n_workers,
+                key=jax.random.PRNGKey(df_opts.get("seed", 1)),
+            )
 
         # Train and save normalizing flows
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
         flow, loss_history = train_flow(
-            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr, time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
+            data, flow_dir, **df_opts,
+            reset_flow_lr=args.reset_flow_lr,
+            time_logger=time_logger,
+            ot_pairings_path_stem=ot_pairings_path_stem
         )
         time_logger.stop('Flow training')
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")
@@ -463,7 +526,13 @@ def main():
         if 'flow' not in locals():
             flow, loss_history = load_flow(flow_dir, params, load_history=True)
         validation_frac = params["df"]["validation_frac"]
-        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history)
+        flow_benchmarking.benchmark(
+            flow,
+            jax.random.key(0),
+            time_logger,
+            *utils.split_data(data, validation_frac),
+            loss_history
+        )
 
     # ================= Sampling the flow/loading samples =================
     n_samples = params["Phi"].pop("n_samples")
@@ -517,13 +586,20 @@ def main():
     if args.basic_potential_benchmarking:
         # If potential has not been read in, read it
         if 'phi_model' not in locals():
-            phi_model, loss_history = load_potential(potential_dir, params['Phi'], load_history=True)
+            phi_model, loss_history = load_potential(potential_dir,
+                                                     params['Phi'],
+                                                     load_history=True)
         fname_mask = args.potential_mask
         validation_frac = params["df"]["validation_frac"]
         spherical_origin = (0, 0, 0)
-        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        cylindrical_origin = (
+            params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'],
+            0, 0
+        )
         potential_benchmarking.benchmark_potential(
-            phi_model, loss_history, fname_mask, data, attrs, df_data, spherical_origin, cylindrical_origin
+            phi_model, loss_history,
+            fname_mask, data, attrs, df_data,
+            spherical_origin, cylindrical_origin
         )
 
     return 0
