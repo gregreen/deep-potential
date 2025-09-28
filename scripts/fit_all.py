@@ -24,6 +24,7 @@ import optax
 from optax.contrib import reduce_on_plateau
 
 import flow_ot_flow_matching
+import flow_matching
 import utils
 import flow_benchmarking
 import potential_benchmarking
@@ -112,6 +113,7 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
 def train_flow(
     data,
     flow_dir,
+    model_type="OTFlowMatching",
     ot_pairings_path_stem=None,
     time_scheduler_type="uniform",
     seed=0,
@@ -123,7 +125,7 @@ def train_flow(
     vector_field_opts={},
     time_logger=None,
     reset_flow_lr=False,
-    checkpoint_frequency_epochs=-1,
+    checkpoint_frequency_epochs=-1
 ):
     """
     Initializes and trains a normalizing flow model for the distribution function.
@@ -134,6 +136,7 @@ def train_flow(
     Args:
         data (dict): The training data, containing 'eta' and 'weights'.
         flow_dir (str): Directory to save the trained model and checkpoints.
+        model_type (str): The type of flow model to train.
         ot_pairings_path_stem (str): Base path for precomputed Optimal Transport pairings.
         time_scheduler_type (str): Type of time scheduler for flow matching.
         seed (int): Random seed for reproducibility.
@@ -144,7 +147,6 @@ def train_flow(
         lr_opts (dict): Dictionary of learning rate options.
         vector_field_opts (dict): Options for the vector field neural network.
         time_logger (utils.TimeLogger): Optional logger for timing operations.
-        model_type (str): The type of flow model to train.
         reset_flow_lr (bool): Whether to reset the learning rate when resuming.
         checkpoint_frequency_epochs (int): Frequency (in epochs) for saving checkpoints.
 
@@ -194,28 +196,23 @@ def train_flow(
     )
     loss_history = {'train': [], 'val': [], 'lr': []}
 
-    flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
-        key,
-        flow_model,
-        optimizer,
-        schedule,
-        lr_opts["type"],
-        train_data, val_data,
-        data_mean, data_std,
-        n_epochs,
-        batch_size,
-        ot_pairings_path_stem,
-        time_scheduler_type,
-        sb_constant,
-        time_logger=time_logger,
-        loss_history=loss_history,
-        checkpoint_frequency_epochs=checkpoint_frequency_epochs
-    )
-    # x_test = jnp.array([0.0, 0.1, 0.2, 0.0, 0.0, 0.0])
-    # print(flow_model.log_prob(x_test))
-    # flow_model_new, loss_history_new = flow_model.load(flow_dir, flow_model)
-    # print(flow_model_new.log_prob(x_test))
-    # exit()
+    kwargs = dict(key=key, model=flow_model, optimizer=optimizer, schedule=schedule,
+                  schedule_type=lr_opts["type"], lr_final=lr_opts.get("final", None),
+                  train_data=train_data, val_data=val_data,
+                  norm_mean=data_mean, norm_std=data_std, epochs=n_epochs, batch_size=batch_size,
+                  time_scheduler_type=time_scheduler_type, sb_constant=sb_constant,
+                  time_logger=time_logger, loss_history=loss_history,
+                  checkpoint_frequency_epochs=checkpoint_frequency_epochs)
+    if model_type == "OTFlowMatching":
+        flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
+            **kwargs, ot_pairings_path_stem=ot_pairings_path_stem,
+        )
+    elif model_type == "FlowMatching":
+        flow_model, loss_history = flow_matching.train_flow_matching_model(
+            **kwargs
+        )
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
 
     return flow_model, loss_history
 
@@ -449,7 +446,8 @@ def main():
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
         flow, loss_history = train_flow(
-            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr, time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
+            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr,
+            time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
         )
         time_logger.stop('Flow training')
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")

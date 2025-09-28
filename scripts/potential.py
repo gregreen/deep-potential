@@ -708,7 +708,7 @@ def train_potential(
             epoch_val_loss_noreg.append(val_loss_noreg.item())
 
             batch = jax.tree.map(lambda x: x[i*batch_size:(i+1)*batch_size], train_data_shuffled)
-            params, opt_state, loss, loss_noreg = train_step(params, static, optimizer, opt_state, batch, loss_params, schedule_type, val_loss)
+            params, opt_state, loss, loss_noreg = train_step(params, static, optimizer, opt_state, batch, loss_params, schedule_type, jnp.array(val_loss))
             epoch_loss.append(loss.item())
             epoch_loss_noreg.append(loss_noreg.item())
 

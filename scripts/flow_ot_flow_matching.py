@@ -382,13 +382,17 @@ def val_loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_cons
 
 
 @eqx.filter_jit
-def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, sb_constant, time_scheduler):
+def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, sb_constant, time_scheduler, schedule_type, val_loss):
     if sb_constant > 0:
         loss, grads = loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant)
     else:
         loss, grads = loss_fn(params, static, key, x0, x1, weights, time_scheduler)
     global_grad_norm = optax.global_norm(grads)
-    updates, opt_state = optimizer.update(grads, opt_state, params)
+    if schedule_type == "step":
+        # We additionally pass the validation loss to the scheduler
+        updates, opt_state = optimizer.update(grads, opt_state, params, value=val_loss)
+    else:
+        updates, opt_state = optimizer.update(grads, opt_state, params)
     params = eqx.apply_updates(params, updates)
     return params, opt_state, loss, global_grad_norm
 
@@ -429,6 +433,7 @@ def train_ot_flow_matching_model(
     optimizer: optax.GradientTransformation,
     schedule: optax.Schedule,
     schedule_type: str,
+    lr_final: float,
     train_data: Array,
     val_data: Array,
     norm_mean: Array,
@@ -495,13 +500,6 @@ def train_ot_flow_matching_model(
     start_epoch = len(loss_history['lr'])
     step = start_epoch * steps_per_epoch  # Continue from previous step if resuming
 
-    if schedule_type == "step":
-        # This currently does not work when resuming from checkpoint
-        val_loss_min = 99999999
-        val_loss_avg = 99999999
-        steps_since_decline = 0
-        early_stopping = False
-
     # Pre-generate keys to ensure reproducibility with the OT pairing script.
     key_x0_train, key_x0_val = jax.random.PRNGKey(0), jax.random.PRNGKey(1)
     keys_x0_train_epoch, keys_x0_val_epoch = [], []
@@ -511,6 +509,7 @@ def train_ot_flow_matching_model(
         key_x0_val, subkey = jax.random.split(key_x0_val)
         keys_x0_val_epoch.append(subkey)
 
+    avg_val_loss, avg_train_loss = 1000000, 1000000
     for epoch in (pbar := trange(start_epoch, epochs)):
         if time_logger is not None:
             time_logger.start("Training | setup")
@@ -534,7 +533,7 @@ def train_ot_flow_matching_model(
         if time_logger is not None:
             time_logger.stop("Training | setup")
 
-        avg_train_loss, epoch_w = 0.0, 0.0 # avg training loss is the weighted average
+        epoch_w = 0.0 # avg training loss is the weighted average
         epoch_lr = []
         epoch_global_grad_norms = []
         for i in range(steps_per_epoch):
@@ -558,7 +557,7 @@ def train_ot_flow_matching_model(
                 time_logger.start("Training | train backpropagation")
             params, opt_state, loss, global_grad_norm = train_step(
                 params, static, opt_state, key_step, x0_batch, x1_batch, w_batch, optimizer,
-                sb_constant=sb_constant, time_scheduler=time_scheduler
+                sb_constant=sb_constant, time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss)
             )
 
             avg_train_loss += float(loss.item()) * float(np.sum(w_batch))
@@ -569,13 +568,8 @@ def train_ot_flow_matching_model(
                 time_logger.start("Training | train lr update")
 
             if schedule_type == "step":
-                opt_state, val_loss_min, steps_since_decline, early_stopping = schedule(
-                    opt_state, val_loss_min, val_loss_avg, loss_history['val'], steps_since_decline, step
-                )
-                lr = float(opt_state.hyperparams["learning_rate"])
-                epoch_lr.append(lr)
-                if early_stopping:
-                    break
+                lr = float(schedule(step)) * optax.tree.get(opt_state, "scale")
+                epoch_lr.append(float(lr))
             else:
                 lr = float(schedule(step))
                 epoch_lr.append(lr)
@@ -595,7 +589,7 @@ def train_ot_flow_matching_model(
         x0_indices_epoch = x0_indices_epoch[perm]
         x1_indices_epoch = x1_indices_epoch[perm]
         # Batch validation loss computation
-        avg_val_loss, val_w = 0.0, 0.0
+        val_w = 0.0
         if time_logger is not None:
             time_logger.start("Training | val")
 
@@ -626,15 +620,15 @@ def train_ot_flow_matching_model(
             f"Val: {avg_val_loss:.4f} | "
             f"lr: {loss_history['lr'][-1]:.4f}"
         )
-        if schedule_type == "step" and early_stopping:
-            print("Early stopping triggered.")
-            break
-
         # Checkpoint if needed
         if checkpoint_frequency_epochs > 0 and epoch > 0 and epoch % checkpoint_frequency_epochs == 0:
             dynamics_net = eqx.combine(params, static)
             model = eqx.tree_at(lambda m: m.flow.bijection[0].dynamics_net, model, dynamics_net)
             model = model.save(loss_history=loss_history)
+
+        if schedule_type == "step" and loss_history['lr'][-1] < lr_final:
+            print("Early stopping triggered.")
+            break
 
     dynamics_net = eqx.combine(params, static)
     model = eqx.tree_at(lambda m: m.flow.bijection[0].dynamics_net, model, dynamics_net)
