@@ -11,6 +11,96 @@ import json
 
 import utils
 
+def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, lims=None, n_rows=1):
+    labels = [
+        '$R$', '$z$', r'$\phi$', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
+        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$v_x$', '$v_y$', '$v_z$',
+        '$r$', r'$\phi\mathrm{\ (deg)}$', r'$\cos \theta$', '$v_r\mathrm{\ (km/s)}$', r'$v_{\theta}\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$'
+    ]
+    keys = [
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        'r', 'phi', 'cth', 'vr', 'vth', 'vT'
+    ]
+
+    n_cols = -(-len(dims)//n_rows) # Need to round up
+    fig, axs = plt.subplots(
+        n_rows, n_cols, # Need to round up
+        figsize=(3*n_cols, 3*n_rows),
+        dpi=200,
+        layout='compressed'
+    )
+    axs = axs.flat
+
+    def extract_dim(dim):
+        coef = 100 if dim in ['cylvR', 'cylvz', 'cylvT', 'vx', 'vy', 'vz'] else 1
+        if dim in ['phi']:
+            coef = 180/np.pi
+        if dim in ['cylvT']:
+            coef *= -1
+
+        return coef*coords_train[dim], coef*coords_sample[dim]
+
+    x_trains = []
+    x_samples = []
+    for dim in dims:
+        x_train, x_sample = extract_dim(dim)
+        x_trains.append(x_train)
+        x_samples.append(x_sample)
+    labels = {k:l for k,l in zip(keys,labels)}
+
+    if lims is None:
+        # Take the 1th and 99th percentile
+        lims = []
+        for dim,x_train in zip(dims,x_trains):
+            lim = [np.percentile(x_train, 1), np.percentile(x_train, 99)]
+            k = 0.2
+            w = np.abs(lim[1] - lim[0]) * k
+            lim[0] -= w
+            lim[1] += w
+            # Default limits for some dimensions
+            if dim == 'phi':
+                lim = [180, -180]
+            if dim == 'cth':
+                lim = [-1, 1]
+            lims.append(lim)
+    lims_ordered = [[np.min(lim), np.max(lim)] for lim in lims]
+
+    for i,(dim, x_train, x_sample) in enumerate(zip(dims, x_trains, x_samples)):
+        axs[i].hist(
+            x_train, weights=weights_train,
+            range=lims_ordered[i],
+            bins=64,
+            density=True,
+            histtype='stepfilled',
+            alpha=0.5,
+            color='C0',
+            label='data'
+        )
+        axs[i].hist(
+            x_sample,
+            range=lims_ordered[i],
+            bins=64,
+            density=True,
+            histtype='step',
+            color='C1',
+            label='flow'
+        )
+        axs[i].set_xlabel(labels[dim], labelpad=0, fontsize=10)
+        if i == 0:
+            axs[i].legend(fontsize=8)
+        axs[i].set_xlim(lims[i])
+        if dim == 'phi':
+            axs[i].xaxis.set_major_locator(ticker.MultipleLocator(90))
+        # Only show y-axis label on leftmost plots
+        if i % n_cols == 0:
+            axs[i].set_ylabel('Density', labelpad=2, fontsize=10)
+        else:
+            axs[i].set_yticklabels([])
+    
+    return fig, axs
+
+
 def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, dim2, lims=None, cmap='viridis', logscale=False):
     labels = [
         '$R$', '$z$', r'$\phi$', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
@@ -127,6 +217,7 @@ def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, di
             ax.invert_xaxis()
     return fig, axs
 
+
 @eqx.filter_jit
 def batch_loss_fn(model, x_batch, weights_batch):
     log_probs = model.log_prob(x_batch)
@@ -137,8 +228,10 @@ def batch_loss_fn(model, x_batch, weights_batch):
 def sample_batch_fn(model, sample_key, batch_size):
     return model.sample(sample_key, (batch_size,))
 
+
 def value_and_grad_fn(model, eta_batch):
     return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
+
 
 def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
     """
@@ -221,6 +314,43 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
 
     coords_sample = utils.calc_coords(samples, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
     coords_train = utils.calc_coords(train_data["eta"], spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
+
+    #
+    # 1D marginals
+    #
+
+    # Cartesian projections
+    fig, axs = plot_simple_1d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        n_rows=2
+    )
+    plt.savefig(save_dir / '1d_sample_density_cartesian.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    # Spherical projections
+    fig, axs = plot_simple_1d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        'r', 'phi', 'cth', 'vr', 'vT', 'vth',
+        n_rows=2
+    )
+    plt.savefig(save_dir / '1d_sample_density_spherical.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    # Cylindrical projections
+    fig, axs = plot_simple_1d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        n_rows=2
+    )
+    plt.savefig(save_dir / '1d_sample_density_cylindrical.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    print("Saved 1d sample density plots")
+
+    #
+    # 2D marginals
+    #
 
     # Cartesian projections
     fig, axs = plot_simple_2d_marginal(
