@@ -30,6 +30,7 @@ import flow_benchmarking
 import potential_benchmarking
 import flow_sampling
 import potential
+import flow_ot_dataset_loader_maker
 
 # limit jax gpu usage to be adaptive
 import os
@@ -113,8 +114,9 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
 def train_flow(
     data,
     flow_dir,
-    model_type="OTFlowMatching",
-    ot_pairings_path_stem=None,
+    data_fname=None,
+    training_method="OTFlowMatching",
+    ot_pairings_opts={},
     time_scheduler_type="uniform",
     seed=0,
     n_epochs=100,
@@ -136,8 +138,9 @@ def train_flow(
     Args:
         data (dict): The training data, containing 'eta' and 'weights'.
         flow_dir (str): Directory to save the trained model and checkpoints.
-        model_type (str): The type of flow model to train.
-        ot_pairings_path_stem (str): Base path for precomputed Optimal Transport pairings.
+        training_method (str): The type of flow model to train.
+        ot_pairings_opts (dict): Dictionary of the params required for precomputing
+            OT pairings. If empty, OT pairings are not used.
         time_scheduler_type (str): Type of time scheduler for flow matching.
         seed (int): Random seed for reproducibility.
         n_epochs (int): Number of training epochs.
@@ -163,6 +166,22 @@ def train_flow(
     data_std = np.std(train_data["eta"], axis=0)
     print(f"Using mean: {data_mean}")
     print(f"       std: {data_std}")
+
+    if training_method == "OTFlowMatching":
+        if ot_pairings_opts == {}:
+            raise ValueError("OT pairings not found, and ot_pairings_opts is empty. Cannot proceed.")
+        # Infer the filename pattern of the OT pairing file based on the data file name
+        ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_seed{ot_pairings_opts['seed']}"
+
+        # Check if the OT pairing files exist
+        ot_pairings_exist = any(ot_pairings_dir.glob("train_epochs_*_*.npz")) and any(ot_pairings_dir.glob("val_epochs_*_*.npz"))
+        if not ot_pairings_exist:
+            print("OT pairings not found, precomputing them now ...")
+            flow_ot_dataset_loader_maker.make_ot_dataloader(
+                data_fname=data_fname,
+                **ot_pairings_opts
+            )
+            print("OT pairings precomputation done.")
 
     # NormalizingFlow is a wrapper around a flowjax flow which itself is equipped with
     # a base distribution and a bijection.
@@ -203,16 +222,17 @@ def train_flow(
                   time_scheduler_type=time_scheduler_type, sb_constant=sb_constant,
                   time_logger=time_logger, loss_history=loss_history,
                   checkpoint_frequency_epochs=checkpoint_frequency_epochs)
-    if model_type == "OTFlowMatching":
+    if training_method == "OTFlowMatching":
+        ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_seed{ot_pairings_opts['seed']}"
         flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
-            **kwargs, ot_pairings_path_stem=ot_pairings_path_stem,
+            **kwargs, ot_pairings_dir=ot_pairings_dir,
         )
-    elif model_type == "FlowMatching":
+    elif training_method == "FlowMatching":
         flow_model, loss_history = flow_matching.train_flow_matching_model(
             **kwargs
         )
     else:
-        raise ValueError(f"Unknown model_type: {model_type}")
+        raise ValueError(f"Unknown training_method: {training_method}")
 
     return flow_model, loss_history
 
@@ -438,16 +458,12 @@ def main():
     if not args.no_flow_training:
         print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
-        # Infer the filename pattern of the OT pairing file based on the data file name
-        stem = Path(args.input).stem  # 'data_1000pc'
-        ot_pairings_path_stem = Path(args.input).parent / "ot_pairings" / f"pairings_{stem}"
-
         # Train and save normalizing flows
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
         flow, loss_history = train_flow(
-            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr,
-            time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
+            data, flow_dir, args.input, **params["df"], reset_flow_lr=args.reset_flow_lr,
+            time_logger=time_logger
         )
         time_logger.stop('Flow training')
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")

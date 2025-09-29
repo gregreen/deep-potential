@@ -207,12 +207,14 @@ class NormalizingFlow(eqx.Module):
         return model, loss_history
 
 
-class PrecomputedOTIndexLoader:
+class PrecomputedOTDataLoader:
     """
-    A lazy loader for OT pairing indices stored across multiple chunked files.
+    A lazy loader for OT paired noise-data samples for flow matching with minibatch OT,
+    stored across multiple chunked files..
 
     This class provides a list-like interface (`loader[epoch_nr]`) to access
-    precomputed indices for each training epoch. It only loads the required file
+    x1 and x0 for each training epoch in a way where the samples from noise x0 are
+    matched to x1 with Optimal Transport. It only loads the required file
     chunk into memory when an epoch from that chunk is requested, making it
     efficient for very large datasets.
 
@@ -221,9 +223,11 @@ class PrecomputedOTIndexLoader:
                           The loader searches for files like 'data/pairings_train_0_500.npz'.
         n (int): The number of samples in the dataset, used for reshaping the loaded arrays.
     """
-    def __init__(self, base_path: Path, n: int):
+    def __init__(self, base_path: Path, n: int, x1_data: Array, w1_weights: Array):
         self.base_path = base_path
         self.n = n
+        self.x1_data = x1_data
+        self.w1_weights = w1_weights
         self._file_map = {}
         self._epoch_starts = []
         self._total_epochs = 0
@@ -233,8 +237,9 @@ class PrecomputedOTIndexLoader:
         # Cache for the most recently loaded file
         self._cached_file_path = None
         self._cached_start_epoch = -1
-        self._cached_x0 = None
-        self._cached_x1 = None
+        self._cached_idx_x0 = None
+        self._cached_idx_x1 = None
+        self._cached_keys = None
 
     def _discover_files(self):
         """Finds all index files and maps epoch ranges to file paths."""
@@ -277,10 +282,10 @@ class PrecomputedOTIndexLoader:
 
     def __getitem__(self, epoch_nr: int):
         """
-        Loads and returns the indices for a specific epoch.
+        Loads and returns minibatch OT-matched x0 and x1 of a specific epoch.
 
         This method finds the correct file, loads it if not already cached,
-        and returns the requested epoch's index data.
+        and returns the requested epoch's data.
         """
         if not isinstance(epoch_nr, int):
             raise TypeError("Index must be an integer.")
@@ -298,20 +303,23 @@ class PrecomputedOTIndexLoader:
         # Load file if it's not the one we have in cache
         if file_path != self._cached_file_path:
             data = np.load(file_path)
-            x0 = data['x0_perm_indices']
-            x1 = data['x1_perm_indices']
+            idx_x0 = data['x0_perm_indices']
+            idx_x1 = data['x1_perm_indices']
+            keys_x0 = data['x0_generation_keys']
 
             # Reshape the loaded chunk
             epochs_in_file = end_epoch - start_epoch
-            self._cached_x0 = jnp.array(x0).reshape(epochs_in_file, self.n)
-            self._cached_x1 = jnp.array(x1).reshape(epochs_in_file, self.n)
+            self._cached_idx_x0 = jnp.array(idx_x0).reshape(epochs_in_file, self.n)
+            self._cached_idx_x1 = jnp.array(idx_x1).reshape(epochs_in_file, self.n)
+            self._cached_keys = jnp.array(keys_x0, dtype=jnp.uint32).reshape(epochs_in_file, 2)  # Each key has 2 uint32 components
             self._cached_file_path = file_path
             self._cached_start_epoch = start_epoch
 
         # Calculate the index within the loaded (cached) chunk
         local_epoch_idx = epoch_nr - self._cached_start_epoch
 
-        return self._cached_x0[local_epoch_idx], self._cached_x1[local_epoch_idx]
+        x0 = jax.random.normal(self._cached_keys[local_epoch_idx], shape=self.x1_data.shape)
+        return x0[self._cached_idx_x0[local_epoch_idx]], self.x1_data[self._cached_idx_x1[local_epoch_idx]], self.w1_weights[self._cached_idx_x1[local_epoch_idx]]
 
 
 # ----------------- Loss Functions and Training Step -----------------
@@ -426,7 +434,6 @@ def logit_normal_scheduler(key, shape, mu=0.0, sigma=1.0):
 
 # ----------------- Main Training Function -----------------
 
-
 def train_ot_flow_matching_model(
     key: PRNGKeyArray,
     model: NormalizingFlow,
@@ -440,7 +447,7 @@ def train_ot_flow_matching_model(
     norm_std: Array,
     epochs: int,
     batch_size: int,
-    ot_pairings_path_stem: Path,
+    ot_pairings_dir: Path,
     time_scheduler_type=None,
     sb_constant: float = 0.0,
     time_logger=None,
@@ -459,10 +466,10 @@ def train_ot_flow_matching_model(
     val_batch_size = batch_size
 
     # --- Setup Data Loaders and Schedulers ---
-    path_train_ot = ot_pairings_path_stem.with_name(ot_pairings_path_stem.name + "_train_epochs")
-    x0_x1_train_indices_loader = PrecomputedOTIndexLoader(path_train_ot, n=n_train)
-    path_val_ot = ot_pairings_path_stem.with_name(ot_pairings_path_stem.name + "_val_epochs")
-    x0_x1_val_indices_loader = PrecomputedOTIndexLoader(path_val_ot, n=n_val)
+    path_train_ot = ot_pairings_dir / "train_epochs"
+    x0_x1_train_indices_loader = PrecomputedOTDataLoader(path_train_ot, n=n_train, x1_data=train_x, w1_weights=train_weights)
+    path_val_ot = ot_pairings_dir / "val_epochs"
+    x0_x1_val_indices_loader = PrecomputedOTDataLoader(path_val_ot, n=n_val, x1_data=val_x, w1_weights=val_weights)
 
     if time_scheduler_type == "uniform":
         time_scheduler = uniform_scheduler
@@ -500,36 +507,20 @@ def train_ot_flow_matching_model(
     start_epoch = len(loss_history['lr'])
     step = start_epoch * steps_per_epoch  # Continue from previous step if resuming
 
-    # Pre-generate keys to ensure reproducibility with the OT pairing script.
-    key_x0_train, key_x0_val = jax.random.PRNGKey(0), jax.random.PRNGKey(1)
-    keys_x0_train_epoch, keys_x0_val_epoch = [], []
-    for _ in range(epochs):
-        key_x0_train, subkey = jax.random.split(key_x0_train)
-        keys_x0_train_epoch.append(subkey)
-        key_x0_val, subkey = jax.random.split(key_x0_val)
-        keys_x0_val_epoch.append(subkey)
-
     avg_val_loss, avg_train_loss = 1000000, 1000000
     for epoch in (pbar := trange(start_epoch, epochs)):
         if time_logger is not None:
             time_logger.start("Training | setup")
         # Derive keys for x0 generation and permutation exactly as in the pre-computation script
-        key_x0_train = keys_x0_train_epoch[epoch % x0_x1_train_indices_loader._total_epochs]
-        key_x0_train, _ = jax.random.split(key_x0_train, 2)
-        key_x0_val = keys_x0_val_epoch[epoch % x0_x1_val_indices_loader._total_epochs]
-        key_x0_val, _ = jax.random.split(key_x0_val, 2)
+        x0_train_epoch, x1_train_epoch, w1_train_epoch = x0_x1_train_indices_loader[epoch]
+        x0_val_epoch, x1_val_epoch, w1_val_epoch = x0_x1_val_indices_loader[epoch]
         key, key_loop, key_shuffle = jax.random.split(key, 3)
 
-        # --- Reproduce the EXACT x0 and permutation for this epoch ---
-        x0_train_epoch = jax.random.normal(key_x0_train, shape=train_x.shape)
-        x0_val_epoch = jax.random.normal(key_x0_val, shape=val_x.shape)
-
-        # Get the pairing indices for the current epoch
-        x0_indices_epoch, x1_indices_epoch = x0_x1_train_indices_loader[epoch]
         # Additionally shuffle the indices to help the later epochs which start repeating
         perm = jax.random.permutation(key_shuffle, n_train)
-        x0_indices_epoch = x0_indices_epoch[perm]
-        x1_indices_epoch = x1_indices_epoch[perm]
+        x0_train_epoch = x0_train_epoch[perm]
+        x1_train_epoch = x1_train_epoch[perm]
+        w1_train_epoch = w1_train_epoch[perm]
         if time_logger is not None:
             time_logger.stop("Training | setup")
 
@@ -541,14 +532,9 @@ def train_ot_flow_matching_model(
                 time_logger.start("Training | train setup")
             key_loop, key_step = jax.random.split(key_loop)
 
-            # These are indices into the shuffled training set
-            x0_idx = x0_indices_epoch[i * batch_size: (i + 1) * batch_size]
-            x1_idx = x1_indices_epoch[i * batch_size: (i + 1) * batch_size]
-
-            # Construct the batch from the full datasets using the paired indices
-            x0_batch = x0_train_epoch[x0_idx]
-            x1_batch = train_x[x1_idx]
-            w_batch = train_weights[x1_idx]
+            x0_batch = x0_train_epoch[i * batch_size: (i + 1) * batch_size]
+            x1_batch = x1_train_epoch[i * batch_size: (i + 1) * batch_size]
+            w_batch = w1_train_epoch[i * batch_size: (i + 1) * batch_size]
             if i == steps_per_epoch - 1 and x0_batch.shape[0] != batch_size:
                 continue
 
@@ -583,23 +569,16 @@ def train_ot_flow_matching_model(
         global_grad_norms.append(avg_global_grad_norm)
 
         # Calculate validation loss
-        key, key_loop, key_shuffle = jax.random.split(key, 3)
-        x0_indices_epoch, x1_indices_epoch = x0_x1_val_indices_loader[epoch]
-        perm = jax.random.permutation(key_shuffle, n_val)
-        x0_indices_epoch = x0_indices_epoch[perm]
-        x1_indices_epoch = x1_indices_epoch[perm]
-        # Batch validation loss computation
+        key, key_loop = jax.random.split(key)
         val_w = 0.0
         if time_logger is not None:
             time_logger.start("Training | val")
 
         for i in range(0, val_x.shape[0], val_batch_size):
             key_loop, key_step = jax.random.split(key_loop)
-            x0_idx = x0_indices_epoch[i: i + val_batch_size]
-            x1_idx = x1_indices_epoch[i: i + val_batch_size]
-            x0_batch = x0_val_epoch[x0_idx]
-            x1_batch = val_x[x1_idx]
-            w_batch = val_weights[x1_idx]
+            x0_batch = x0_val_epoch[i: i + val_batch_size]
+            x1_batch = x1_val_epoch[i: i + val_batch_size]
+            w_batch = w1_val_epoch[i: i + val_batch_size]
             if sb_constant > 0:
                 v_loss = val_loss_fn_sb(params, static, key_loop, x0_batch, x1_batch, w_batch, time_scheduler, sb_constant)
             else:

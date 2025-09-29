@@ -8,122 +8,10 @@ import optax
 import numpy as np
 from tqdm import trange
 
-from flow_ot_flow_matching import NormalizingFlow
-
-
-# ----------------- Loss Functions and Training Step -----------------
-
-
-@eqx.filter_value_and_grad
-def loss_fn(params, static, key, x0, x1, weights, time_scheduler):
-    # Standard flow matching loss
-    t = time_scheduler(key, (x1.shape[0], 1))
-    xt = t * x1 + (1 - t) * x0
-    ut = x1 - x0  # Target vector field
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)  # Predicted vector field
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_jit
-def val_loss_fn(params, static, key, x0, x1, weights, time_scheduler):
-    # Standard flow matching loss for validation
-    t = time_scheduler(key, (x1.shape[0], 1))
-    xt = t * x1 + (1 - t) * x0
-    ut = x1 - x0
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_value_and_grad
-def loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant):
-    # Schrodinger Bridge loss
-    t_key, z_key = jax.random.split(key, 2)
-    t = time_scheduler(t_key, (x1.shape[0], 1))
-    mu_t = t * x1 + (1 - t) * x0
-    z = jax.random.normal(z_key, shape=x1.shape)
-
-    eps = 1e-8
-    epsilon_t = sb_constant * jnp.sqrt(t * (1 - t) + eps)
-
-    xt = mu_t + epsilon_t * z
-    ut = x1 - x0 + (1 - 2 * t) / (2 * t * (1 - t) + eps) * (xt - mu_t)
-
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_jit
-def val_loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant):
-    # Schrodinger Bridge loss for validation
-    t_key, z_key = jax.random.split(key, 2)
-    t = time_scheduler(t_key, (x1.shape[0], 1))
-    mu_t = t * x1 + (1 - t) * x0
-    z = jax.random.normal(z_key, shape=x1.shape)
-
-    eps = 1e-8
-    epsilon_t = sb_constant * jnp.sqrt(t * (1 - t) + eps)
-
-    xt = mu_t + epsilon_t * z
-    ut = x1 - x0 + (1 - 2 * t) / (2 * t * (1 - t) + eps) * (xt - mu_t)
-
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_jit
-def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, sb_constant, time_scheduler, schedule_type, val_loss):
-    if sb_constant > 0:
-        loss, grads = loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant)
-    else:
-        loss, grads = loss_fn(params, static, key, x0, x1, weights, time_scheduler)
-    global_grad_norm = optax.global_norm(grads)
-    if schedule_type == "step":
-        # We additionally pass the validation loss to the scheduler
-        updates, opt_state = optimizer.update(grads, opt_state, params, value=val_loss)
-    else:
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = eqx.apply_updates(params, updates)
-    return params, opt_state, loss, global_grad_norm
-
-
-# ----------------- Time Schedulers -----------------
-
-
-def uniform_scheduler(key, shape):
-    """Standard uniform sampling for t."""
-    return jax.random.uniform(key, shape)
-
-
-def power_law_scheduler(key, shape, p=2.0):
-    """
-    Samples t according to a power law: t = u^(1/p).
-    p > 1.0 weighs t=1 more heavily (e.g., p=2.0 for a sqrt distribution of u).
-    """
-    u = jax.random.uniform(key, shape)
-    return u**(1 / p)
-
-
-def logit_normal_scheduler(key, shape, mu=0.0, sigma=1.0):
-    """
-    Logit-Normal sampling, which concentrates samples around t=0.5.
-    """
-    u = jax.random.uniform(key, shape)
-    # Use the inverse CDF of the normal distribution (percent point function)
-    x = jax.scipy.stats.norm.ppf(u, loc=mu, scale=sigma)
-    return jax.scipy.special.expit(x)
+from flow_ot_flow_matching import NormalizingFlow, val_loss_fn, val_loss_fn_sb, train_step, uniform_scheduler, power_law_scheduler, logit_normal_scheduler
 
 
 # ----------------- Main Training Function -----------------
-
-
 def train_flow_matching_model(
     key: PRNGKeyArray,
     model: NormalizingFlow,
@@ -195,15 +83,10 @@ def train_flow_matching_model(
 
     avg_val_loss = 1000000.0
     for epoch in (pbar := trange(start_epoch, epochs)):
-        if time_logger is not None:
-            time_logger.start("Training | setup")
 
         # Shuffle training data at the beginning of each epoch
         key, key_shuffle = jax.random.split(key)
         perm = jax.random.permutation(key_shuffle, n_train)
-
-        if time_logger is not None:
-            time_logger.stop("Training | setup")
 
         avg_train_loss, epoch_w = 0.0, 0.0
         epoch_lr = []
@@ -227,7 +110,7 @@ def train_flow_matching_model(
                 time_logger.stop("Training | train setup")
                 time_logger.start("Training | train backpropagation")
 
-            # Note: avg_val_loss from the *previous* epoch is used here, as per original logic
+            # Note: avg_val_loss from the *previous* epoch is used here
             params, opt_state, loss, global_grad_norm = train_step(
                 params, static, opt_state, key_step, x0_batch, x1_batch, w_batch, optimizer,
                 sb_constant=sb_constant, time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss)
@@ -241,7 +124,7 @@ def train_flow_matching_model(
                 time_logger.start("Training | train lr update")
 
             if schedule_type == "step":
-                lr = float(schedule(step)) * optax.tree_utils.get_active_state(opt_state).scale
+                lr = float(schedule(step)) * optax.tree.get(opt_state, "scale")
                 epoch_lr.append(float(lr))
             else:
                 lr = float(schedule(step))

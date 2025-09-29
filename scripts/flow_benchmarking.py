@@ -264,6 +264,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
     print(f"Gradient calculation took: {dt:.4f} s")
 
     # Save final losses and how much time everything took
+    print(f"Time logger keys: {list(time_logger.times.keys())}")
     performance_data["training_time"] = time_logger.get_duration("Flow training", 1e-9)
     # Add extra timings for subcategories of Training
     for key in time_logger.times.keys():
