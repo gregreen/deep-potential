@@ -222,6 +222,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
     coords_sample = utils.calc_coords(samples, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
     coords_train = utils.calc_coords(train_data["eta"], spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
 
+    # Cartesian projections
     fig, axs = plot_simple_2d_marginal(
         coords_sample, coords_train, train_data["weights"],
         dim1='x', dim2='y', cmap='viridis'
@@ -243,12 +244,44 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
     plt.savefig(save_dir / 'sample_density_z_vz.png', dpi=250, bbox_inches="tight")
     plt.close()
 
+    # Sky projections
     fig, axs = plot_simple_2d_marginal(
         coords_sample, coords_train, train_data["weights"],
         dim1='phi', dim2='cth', cmap='viridis'
     )
     plt.savefig(save_dir / 'sample_density_phi_cth.png', dpi=250, bbox_inches="tight")
     plt.close()
+
+    # Spherical projections
+    fig, axs = plot_simple_2d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        dim1='r', dim2='vr', cmap='viridis'
+    )
+    plt.savefig(save_dir / 'sample_density_r_vr.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    fig, axs = plot_simple_2d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        dim1='r', dim2='phi', cmap='viridis'
+    )
+    plt.savefig(save_dir / 'sample_density_r_phi.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    # Cylindrical projections
+    fig, axs = plot_simple_2d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        dim1='cylR', dim2='cylz', cmap='viridis'
+    )
+    plt.savefig(save_dir / 'sample_density_R_z.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
+    fig, axs = plot_simple_2d_marginal(
+        coords_sample, coords_train, train_data["weights"],
+        dim1='cylvz', dim2='cylvT', cmap='viridis'
+    )
+    plt.savefig(save_dir / 'sample_density_vz_vT.png', dpi=250, bbox_inches="tight")
+    plt.close()
+
     print("Saved 2d sample density plots")
 
     # Calculating gradients
