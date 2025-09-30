@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 #
-#
-# Plummer sphere distribution function
-#
+# Plummer sphere distribution function.
+# Allows sampling from and evaluation of the DF.
 #
 
 import numpy as np

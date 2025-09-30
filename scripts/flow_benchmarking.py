@@ -416,7 +416,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
     #
     # 1D marginals
     #
-
+    
     # Cartesian projections
     plot_simple_1d_marginal(
         coords_sample, coords_train, train_data["weights"],
@@ -454,7 +454,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
             coords_sample, coords_train, train_data["weights"],
             dim1=dim1, dim2=dim2, cmap='viridis', fig_dir=save_dir, fig_fmt=fig_fmt
         )
-
+    
     print("Saved 2d sample density plots")
 
     # Calculating gradients
