@@ -35,11 +35,13 @@ def calc_phi_derivatives(phi_func: callable, q: Array) -> Tuple[Array, Array]:
 
 
 class ResBlock(eqx.Module):
-    """A standard residual block with two linear layers."""
+    """A standard residual block with layer normalization and two linear layers."""
+    ln: eqx.nn.LayerNorm
     fn: eqx.Module
 
     def __init__(self, width_size: int, key: PRNGKeyArray):
         key1, key2 = jax.random.split(key)
+        self.ln = eqx.nn.LayerNorm(width_size, use_weight=True, use_bias=True)
         self.fn = eqx.nn.Sequential([
             eqx.nn.Linear(width_size, width_size, key=key1),
             eqx.nn.Lambda(jax.nn.silu),
@@ -47,7 +49,8 @@ class ResBlock(eqx.Module):
         ])
 
     def __call__(self, x: Array) -> Array:
-        return x + self.fn(x)
+        h = self.ln(x)
+        return x + self.fn(h)
 
 
 class ResMLP(eqx.Module):
