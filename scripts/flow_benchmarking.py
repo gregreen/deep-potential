@@ -1,4 +1,4 @@
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -372,6 +372,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
         final_val_loss = (-total_weighted_log_prob / jnp.sum(val_data["weights"])).item()
         dt = time_logger.get_duration("Benchmarking | Validation Loss Calculation")
         print(f"Final loss on entire validation set: {final_val_loss:.6f}  (duration: {dt:.2f} s)")
+    
     performance_data = {"final_val_loss": round(final_val_loss, 6)}
     fname_performance = save_dir / "performance.json"
     with open(fname_performance, "w") as f:
@@ -393,6 +394,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
         final_train_loss = (-total_weighted_log_prob / jnp.sum(train_data["weights"])).item()
         dt = time_logger.get_duration("Benchmarking | Train Loss Calculation")
         print(f"Final loss on entire train set: {final_train_loss:.6f}  (duration: {dt:.2f} s)")
+    
     performance_data["final_train_loss"] = round(final_train_loss, 6)
     with open(fname_performance, "w") as f:
         json.dump(performance_data, f, indent=4)
