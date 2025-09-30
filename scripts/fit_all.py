@@ -477,7 +477,9 @@ def main():
         if 'flow' not in locals():
             flow, loss_history = load_flow(flow_dir, params, load_history=True)
         validation_frac = params["df"]["validation_frac"]
-        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history)
+        spherical_origin = (0, 0, 0)
+        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history, spherical_origin, cylindrical_origin)
 
     # ================= Sampling the flow/loading samples =================
     n_samples = params["Phi"].pop("n_samples")
