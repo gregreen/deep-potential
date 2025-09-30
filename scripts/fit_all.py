@@ -433,7 +433,12 @@ def main():
         action="store_true",
         help="Whether to compute basic potential benchmarks after the potential training is finished.",
     )
-    parser.add_argument("--params", type=str, help="JSON with kwargs.", default="options.json")
+    parser.add_argument(
+        "--params",
+        type=str,
+        help="JSON with kwargs.",
+        default="options.json"
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -462,7 +467,8 @@ def main():
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
         flow, loss_history = train_flow(
-            data, flow_dir, args.input, **params["df"], reset_flow_lr=args.reset_flow_lr,
+            data, flow_dir, args.input, **params["df"],
+            reset_flow_lr=args.reset_flow_lr,
             time_logger=time_logger
         )
         time_logger.stop('Flow training')
