@@ -567,7 +567,7 @@ def plot_2d_acc(coords_grid, acc_components_grid, r0, fig_dir=None, fig_fmt=('pn
     cmap = 'RdBu'
     bins = (101, 101)
     coef_acc = (((100*u.km/u.s)**2/u.kpc).to(u.km/u.s/u.Myr)).value
-    acc_components_grid['vcirc'] = 100 * np.sqrt(-coef_acc * acc_components_grid['cylR'] * coords_grid['cylR'])
+    acc_components_grid['vcirc'] = 100 * np.sqrt(-acc_components_grid['cylR'] * coords_grid['cylR'])
 
     def get_xyz(dimx, dimy, dimz, dimval):
         # We integrate dimz from 37.5% to 62.5% of the range

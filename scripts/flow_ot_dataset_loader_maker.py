@@ -66,24 +66,7 @@ class OTSampler:
         j_idx = np.arange(x1.shape[0])
         i_idx = [rng.choice(x0.shape[0], p=cond[:, j]) for j in j_idx]
         return np.array(i_idx), j_idx
-        # print('ab', pi.flatten().size)
-        # print('ac', x0.size)
-        # print('ad', x1.size)
-        # exit()
 
-        p = pi.flatten()
-        p /= p.sum()
-
-        population = np.arange(pi.size)
-
-        choices = rng.choice(
-            population,
-            size=x0.shape[0],  # The number of samples to draw
-            p=p,
-            replace=replace
-        )
-
-        return np.unravel_index(choices, pi.shape)
 
 def get_matched_indices(x0_epoch, x1_epoch_permuted, w1_epoch_permuted, ot_batch_size=256, use_tqdm=False, desc=None):
     """
@@ -130,6 +113,7 @@ def worker_init_no_gpu():
     """Initializer for multiprocessing workers to disable GPU access."""
     import os
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    os.environ["JAX_PLATFORMS"] = "cpu"  # force JAX to ignore CUDA in workers
 
 def _precompute_worker(args):
     """
@@ -190,9 +174,11 @@ def precompute_ot_indices(
         num_epochs_in_batch = end_idx - start_idx
 
         epochs_data = []
+        epoch_x0_generation_keys = []
         for i in range(num_epochs_in_batch):
             epoch_key = epoch_keys[start_idx + i]
             key_x0, key_perm = jax.random.split(epoch_key, 2)
+            epoch_x0_generation_keys.append(np.array(key_x0))
 
             # Generate x0 (noise) and permute x1 for one epoch
             x0_epoch = jax.random.normal(key_x0, shape=x1_full_dataset.shape)
@@ -256,59 +242,54 @@ def precompute_ot_indices(
         end_idx *= n_samples
 
         # Save the indices for this batch of epochs
-        np.savez(fname, x0_perm_indices=final_x0, x1_perm_indices=final_x1)
+        np.savez(fname, x0_perm_indices=final_x0, x1_perm_indices=final_x1, x0_generation_keys=np.array(epoch_x0_generation_keys))
 
     print(f"\n--- Pre-computation complete. Data saved to {fname} ---")
     print(f"Saved index arrays with shape: {final_x0.shape}")
 
 
-if __name__ == "__main__":
+def make_ot_dataloader(data_fname: str, epochs: int, batch_size: int, batch_size_storing_epochs: int, 
+                       num_workers: int, seed: int):
     """
     Pre-computes Optimal Transport (OT) pairings for generative modeling, see
     https://arxiv.org/abs/2302.00482.
 
-    This script is designed to accelerate the training of Normalizing Flows via Flow
+    This function is designed to accelerate the training of Normalizing Flows via Flow
     Matching with minibatch optimal transport by pre-calculating the computationally
     expensive optimal transport plans between a simple noise distribution (x0,
     standard Gaussian) and a target data distribution (x1, the user's dataset).
 
-    The script generates a large, static dataset of paired indices between x0 and x1
+    The function generates a large, static dataset of paired indices between x0 and x1
     that can later be read in using a training script. Since only the indices of x0
     are stored (this way, a (n, d) array takes (n, ) space), the noise needs to be
     reproduced exactly the same way in the training script, starting from the same
     jax.random.key.
 
     The OT is computed using the 'POT' (Python Optimal Transport) library which uses
-    CPUs only. To avoid any interference with GPUs, the script spawns a pool of 
+    CPUs only. To avoid any interference with GPUs, the function spawns a pool of 
     workers that purposely avoid loading in JAX or seeing any GPUs.
 
     The OT is calculated in batches of 256. For example, a dataset of 1e7 samples
     with 500 precomputed epochs takes up around 30GB of storage space.
-
-    Example usage:
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_corner.npz --epochs 10 --batch-size-storing-epochs 10
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_corner.npz --epochs 2000 --batch-size-storing-epochs 2000 --num-workers 40
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_lite.npz --epochs 2000 --batch-size-storing-epochs 2000 --num-workers 40
-        python flow_ot_dataset_loader_maker.py --data-fname ../runs/plummer_no_selfn/data/plummer_sphere.h5 --epochs 1500 --batch-size-storing-epochs 1500 --num-workers 30
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_1000pc_corner.npz --epochs 10 --batch-size-storing-epochs 10 --num-workers 1
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/gdr3_pad_sph_v3/sph_1000pc.h5 --epochs 500 --batch-size-storing-epochs 50 --num-workers 25
     """
     import jax
 
-    parser = argparse.ArgumentParser(description="Precompute OT pairings between a noise distribution (x0) and a dataset (x1).")
-    parser.add_argument("--data-fname", type=str, default="", help="Dataset file name.")
-    parser.add_argument("--epochs", type=int, default=2000, help="Total number of epochs to pre-compute.")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for OT matching.")
-    parser.add_argument("--batch-size-storing-epochs", type=int, default=1000, help="Batch size the number of epochs to save on disk.")
-    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers to use.")
-    args = parser.parse_args()
-
-    data_fname = Path(args.data_fname)
+    data_fname = Path(data_fname)
 
     save_dir = data_fname.parent / "ot_pairings"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    train_output_fname_prefix = save_dir / f"pairings_{data_fname.stem}_train"
-    val_output_fname_prefix = save_dir / f"pairings_{data_fname.stem}_val"
+    ot_pairings_dir = save_dir / f"pairings_{data_fname.stem}_seed{seed}"
+    ot_pairings_dir.mkdir(parents=True, exist_ok=True)
+    train_output_fname_prefix = ot_pairings_dir / "train"
+    val_output_fname_prefix = ot_pairings_dir / "val"
+
+    print(f"Precomputing OT pairing indices for dataset: {data_fname}")
+    print(f"  Training pairings will be saved to: {train_output_fname_prefix}_epochs_*.npz")
+    print(f"  Validation pairings will be saved to: {val_output_fname_prefix}_epochs_*.npz")
+    print(f"  Number of epochs to precompute: {epochs}")
+    print(f"  Batch size for OT matching: {batch_size}")
+    print(f"  Batch size for storing epochs: {batch_size_storing_epochs}")
+    print(f"  Number of parallel workers: {num_workers}")
+    print(f"  Random seed: {seed}\n")
 
     # Assuming load_and_split_data might return JAX arrays
     train_data, val_data = utils.load_and_split_data(path=data_fname, val_split=0.25)
@@ -318,26 +299,58 @@ if __name__ == "__main__":
     data_mean = np.mean(train_data["eta"], axis=0)
     data_std = np.std(train_data["eta"], axis=0)
 
+    key = jax.random.PRNGKey(seed)
+    key_train, key_val = jax.random.split(key, 2)
+
     precompute_ot_indices(
-        num_epochs=args.epochs,
+        num_epochs=epochs,
         train_data=train_data,
-        batch_size=args.batch_size,
-        batch_size_storing_epochs=args.batch_size_storing_epochs,
+        batch_size=batch_size,
+        batch_size_storing_epochs=batch_size_storing_epochs,
         norm_mean=data_mean,
         norm_std=data_std,
         fname_prefix=train_output_fname_prefix,
-        num_workers=args.num_workers,
-        key=jax.random.PRNGKey(0),
+        num_workers=num_workers,
+        key=key_train,
     )
 
     precompute_ot_indices(
-        num_epochs=args.epochs,
+        num_epochs=epochs,
         train_data=val_data,
-        batch_size=args.batch_size,
-        batch_size_storing_epochs=args.batch_size_storing_epochs,
+        batch_size=batch_size,
+        batch_size_storing_epochs=batch_size_storing_epochs,
         norm_mean=data_mean,
         norm_std=data_std,
         fname_prefix=val_output_fname_prefix,
+        num_workers=num_workers,
+        key=key_val,
+    )
+
+
+if __name__ == "__main__":
+    """
+    Example usage:
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_corner.npz --epochs 10 --batch-size-storing-epochs 10 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_corner.npz --epochs 2000 --batch-size-storing-epochs 2000 --num-workers 40 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_lite.npz --epochs 2000 --batch-size-storing-epochs 2000 --num-workers 40 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../runs/plummer_no_selfn/data/plummer_sphere.h5 --epochs 1500 --batch-size-storing-epochs 1500 --num-workers 30 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_1000pc_corner.npz --epochs 10 --batch-size-storing-epochs 10 --num-workers 1 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/gdr3_pad_sph_v3/sph_1000pc.h5 --epochs 500 --batch-size-storing-epochs 50 --num-workers 25 --seed 0
+    """
+    parser = argparse.ArgumentParser(description="Precompute OT pairings between a noise distribution (x0) and a dataset (x1).")
+    parser.add_argument("--data-fname", type=str, default="", help="Dataset file name.")
+    parser.add_argument("--epochs", type=int, default=2000, help="Total number of epochs to pre-compute.")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for OT matching.")
+    parser.add_argument("--batch-size-storing-epochs", type=int, default=1000, help="Batch size the number of epochs to save on disk.")
+    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers to use.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for JAX key generation.")
+    args = parser.parse_args()
+
+    make_ot_dataloader(
+        data_fname=args.data_fname,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        batch_size_storing_epochs=args.batch_size_storing_epochs,
         num_workers=args.num_workers,
-        key=jax.random.PRNGKey(1),
+        seed=args.seed
     )

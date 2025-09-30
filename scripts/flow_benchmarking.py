@@ -11,35 +11,63 @@ import json
 
 import utils
 
+
 def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, lims=None, n_rows=1):
+    """
+    Plots 1D marginal distributions for a given set of dimensions, including a z-score (pull) plot
+    for each marginal to compare the 'data' and 'flow' distributions.
+
+    Args:
+        coords_sample (dict): Dictionary of coordinate arrays for the sampled data (the "flow").
+        coords_train (dict): Dictionary of coordinate arrays for the training data (the "data").
+        weights_train (array): Weights corresponding to the training data.
+        *dims (str): Variable number of dimension keys to plot (e.g., 'x', 'vy').
+        lims (list of tuples, optional): A list of (min, max) tuples for the x-axis of each plot.
+                                         If None, limits are determined automatically. Defaults to None.
+        n_rows (int, optional): The number of rows to arrange the plots in. Defaults to 1.
+    """
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
-        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$v_x$', '$v_y$', '$v_z$',
-        '$r$', r'$\phi\mathrm{\ (deg)}$', r'$\cos \theta$', '$v_r\mathrm{\ (km/s)}$', r'$v_{\theta}\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$'
+        '$R\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', r'cylindrical $\phi$ (deg)', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
+        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$v_x\mathrm{\ (km/s)}$', '$v_y\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$',
+        '$r\mathrm{\ (kpc)}$', r'$\phi\mathrm{\ (deg)}$', r'$\cos \theta$', '$v_r\mathrm{\ (km/s)}$', r'$v_{\theta}\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$'
     ]
     keys = [
         'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
         'x', 'y', 'z', 'vx', 'vy', 'vz',
         'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
+    labels = {k:l for k,l in zip(keys,labels)}
 
-    n_cols = -(-len(dims)//n_rows) # Need to round up
+    n_cols = -(-len(dims) // n_rows)  # Ceiling division to get number of columns
+
+    # Create a figure with a main plot and a pull plot for each dimension.
     fig, axs = plt.subplots(
-        n_rows, n_cols, # Need to round up
-        figsize=(3*n_cols, 3*n_rows),
+        2 * n_rows, n_cols,
+        figsize=(3 * n_cols, 3.5 * n_rows),
         dpi=200,
-        layout='compressed'
+        layout='compressed',
+        gridspec_kw={'height_ratios': [1, 0.4] * n_rows}
     )
-    axs = axs.flat
 
+    # Ensure axs is always a 2D array for consistent indexing
+    if n_rows == 1 and n_cols == 1:
+        axs = np.array(axs).reshape(2, 1)
+    elif n_rows == 1:
+        axs = axs.reshape(2, n_cols)
+    elif n_cols == 1:
+        axs = axs.reshape(2 * n_rows, 1)
+
+    # --- Data Extraction and Preparation ---
     def extract_dim(dim):
-        coef = 100 if dim in ['cylvR', 'cylvz', 'cylvT', 'vx', 'vy', 'vz'] else 1
-        if dim in ['phi']:
-            coef = 180/np.pi
+        # Apply scaling coefficients for velocities and angle conversions
+        coef = 1
+        if dim in ['cylvR', 'cylvz', 'cylvT', 'vx', 'vy', 'vz', 'vr', 'vth', 'vT']:
+            coef = 100
+        if dim in ['phi', 'cylphi']:
+            coef = 180 / np.pi
         if dim in ['cylvT']:
             coef *= -1
-
-        return coef*coords_train[dim], coef*coords_sample[dim]
+        return coef * coords_train[dim], coef * coords_sample[dim]
 
     x_trains = []
     x_samples = []
@@ -47,58 +75,119 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         x_train, x_sample = extract_dim(dim)
         x_trains.append(x_train)
         x_samples.append(x_sample)
-    labels = {k:l for k,l in zip(keys,labels)}
 
+    # --- Automatic Limit Calculation ---
     if lims is None:
-        # Take the 1th and 99th percentile
         lims = []
-        for dim,x_train in zip(dims,x_trains):
-            lim = [np.percentile(x_train, 1), np.percentile(x_train, 99)]
-            k = 0.2
-            w = np.abs(lim[1] - lim[0]) * k
-            lim[0] -= w
-            lim[1] += w
-            # Default limits for some dimensions
+        for dim, x_train in zip(dims, x_trains):
+            low, high = np.percentile(x_train, [1, 99])
+            width = np.abs(high - low) * 0.2
+            lim = [low - width, high + width]
+            # Override with default limits for specific dimensions
             if dim == 'phi':
                 lim = [180, -180]
             if dim == 'cth':
                 lim = [-1, 1]
+            if dim == 'cylR':
+                lim[0] = max(0, lim[0]) # Radius cannot be negative
+            if dim == 'r':
+                # We typically have radius from the center of the Sun.
+                # Hence we set r = 0 but this can be changed.
+                lim[0] = 0
             lims.append(lim)
     lims_ordered = [[np.min(lim), np.max(lim)] for lim in lims]
 
-    for i,(dim, x_train, x_sample) in enumerate(zip(dims, x_trains, x_samples)):
-        axs[i].hist(
-            x_train, weights=weights_train,
-            range=lims_ordered[i],
-            bins=64,
-            density=True,
-            histtype='stepfilled',
-            alpha=0.5,
-            color='C0',
-            label='data'
-        )
-        axs[i].hist(
-            x_sample,
-            range=lims_ordered[i],
-            bins=64,
-            density=True,
-            histtype='step',
-            color='C1',
-            label='flow'
-        )
-        axs[i].set_xlabel(labels[dim], labelpad=0, fontsize=10)
-        if i == 0:
-            axs[i].legend(fontsize=8)
-        axs[i].set_xlim(lims[i])
+    main_axs_flat = [] # To store main axes for the return value
+
+    # --- Plotting Loop ---
+    main_ylims = [[] for _ in range(n_rows)] 
+    for i, (dim, x_train, x_sample) in enumerate(zip(dims, x_trains, x_samples)):
+        row, col = (i // n_cols), (i % n_cols)
+
+        # Select the main axis and the pull axis
+        ax = axs[2 * row, col]
+        ax_pull = axs[2 * row + 1, col]
+        main_axs_flat.append(ax)
+
+        current_lim = lims_ordered[i]
+        bins = np.linspace(current_lim[0], current_lim[1], 65)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        bin_width = bins[1] - bins[0]
+
+        # Calculate total counts/weights for normalization
+        N_sample = len(x_sample)
+        N_train = len(x_train) if weights_train is None else np.sum(weights_train)
+
+        # Create histograms and normalize to get fractions per bin
+        n_train_counts, _ = np.histogram(x_train, bins=bins, weights=weights_train)
+        n_sample_counts, _ = np.histogram(x_sample, bins=bins)
+
+        n_train_frac = n_train_counts / N_train
+        n_sample_frac = n_sample_counts / N_sample
+
+        # Convert fractions to density
+        density_train = n_train_frac / np.max(n_train_frac)
+        density_sample = n_sample_frac / np.max(n_sample_frac)
+
+        # Plot main histograms
+        ax.step(bin_centers, density_train, where='mid', color='C0', alpha=0.8, label='data')
+        ax.step(bin_centers, density_sample, where='mid', color='C1', label='flow')
+
+        # Calculate z-score (pull)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # Difference in fractions
+            n_diff = n_sample_frac - n_train_frac
+            # Uncertainty on the difference (using Poisson error approximation for fractions)
+            n_diff_sigma = np.sqrt(n_sample_frac / N_sample + n_train_frac / N_train)
+            z_score = n_diff / n_diff_sigma
+            z_score = np.nan_to_num(z_score) # Replace NaN/inf with 0
+
+        # Plot pull
+        ax_pull.axhline(0, color='grey', lw=0.5)
+        ax_pull.scatter(bin_centers, z_score, s=1.5, marker='o', color='C1')
+
+        # --- Axis Styling and Labeling ---
+        #ax.set_yscale('log')
+        #main_ylims[row].append(ax.get_ylim())
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(lims[i])
+        ax_pull.set_xlim(lims[i])
+        ax_pull.set_ylim(-5, 5) # Set a standard range for z-score
+
+        ax.set_xticklabels([]) # Remove x-labels from main plot
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+        ax_pull.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+        ax_pull.yaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+        ax_pull.set_xlabel(labels[dim], labelpad=0, fontsize=10)
+
+        # Special tick locator for phi angle
         if dim == 'phi':
-            axs[i].xaxis.set_major_locator(ticker.MultipleLocator(90))
-        # Only show y-axis label on leftmost plots
-        if i % n_cols == 0:
-            axs[i].set_ylabel('Density', labelpad=2, fontsize=10)
+            ax_pull.xaxis.set_major_locator(ticker.MultipleLocator(90))
+
+        # Set y-labels only on the leftmost column
+        if col == 0:
+            ax.set_ylabel('Normalized count', labelpad=2, fontsize=10)
+            ax_pull.set_ylabel('Poisson significance', labelpad=2, fontsize=10)
         else:
-            axs[i].set_yticklabels([])
-    
-    return fig, axs
+            ax.set_yticklabels([])
+            ax_pull.set_yticklabels([])
+
+        if i == 0:
+            ax.legend(fontsize=8)
+    # # Set consistent y-limits for main plots in the same row
+    # for row in range(n_rows):
+    #     if main_ylims[row]:
+    #         common_ylim = [min(ylim[0] for ylim in main_ylims[row]), max(ylim[1] for ylim in main_ylims[row])]
+    #         for col in range(n_cols):
+    #             axs[2 * row, col].set_ylim(common_ylim)
+
+    # Hide any unused axes in the grid
+    for j in range(len(dims), n_rows * n_cols):
+        row, col = (j // n_cols), (j % n_cols)
+        axs[2 * row, col].set_axis_off()
+        axs[2 * row + 1, col].set_axis_off()
+
+    return fig, main_axs_flat
 
 
 def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, dim2, lims=None, cmap='viridis', logscale=False):
@@ -233,7 +322,9 @@ def value_and_grad_fn(model, eta_batch):
     return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
 
 
-def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
+def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history,
+              spherical_origin=(0.0, 0.0, 0.0), cylindrical_origin=(8.277, 0.0, 0.0),
+              fig_fmt=('png',)):
     """
     For benchmarking we do the following, while keeping track how much time each
     thing takes:
@@ -312,8 +403,8 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history):
     time_logger.stop("Benchmarking | Sampling")
     print(f"Sampling {n_samples} points took: {time_logger.get_duration('Benchmarking | Sampling'):.4f} s")
 
-    coords_sample = utils.calc_coords(samples, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
-    coords_train = utils.calc_coords(train_data["eta"], spherical_origin=(0,0,0), cylindrical_origin=(0,0,0))
+    coords_sample = utils.calc_coords(samples, spherical_origin, cylindrical_origin)
+    coords_train = utils.calc_coords(train_data["eta"], spherical_origin, cylindrical_origin)
 
     #
     # 1D marginals

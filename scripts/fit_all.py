@@ -24,11 +24,13 @@ import optax
 from optax.contrib import reduce_on_plateau
 
 import flow_ot_flow_matching
+import flow_matching
 import utils
 import flow_benchmarking
 import potential_benchmarking
 import flow_sampling
 import potential
+import flow_ot_dataset_loader_maker
 
 # limit jax gpu usage to be adaptive
 import os
@@ -112,7 +114,9 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
 def train_flow(
     data,
     flow_dir,
-    ot_pairings_path_stem=None,
+    data_fname=None,
+    training_method="OTFlowMatching",
+    ot_pairings_opts={},
     time_scheduler_type="uniform",
     seed=0,
     n_epochs=100,
@@ -123,7 +127,7 @@ def train_flow(
     vector_field_opts={},
     time_logger=None,
     reset_flow_lr=False,
-    checkpoint_frequency_epochs=-1,
+    checkpoint_frequency_epochs=-1
 ):
     """
     Initializes and trains a normalizing flow model for the distribution function.
@@ -134,7 +138,9 @@ def train_flow(
     Args:
         data (dict): The training data, containing 'eta' and 'weights'.
         flow_dir (str): Directory to save the trained model and checkpoints.
-        ot_pairings_path_stem (str): Base path for precomputed Optimal Transport pairings.
+        training_method (str): The type of flow model to train.
+        ot_pairings_opts (dict): Dictionary of the params required for precomputing
+            OT pairings. If empty, OT pairings are not used.
         time_scheduler_type (str): Type of time scheduler for flow matching.
         seed (int): Random seed for reproducibility.
         n_epochs (int): Number of training epochs.
@@ -144,7 +150,6 @@ def train_flow(
         lr_opts (dict): Dictionary of learning rate options.
         vector_field_opts (dict): Options for the vector field neural network.
         time_logger (utils.TimeLogger): Optional logger for timing operations.
-        model_type (str): The type of flow model to train.
         reset_flow_lr (bool): Whether to reset the learning rate when resuming.
         checkpoint_frequency_epochs (int): Frequency (in epochs) for saving checkpoints.
 
@@ -161,6 +166,22 @@ def train_flow(
     data_std = np.std(train_data["eta"], axis=0)
     print(f"Using mean: {data_mean}")
     print(f"       std: {data_std}")
+
+    if training_method == "OTFlowMatching":
+        if ot_pairings_opts == {}:
+            raise ValueError("OT pairings not found, and ot_pairings_opts is empty. Cannot proceed.")
+        # Infer the filename pattern of the OT pairing file based on the data file name
+        ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_seed{ot_pairings_opts['seed']}"
+
+        # Check if the OT pairing files exist
+        ot_pairings_exist = any(ot_pairings_dir.glob("train_epochs_*_*.npz")) and any(ot_pairings_dir.glob("val_epochs_*_*.npz"))
+        if not ot_pairings_exist:
+            print("OT pairings not found, precomputing them now ...")
+            flow_ot_dataset_loader_maker.make_ot_dataloader(
+                data_fname=data_fname,
+                **ot_pairings_opts
+            )
+            print("OT pairings precomputation done.")
 
     # NormalizingFlow is a wrapper around a flowjax flow which itself is equipped with
     # a base distribution and a bijection.
@@ -194,28 +215,24 @@ def train_flow(
     )
     loss_history = {'train': [], 'val': [], 'lr': []}
 
-    flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
-        key,
-        flow_model,
-        optimizer,
-        schedule,
-        lr_opts["type"],
-        train_data, val_data,
-        data_mean, data_std,
-        n_epochs,
-        batch_size,
-        ot_pairings_path_stem,
-        time_scheduler_type,
-        sb_constant,
-        time_logger=time_logger,
-        loss_history=loss_history,
-        checkpoint_frequency_epochs=checkpoint_frequency_epochs
-    )
-    # x_test = jnp.array([0.0, 0.1, 0.2, 0.0, 0.0, 0.0])
-    # print(flow_model.log_prob(x_test))
-    # flow_model_new, loss_history_new = flow_model.load(flow_dir, flow_model)
-    # print(flow_model_new.log_prob(x_test))
-    # exit()
+    kwargs = dict(key=key, model=flow_model, optimizer=optimizer, schedule=schedule,
+                  schedule_type=lr_opts["type"], lr_final=lr_opts.get("final", None),
+                  train_data=train_data, val_data=val_data,
+                  norm_mean=data_mean, norm_std=data_std, epochs=n_epochs, batch_size=batch_size,
+                  time_scheduler_type=time_scheduler_type, sb_constant=sb_constant,
+                  time_logger=time_logger, loss_history=loss_history,
+                  checkpoint_frequency_epochs=checkpoint_frequency_epochs)
+    if training_method == "OTFlowMatching":
+        ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_seed{ot_pairings_opts['seed']}"
+        flow_model, loss_history = flow_ot_flow_matching.train_ot_flow_matching_model(
+            **kwargs, ot_pairings_dir=ot_pairings_dir,
+        )
+    elif training_method == "FlowMatching":
+        flow_model, loss_history = flow_matching.train_flow_matching_model(
+            **kwargs
+        )
+    else:
+        raise ValueError(f"Unknown training_method: {training_method}")
 
     return flow_model, loss_history
 
@@ -441,15 +458,12 @@ def main():
     if not args.no_flow_training:
         print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
-        # Infer the filename pattern of the OT pairing file based on the data file name
-        stem = Path(args.input).stem  # 'data_1000pc'
-        ot_pairings_path_stem = Path(args.input).parent / "ot_pairings" / f"pairings_{stem}"
-
         # Train and save normalizing flows
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
         flow, loss_history = train_flow(
-            data, flow_dir, **params["df"], reset_flow_lr=args.reset_flow_lr, time_logger=time_logger, ot_pairings_path_stem=ot_pairings_path_stem
+            data, flow_dir, args.input, **params["df"], reset_flow_lr=args.reset_flow_lr,
+            time_logger=time_logger
         )
         time_logger.stop('Flow training')
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")
@@ -463,7 +477,9 @@ def main():
         if 'flow' not in locals():
             flow, loss_history = load_flow(flow_dir, params, load_history=True)
         validation_frac = params["df"]["validation_frac"]
-        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history)
+        spherical_origin = (0, 0, 0)
+        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history, spherical_origin, cylindrical_origin)
 
     # ================= Sampling the flow/loading samples =================
     n_samples = params["Phi"].pop("n_samples")
