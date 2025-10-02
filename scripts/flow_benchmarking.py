@@ -451,7 +451,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
             ('x', 'y'), ('vx', 'vy'), ('z', 'vz'),
             ('phi', 'cth'), ('r', 'vr'), ('r', 'phi'),
             ('cylR', 'cylz'), ('cylvz', 'cylvT')
-        ]:
+    ]:
         plot_simple_2d_marginal(
             coords_sample, coords_train, train_data["weights"],
             dim1=dim1, dim2=dim2, cmap='viridis', fig_dir=save_dir, fig_fmt=fig_fmt
