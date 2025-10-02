@@ -410,19 +410,19 @@ def main():
         help="Filename for the mask for the potential. The mask is in distance - healpix format.",
     )
     parser.add_argument(
-        "--no-potential-training",
+        "--potential-training",
         action="store_true",
-        help="Do not train the potential.",
+        help="Train the potential. If not set, the potential is loaded from potential-dir.",
     )
     parser.add_argument(
-        "--no-flow-training",
+        "--flow-training",
         action="store_true",
-        help="Do not train the flow, load the trained flows in instead.",
+        help="Train the flow. If not set, the flow is loaded from flow-dir.",
     )
     parser.add_argument(
-        "--no-flow-sampling",
+        "--flow-sampling",
         action="store_true",
-        help="Do not sample the flow, load the samples in instead.",
+        help="Sample from the flow. If not set, the flow samples are loaded in when necessary.",
     )
     parser.add_argument(
         "--basic-flow-benchmarking",
@@ -461,7 +461,7 @@ def main():
     data, attrs = utils.load_training_data(args.input)
 
     # ================= Training/loading the flow =================
-    if not args.no_flow_training:
+    if args.flow_training:
         print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
         # Train and save normalizing flows
@@ -475,7 +475,7 @@ def main():
         time_logger.stop('Flow training')
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")
 
-    if args.no_flow_training and not args.no_flow_sampling:
+    if not args.flow_training and args.flow_sampling:
         flow, loss_history = load_flow(flow_dir, params, load_history=True)
 
     # ================= Basic flow benchmarking =================
@@ -492,7 +492,7 @@ def main():
     n_samples = params["Phi"].pop("n_samples")
     sample_batch_size = params["Phi"].pop("sample_batch_size")
     grad_batch_size = params["Phi"].pop("grad_batch_size")
-    if args.no_flow_sampling:
+    if not args.flow_sampling:
         print("Loading DF gradients ...")
         df_data = utils.load_flow_samples(df_grads_fname)
     else:
@@ -523,7 +523,7 @@ def main():
             df_data["f"] = df_data["f"][mask]
 
     # ================= Training the potential =================
-    if not args.no_potential_training:
+    if args.potential_training:
         print(params["Phi"])
         print("Fitting the potential ...")
         time_logger.start('Potential training')
