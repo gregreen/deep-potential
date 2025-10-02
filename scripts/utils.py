@@ -14,7 +14,7 @@ from pathlib import Path
 import time
 
 import matplotlib.pyplot as plt
-from tqdm import trange, tqdm
+from tqdm.auto import trange, tqdm
 
 
 def warmup_cosine_restarts_schedule(
@@ -286,13 +286,17 @@ def load_flow_samples(fname, recalc_avg=None, attrs_to_cut_by=None):
     return d
 
 
-def get_model_values(phi_model, q_eval, batch_size=131072, fname=None, disable_tqdm=False):
+def get_model_values(phi_model, q_eval,
+                     batch_size=131072,
+                     fname=None,
+                     disable_tqdm=False,
+                     convert_rho_to_msunpc3=True):
     """
     Calculate the potential, acceleration and density implied by the
     differentiable model of the potential. If specified, the results are saved to a file
     in a subdirectory of fig_dir, named data.
     Currently, the spatial dimension is expected to be in units of kpc
-    and velocity dimension 100 km/s. The conversion factor for rho
+    and velocity dimension 100 km/s. By default, the conversion factor for rho
     is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
     (100 km/s)^2/kpc
 
@@ -301,6 +305,9 @@ def get_model_values(phi_model, q_eval, batch_size=131072, fname=None, disable_t
         q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
         fig_dir (str): The directory where the data is to be saved
         fname (str): The name of the file where the data is to be saved
+        batch_size (int): The batch size to be used when evaluating the model
+        disable_tqdm (bool): Whether to disable the tqdm progress bar
+        convert_rho_to_msunpc3 (bool): Whether to convert the density to M_sun/pc^3
     """
     import jax
     import jax.numpy as jnp
@@ -335,13 +342,18 @@ def get_model_values(phi_model, q_eval, batch_size=131072, fname=None, disable_t
         accs = []
         phis = []
 
+        if convert_rho_to_msunpc3:
+            rho_conv = 2.325  # (100 km/s)^2/kpc^2 in units of M_sun/pc^3
+        else:
+            rho_conv = 1.0
+
         for i in (pbar := tqdm(range(0, n0, batch_size), disable=disable_tqdm)):
             b = q_eval[i: i + batch_size]
 
             phi,dphi_dq,d2phi_dq2 = jit_phi_derivs(
                 phi_model, b
             )
-            rhos.append(2.325*d2phi_dq2/(4*np.pi)) # [M_Sun/pc^3]
+            rhos.append(rho_conv*d2phi_dq2/(4*np.pi)) # [M_Sun/pc^3]
             accs.append(-dphi_dq) # [(100 km/s)^2/kpc]
             phis.append(phi)
 
