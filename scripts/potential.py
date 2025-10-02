@@ -92,14 +92,14 @@ class PhiNN(eqx.Module):
     A feed-forward neural network to represent the gravitational potential Phi(q).
 
     Attributes:
-        mlp (ResMLP): The core neural network model.
+        net (ResMLP): The core neural network model.
         scale (Array): A non-trainable scaling factor applied to input coordinates
                        for normalization purposes.
     """
-    mlp: ResMLP
+    net: ResMLP
     scale: Array # Not trainable
 
-    def __init__(self, key, n_dim=3, depth=3, width=32, scale=None):
+    def __init__(self, key, n_dim=3, depth=3, width=32, type='ResNet', scale=None):
         """
         Initializes the potential model.
 
@@ -113,10 +113,16 @@ class PhiNN(eqx.Module):
         """
         super().__init__()
 
-        self.mlp = ResMLP(
-            in_size=n_dim, out_size=1, width_size=width,
-            depth=depth, key=key,
-        )
+        if type == 'ResNet':
+            self.net = ResMLP(
+                in_size=n_dim, out_size=1, width_size=width,
+                depth=depth, key=key,
+            )
+        elif type == 'MLP':
+            self.net = eqx.nn.MLP(
+                in_size=n_dim, out_size=1, width_size=width,
+                depth=depth, activation=jax.nn.tanh, key=key,
+            )
 
         print(f"Initializing phi(x) model with coordinate scale {scale}")
         if scale is None:
@@ -127,7 +133,7 @@ class PhiNN(eqx.Module):
 
     def __call__(self, q):
         """Returns the gravitational potential"""
-        return self.mlp(self.scale * q).squeeze()
+        return self.net(self.scale * q).squeeze()
 
 
 class FrameShift(eqx.Module):
@@ -210,18 +216,30 @@ class FrameShift(eqx.Module):
 
 
 class SelectionFunctionCorrection(eqx.Module):
-    mlp: eqx.nn.MLP
+    net: eqx.nn.MLP
     scale: Array
 
-    def __init__(self, key, n_dim=3, depth=3, width=32, scale=None):
-        self.mlp = ResMLP(
-            in_size=n_dim, out_size=1, width_size=width,
-            depth=depth, key=key,
-        )
-        self.scale = scale
+    def __init__(self, key, n_dim=3, depth=3, width=32, type='ResNet', scale=None):
+        super().__init__()
+
+        if type == 'ResNet':
+            self.net = ResMLP(
+                in_size=n_dim, out_size=1, width_size=width,
+                depth=depth, key=key,
+            )
+        elif type == 'MLP':
+            self.net = eqx.nn.MLP(
+                in_size=n_dim, out_size=1, width_size=width,
+                depth=depth, activation=jax.nn.tanh, key=key,
+            )
+        if scale is None:
+            coord_scale = jnp.ones(n_dim)
+        else:
+            coord_scale = jnp.array(scale)
+        self.scale = 1 / coord_scale
 
     def call(self, q):
-        return jax.nn.tanh(self.mlp(self.scale * q)).squeeze()
+        return jax.nn.sigmoid(self.net(self.scale * q)).squeeze()
 
 
 class PotentialModel(eqx.Module):
@@ -411,7 +429,7 @@ def get_trainable_scalar_history(model: eqx.Module) -> Dict[str, float]:
 
 
 def calc_lnsel_derivatives(selection_function, q):
-    """Calculates higher order derivatives of the potential at q."""
+    """Calculates derivatives of the selection function correction at q."""
     dlnsel_dq = jax.grad(selection_function)(q) / selection_function(q)
 
     return dlnsel_dq
@@ -462,7 +480,7 @@ def get_phi_loss_new(
         u, w = frameshift_model(q, p)
         dlnf_dt_omega = jnp.sum((p - u) * dlnf_dq - (dphi_dq + w) * dlnf_dp, axis=1)
         null_hyp = dlnf_dt_omega
-    
+
     null_hyp -= dlnsel_dq
 
     likelihood = jnp.arcsinh(alpha * jnp.abs(null_hyp)) / alpha
@@ -486,7 +504,7 @@ def get_phi_loss_new(
     loss_noreg = loss
 
     if l2 != 0:
-        all_leaves = jax.tree_util.tree_leaves(phi_model.mlp)
+        all_leaves = jax.tree_util.tree_leaves(phi_model.net)
         array_leaves = [p for p in all_leaves if isinstance(p, jax.Array)]
 
         # Calculate the sum of squares.
@@ -566,7 +584,7 @@ def get_phi_loss(
     loss_noreg = loss
 
     if l2 != 0:
-        all_leaves = jax.tree_util.tree_leaves(phi_model.mlp)
+        all_leaves = jax.tree_util.tree_leaves(phi_model.net)
         array_leaves = [p for p in all_leaves if isinstance(p, jax.Array)]
 
         # Calculate the sum of squares.
@@ -701,7 +719,7 @@ def train_potential(
         epoch_loss, epoch_loss_noreg, epoch_lr = [], [], []
         epoch_val_loss, epoch_val_loss_noreg = [], []
         for i in range(steps_per_epoch):
-            val_batch = jax.tree.map(lambda x: x[i:i+val_batch_size], val_data)
+            val_batch = jax.tree.map(lambda x: x[i*val_batch_size:(i+1)*val_batch_size], val_data)
             val_loss, val_loss_noreg = loss_fn_val(
                 params, static,
                 val_batch,
