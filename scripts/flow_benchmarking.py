@@ -37,9 +37,8 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
     labels = {k:l for k,l in zip(keys,labels)}
-
     n_cols = -(-len(dims) // n_rows)  # Ceiling division to get number of columns
-
+    
     # Create a figure with a main plot and a pull plot for each dimension.
     fig, axs = plt.subplots(
         2 * n_rows, n_cols,
@@ -163,7 +162,6 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         # Special tick locator for phi angle
         if dim == 'phi':
             ax_pull.xaxis.set_major_locator(ticker.MultipleLocator(90))
-
         # Set y-labels only on the leftmost column
         if col == 0:
             ax.set_ylabel('Normalized count', labelpad=2, fontsize=10)
