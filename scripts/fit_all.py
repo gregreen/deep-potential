@@ -371,7 +371,8 @@ def main():
         add_help=True,
         formatter_class=ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input", "-i", type=str, required=False, help="Input data.")
+    parser.add_argument("--input", "-i", type=str,
+                        required=False, help="Input data.")
     parser.add_argument(
         "--run-dir",
         type=str,
@@ -539,13 +540,20 @@ def main():
     if args.basic_potential_benchmarking:
         # If potential has not been read in, read it
         if 'phi_model' not in locals():
-            phi_model, loss_history = load_potential(potential_dir, params['Phi'], load_history=True)
+            phi_model, loss_history = load_potential(potential_dir,
+                                                     params['Phi'],
+                                                     load_history=True)
         fname_mask = args.potential_mask
         validation_frac = params["df"]["validation_frac"]
         spherical_origin = (0, 0, 0)
-        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        cylindrical_origin = (
+            params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'],
+            0, 0
+        )
         potential_benchmarking.benchmark_potential(
-            phi_model, loss_history, fname_mask, data, attrs, df_data, spherical_origin, cylindrical_origin
+            phi_model, loss_history,
+            fname_mask, data, attrs, df_data,
+            spherical_origin, cylindrical_origin
         )
 
     return 0
