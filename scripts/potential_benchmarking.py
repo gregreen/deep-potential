@@ -6,7 +6,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from matplotlib import colors
-matplotlib.rcParams["text.usetex"] = True
 import cmasher as cmr
 
 import h5py

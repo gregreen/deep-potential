@@ -12,7 +12,7 @@ import json
 import utils
 
 
-def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, lims=None, n_rows=1):
+def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, lims=None, n_rows=1, fig_dir=None, fname=None, fig_fmt=('png',)):
     """
     Plots 1D marginal distributions for a given set of dimensions, including a z-score (pull) plot
     for each marginal to compare the 'data' and 'flow' distributions.
@@ -37,9 +37,8 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         'r', 'phi', 'cth', 'vr', 'vth', 'vT'
     ]
     labels = {k:l for k,l in zip(keys,labels)}
-
     n_cols = -(-len(dims) // n_rows)  # Ceiling division to get number of columns
-
+    
     # Create a figure with a main plot and a pull plot for each dimension.
     fig, axs = plt.subplots(
         2 * n_rows, n_cols,
@@ -163,7 +162,6 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         # Special tick locator for phi angle
         if dim == 'phi':
             ax_pull.xaxis.set_major_locator(ticker.MultipleLocator(90))
-
         # Set y-labels only on the leftmost column
         if col == 0:
             ax.set_ylabel('Normalized count', labelpad=2, fontsize=10)
@@ -187,14 +185,18 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
         axs[2 * row, col].set_axis_off()
         axs[2 * row + 1, col].set_axis_off()
 
-    return fig, main_axs_flat
+    if fig_dir is not None:
+        for fmt in fig_fmt:
+            fname = fig_dir / f'{fname}.{fmt}'
+            fig.savefig(fname, dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
 
-def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, dim2, lims=None, cmap='viridis', logscale=False):
+def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, dim2, lims=None, cmap='viridis', logscale=False, fig_dir=None, fig_fmt=('png',)):
     labels = [
-        '$R$', '$z$', r'$\phi$', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
-        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$v_x$', '$v_y$', '$v_z$',
-        '$r$', r'$\phi\mathrm{\ (deg)}$', r'$\cos \theta$', '$v_r\mathrm{\ (km/s)}$', r'$v_{\theta}\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$'
+        '$R\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', r'cylindrical $\phi$ (deg)', '$v_R\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$',
+        '$x\mathrm{\ (kpc)}$', '$y\mathrm{\ (kpc)}$', '$z\mathrm{\ (kpc)}$', '$v_x\mathrm{\ (km/s)}$', '$v_y\mathrm{\ (km/s)}$', '$v_z\mathrm{\ (km/s)}$',
+        '$r\mathrm{\ (kpc)}$', r'$\phi\mathrm{\ (deg)}$', r'$\cos \theta$', '$v_r\mathrm{\ (km/s)}$', r'$v_{\theta}\mathrm{\ (km/s)}$', r'$v_{\phi}\mathrm{\ (km/s)}$'
     ]
     keys = [
         'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
@@ -304,7 +306,12 @@ def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, di
     if lims[0][0] > lims[0][1]:
         for ax in axs:
             ax.invert_xaxis()
-    return fig, axs
+
+    if fig_dir is not None:
+        for fmt in fig_fmt:
+            fname = fig_dir / f'sample_density_{dim1}_{dim2}.{fmt}'
+            fig.savefig(fname, dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
 
 @eqx.filter_jit
@@ -322,9 +329,7 @@ def value_and_grad_fn(model, eta_batch):
     return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
 
 
-def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history,
-              spherical_origin=(0.0, 0.0, 0.0), cylindrical_origin=(8.277, 0.0, 0.0),
-              fig_fmt=('png',)):
+def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, spherical_origin=(0.0, 0.0, 0.0), cylindrical_origin=(8.277, 0.0, 0.0), fig_fmt=('png',)):
     """
     For benchmarking we do the following, while keeping track how much time each
     thing takes:
@@ -411,33 +416,27 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history,
     #
     # 1D marginals
     #
-
+    
     # Cartesian projections
-    fig, axs = plot_simple_1d_marginal(
+    plot_simple_1d_marginal(
         coords_sample, coords_train, train_data["weights"],
         'x', 'y', 'z', 'vx', 'vy', 'vz',
-        n_rows=2
+        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_cartesian', fig_fmt=fig_fmt
     )
-    plt.savefig(save_dir / '1d_sample_density_cartesian.png', dpi=250, bbox_inches="tight")
-    plt.close()
 
     # Spherical projections
-    fig, axs = plot_simple_1d_marginal(
+    plot_simple_1d_marginal(
         coords_sample, coords_train, train_data["weights"],
         'r', 'phi', 'cth', 'vr', 'vT', 'vth',
-        n_rows=2
+        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_spherical', fig_fmt=fig_fmt
     )
-    plt.savefig(save_dir / '1d_sample_density_spherical.png', dpi=250, bbox_inches="tight")
-    plt.close()
 
     # Cylindrical projections
-    fig, axs = plot_simple_1d_marginal(
+    plot_simple_1d_marginal(
         coords_sample, coords_train, train_data["weights"],
         'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
-        n_rows=2
+        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_cylindrical', fig_fmt=fig_fmt
     )
-    plt.savefig(save_dir / '1d_sample_density_cylindrical.png', dpi=250, bbox_inches="tight")
-    plt.close()
 
     print("Saved 1d sample density plots")
 
@@ -446,65 +445,16 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history,
     #
 
     # Cartesian projections
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='x', dim2='y', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_x_y.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='vx', dim2='vy', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_vx_vy.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='z', dim2='vz', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_z_vz.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    # Sky projections
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='phi', dim2='cth', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_phi_cth.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    # Spherical projections
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='r', dim2='vr', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_r_vr.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='r', dim2='phi', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_r_phi.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    # Cylindrical projections
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='cylR', dim2='cylz', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_R_z.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
-    fig, axs = plot_simple_2d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        dim1='cylvz', dim2='cylvT', cmap='viridis'
-    )
-    plt.savefig(save_dir / 'sample_density_vz_vT.png', dpi=250, bbox_inches="tight")
-    plt.close()
-
+    for dim1, dim2 in [
+            ('x', 'y'), ('vx', 'vy'), ('z', 'vz'),
+            ('phi', 'cth'), ('r', 'vr'), ('r', 'phi'),
+            ('cylR', 'cylz'), ('cylvz', 'cylvT')
+    ]:
+        plot_simple_2d_marginal(
+            coords_sample, coords_train, train_data["weights"],
+            dim1=dim1, dim2=dim2, cmap='viridis', fig_dir=save_dir, fig_fmt=fig_fmt
+        )
+    
     print("Saved 2d sample density plots")
 
     # Calculating gradients
