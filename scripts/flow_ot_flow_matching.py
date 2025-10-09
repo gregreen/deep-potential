@@ -8,9 +8,7 @@ import flowjax.distributions as flowjax_dist
 import flowjax.bijections as flowjax_bij
 
 import equinox as eqx
-import diffrax
 import optax
-import e3nn_jax as e3nn
 
 from pathlib import Path
 from datetime import datetime
@@ -82,13 +80,16 @@ class NormalizingFlow(eqx.Module):
         self.checkpoint_index = checkpoint_index
         self.model_dir = model_dir
 
+
         self.metadata = {
             'creation_date': datetime.now().isoformat(),
             'training_epochs': 0,
             'vector_field_type': str(self.flow).splitlines(),
             'input_dim': dim,
             'num_parameters': self.count_parameters(),
+            "vector_field_params": vector_field_params
         }
+
 
     def count_parameters(self):
         """Counts the total number of trainable parameters in the flow."""
@@ -99,9 +100,10 @@ class NormalizingFlow(eqx.Module):
         """Computes the log probability of the data `x`."""
         return self.flow.log_prob(x)
 
+    @eqx.filter_jit
     def sample(self, key, num_samples):
         """Samples from the flow's distribution."""
-        return self.flow.sample(key, num_samples)
+        return self.flow.sample(key, (num_samples,))
 
     def save(self, loss_history=None):
         """
@@ -141,13 +143,12 @@ class NormalizingFlow(eqx.Module):
         return eqx.tree_at(lambda tree: tree.checkpoint_index, self, self.checkpoint_index + 1)
 
     @classmethod
-    def load(cls, model_dir, empty_model, load_history=True, load_index=-1):
+    def load(cls, model_dir, load_history=False, load_index=-1):
         """
         Loads a model from a checkpoint file.
 
         Args:
             model_dir (Path): The directory containing the model checkpoints.
-            empty_model: An instance of the model with the correct structure to load into.
             load_history (bool): If True, also loads the corresponding loss history.
             load_index (int): The checkpoint index to load. If -1, loads the latest checkpoint.
 
@@ -156,6 +157,21 @@ class NormalizingFlow(eqx.Module):
         """
         model_dir = Path(model_dir)
         name_suffix = 'flow'
+
+        # Load metadata (always from metadata.json)
+        metadata_file = model_dir / f"{name_suffix}-metadata.json"
+        if metadata_file.exists():
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+
+        # Create an empty model based on the metadata
+        empty_model = NormalizingFlow(
+            key=jax.random.key(0), # Note that this key is rendundant but needed for initialization
+            data_mean=jnp.zeros(6),
+            data_std=jnp.zeros(6),
+            vector_field_params=metadata['vector_field_params'],
+            model_dir=model_dir
+        )
 
         # Determine the model file to load
         checkpoint_index = -1
@@ -185,11 +201,7 @@ class NormalizingFlow(eqx.Module):
         # Print the model standard deviation value
         print("Model loaded!")
 
-        # Load metadata (always from metadata.json)
-        metadata_file = model_dir / f"{name_suffix}-metadata.json"
-        if metadata_file.exists():
-            with open(metadata_file, 'r') as f:
-                model.metadata.update(json.load(f))
+        model.metadata.update(metadata)
 
         loss_history = None
         if load_history:
@@ -323,78 +335,66 @@ class PrecomputedOTDataLoader:
 
 
 # ----------------- Loss Functions and Training Step -----------------
+def compute_jacobian_penalty(net, t, x, key, use_exact=False, n_samples=1):
+    """Compute Jacobian regularization for a single (t, x) pair."""
+    if use_exact:
+        # Exact full Jacobian (O(d^2))
+        J = jax.jacobian(lambda x_: net(t, x_))(x)
+        return jnp.sum(J**2)
+    else:
+        # Hutchinson trace estimator (O(d))
+        keys = jax.random.split(key, n_samples)
+
+        def single_estimate(k):
+            v = jax.random.normal(k, shape=x.shape)
+            Jv = jax.jvp(lambda x_: net(t, x_), (x,), (v,))[1]
+            return jnp.sum(Jv**2)
+        vals = jax.vmap(single_estimate)(keys)
+        return jnp.mean(vals)
 
 
-@eqx.filter_value_and_grad
-def loss_fn(params, static, key, x0, x1, weights, time_scheduler):
+def _loss_fn(params, static, key, x0, x1, weights, time_scheduler, sb_constant, kinetic_reg, jacobian_reg):
     # We are given the OT-paired (x0, x1), so we just proceed with Flow Matching
     t = time_scheduler(key, (x1.shape[0], 1))
     xt = t * x1 + (1 - t) * x0
     ut = x1 - x0  # Target vector field
+
+    if sb_constant > 0:
+        key, subkey = jax.random.split(key, 2)
+        eps = 1e-8
+        epsilon_t = sb_constant * jnp.sqrt(t * (1 - t) + eps)
+        z = jax.random.normal(subkey, shape=x1.shape)
+
+        xt += epsilon_t * z
+        ut += (1 - 2 * t) / (2 * t * (1 - t) + eps) * epsilon_t * z
+
     net = eqx.combine(params, static)
     vt = jax.vmap(net)(t.squeeze(-1), xt)  # Predicted vector field
+    # Flow Matching loss
     loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
+
+    # Kinetic energy regularization
+    if kinetic_reg > 0:
+        loss += kinetic_reg * jnp.sum(weights[:, None] * vt**2) / jnp.sum(weights)
+
+    # Exact Jacobian regularization
+    if jacobian_reg > 0:
+        def single_jac_penalty(t_i, x_i):
+            J = jax.jacobian(lambda x_: net(t_i.squeeze(), x_))(x_i)
+            return jnp.sum(J**2)
+
+        jacobian_losses = jax.vmap(single_jac_penalty)(t, xt)
+        loss += jacobian_reg * jnp.sum(weights * jacobian_losses) / jnp.sum(weights)
     return loss
+
+
+loss_fn = eqx.filter_value_and_grad(_loss_fn)
+val_loss_fn = eqx.filter_jit(_loss_fn)
 
 
 @eqx.filter_jit
-def val_loss_fn(params, static, key, x0, x1, weights, time_scheduler):
-    # We are given the OT-paired (x0, x1), so we just proceed with Flow Matching
-    t = time_scheduler(key, (x1.shape[0], 1))
-    xt = t * x1 + (1 - t) * x0
-    ut = x1 - x0
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_value_and_grad
-def loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant):
-    # We are given the OT-paired (x0, x1), so we just proceed with Flow Matching
-    t_key, z_key = jax.random.split(key, 2)
-    t = time_scheduler(t_key, (x1.shape[0], 1))
-    mu_t = t * x1 + (1 - t) * x0
-    z = jax.random.normal(z_key, shape=x1.shape)
-
-    eps = 1e-8
-    epsilon_t = sb_constant * jnp.sqrt(t * (1 - t) + eps)
-
-    xt = mu_t + epsilon_t * z
-    ut = x1 - x0 + (1 - 2 * t) / (2 * t * (1 - t) + eps) * (xt - mu_t)
-
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_jit
-def val_loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant):
-    # We are given the OT-paired (x0, x1), so we just proceed with Flow Matching
-    t_key, z_key = jax.random.split(key, 2)
-    t = time_scheduler(t_key, (x1.shape[0], 1))
-    mu_t = t * x1 + (1 - t) * x0
-    z = jax.random.normal(z_key, shape=x1.shape)
-
-    eps = 1e-8
-    epsilon_t = sb_constant * jnp.sqrt(t * (1 - t) + eps)
-
-    xt = mu_t + epsilon_t * z
-    ut = x1 - x0 + (1 - 2 * t) / (2 * t * (1 - t) + eps) * (xt - mu_t)
-
-    net = eqx.combine(params, static)
-    vt = jax.vmap(net)(t.squeeze(-1), xt)
-    loss = jnp.sum(weights[:, None] * (vt - ut)**2) / jnp.sum(weights)
-    return loss
-
-
-@eqx.filter_jit
-def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, sb_constant, time_scheduler, schedule_type, val_loss):
-    if sb_constant > 0:
-        loss, grads = loss_fn_sb(params, static, key, x0, x1, weights, time_scheduler, sb_constant)
-    else:
-        loss, grads = loss_fn(params, static, key, x0, x1, weights, time_scheduler)
+def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, time_scheduler, schedule_type, val_loss, loss_params):
+    loss, grads = loss_fn(params, static, key, x0, x1, weights, time_scheduler, **loss_params)
     global_grad_norm = optax.global_norm(grads)
     if schedule_type == "step":
         # We additionally pass the validation loss to the scheduler
@@ -449,7 +449,7 @@ def train_ot_flow_matching_model(
     batch_size: int,
     ot_pairings_dir: Path,
     time_scheduler_type=None,
-    sb_constant: float = 0.0,
+    loss_params={},
     time_logger=None,
     loss_history={'train': [], 'val': [], 'lr': []},
     checkpoint_frequency_epochs=-1,
@@ -503,7 +503,7 @@ def train_ot_flow_matching_model(
     print(f"Number of steps per epoch: {steps_per_epoch}, Batch size: {batch_size}")
     print(f"Number of epochs: {epochs}, Total training samples: {n_train}")
     print(f"Using time scheduler of type {time_scheduler}")
-    print(f"Using Schrodinger bridge coefficient of {sb_constant}")
+    print(f"Using loss params {loss_params}")
     start_epoch = len(loss_history['lr'])
     step = start_epoch * steps_per_epoch  # Continue from previous step if resuming
 
@@ -543,7 +543,8 @@ def train_ot_flow_matching_model(
                 time_logger.start("Training | train backpropagation")
             params, opt_state, loss, global_grad_norm = train_step(
                 params, static, opt_state, key_step, x0_batch, x1_batch, w_batch, optimizer,
-                sb_constant=sb_constant, time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss)
+                time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss),
+                loss_params=loss_params
             )
 
             avg_train_loss += float(loss.item()) * float(np.sum(w_batch))
@@ -579,10 +580,7 @@ def train_ot_flow_matching_model(
             x0_batch = x0_val_epoch[i: i + val_batch_size]
             x1_batch = x1_val_epoch[i: i + val_batch_size]
             w_batch = w1_val_epoch[i: i + val_batch_size]
-            if sb_constant > 0:
-                v_loss = val_loss_fn_sb(params, static, key_loop, x0_batch, x1_batch, w_batch, time_scheduler, sb_constant)
-            else:
-                v_loss = val_loss_fn(params, static, key_loop, x0_batch, x1_batch, w_batch, time_scheduler)
+            v_loss = val_loss_fn(params, static, key_loop, x0_batch, x1_batch, w_batch, time_scheduler, **loss_params)
             avg_val_loss += float(v_loss.item()) * float(np.sum(w_batch))
             val_w += float(np.sum(w_batch))
         avg_val_loss /= val_w

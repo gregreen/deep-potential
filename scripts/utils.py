@@ -374,6 +374,70 @@ def get_model_values(phi_model, q_eval,
     return phis, accs, rhos
 
 
+def get_selfn_values(selfn_model, q_eval,
+                     batch_size=131072,
+                     fname=None,
+                     disable_tqdm=False,):
+    """
+    Calculate the selection function implied by the model.
+    If specified, the results are saved to a file in a subdirectory of fig_dir,
+    named data.
+    Currently, the spatial dimension is expected to be in units of kpc
+    and velocity dimension 100 km/s. By default, the conversion factor for rho
+    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
+    (100 km/s)^2/kpc
+
+    Parameters:
+        selfn_model (eqx.Module): The model of the selection function to be used.
+        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the selection function
+        fig_dir (str): The directory where the data is to be saved
+        fname (str): The name of the file where the data is to be saved
+        batch_size (int): The batch size to be used when evaluating the model
+        disable_tqdm (bool): Whether to disable the tqdm progress bar
+        convert_rho_to_msunpc3 (bool): Whether to convert the density to M_sun/pc^3
+    """
+    import jax
+    import jax.numpy as jnp
+    import equinox as eqx
+
+    @eqx.filter_jit
+    def calc_selfn(selfn, q):
+        return jnp.exp(selfn(q))
+
+    # If selfn_model is an instance of class PotentialModel, then extract the selfn function
+    if hasattr(selfn_model, 'log_selection_function_model'):
+        selfn_model = selfn_model.log_selection_function_model
+    # vmap the function w.r.t. q
+    jit_calc_selfn = jax.vmap(calc_selfn, in_axes=(None, 0))
+
+    n0 = len(q_eval)
+
+    if fname is not None:
+        fname = Path(fname)
+        # Append the number of datapoints at the end of the file name
+        fname = fname.with_name(f"{fname.stem}_{n0}{'.npz'}")
+
+    if fname is None or (fname is not None and not fname.exists()):
+        selfns = []
+
+        for i in (pbar := tqdm(range(0, n0, batch_size), disable=disable_tqdm)):
+            b = q_eval[i: i + batch_size]
+
+            selfns.append(jit_calc_selfn(selfn_model, b))
+
+            pbar.set_description("Calculating selfn values")
+        selfns = np.concatenate(selfns)
+        if fname is not None:
+            # Make sure save_path directory exists
+            fname.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(fname, selfn=selfns)
+    else:
+        npzfile = np.load(fname)
+        selfns = npzfile['selfn']
+
+    return selfns
+
+
 def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
     """
     Antiquated function, this is used for multiple flow samples
@@ -671,6 +735,12 @@ def load_potential_params(fname, remove_lr=False):
     if remove_lr:
         df = df.drop(columns=["lr_hist"])
     return df.to_dict("list")
+
+
+def load_params(fname):
+    if fname is not None:
+        with open(fname, "r") as f:
+            return json.load(f)
 
 
 def load_loss_history(fname):

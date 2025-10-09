@@ -8,7 +8,7 @@ import optax
 import numpy as np
 from tqdm import trange
 
-from flow_ot_flow_matching import NormalizingFlow, val_loss_fn, val_loss_fn_sb, train_step, uniform_scheduler, power_law_scheduler, logit_normal_scheduler
+from flow_ot_flow_matching import NormalizingFlow, val_loss_fn, train_step, uniform_scheduler, power_law_scheduler, logit_normal_scheduler
 
 
 # ----------------- Main Training Function -----------------
@@ -26,7 +26,7 @@ def train_flow_matching_model(
     epochs: int,
     batch_size: int,
     time_scheduler_type=None,
-    sb_constant: float = 0.0,
+    loss_params={},
     time_logger=None,
     loss_history={'train': [], 'val': [], 'lr': []},
     checkpoint_frequency_epochs=-1,
@@ -77,7 +77,7 @@ def train_flow_matching_model(
     print(f"Number of steps per epoch: {steps_per_epoch}, Batch size: {batch_size}")
     print(f"Number of epochs: {epochs}, Total training samples: {n_train}")
     print(f"Using time scheduler of type {time_scheduler_type}")
-    print(f"Using Schrodinger bridge coefficient of {sb_constant}")
+    print(f"Using loss params {loss_params}")
     start_epoch = len(loss_history['lr'])
     step = start_epoch * steps_per_epoch  # Continue from previous step if resuming
 
@@ -113,7 +113,8 @@ def train_flow_matching_model(
             # Note: avg_val_loss from the *previous* epoch is used here
             params, opt_state, loss, global_grad_norm = train_step(
                 params, static, opt_state, key_step, x0_batch, x1_batch, w_batch, optimizer,
-                sb_constant=sb_constant, time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss)
+                time_scheduler=time_scheduler, schedule_type=schedule_type, val_loss=jnp.array(avg_val_loss),
+                loss_params=loss_params
             )
 
             avg_train_loss += float(loss.item()) * float(jnp.sum(w_batch))
@@ -152,11 +153,7 @@ def train_flow_matching_model(
             x1_batch = val_x[i: i + val_batch_size]
             x0_batch = jax.random.normal(key_x0, shape=x1_batch.shape)
             w_batch = val_weights[i: i + val_batch_size]
-
-            if sb_constant > 0:
-                v_loss = val_loss_fn_sb(params, static, key_step, x0_batch, x1_batch, w_batch, time_scheduler, sb_constant)
-            else:
-                v_loss = val_loss_fn(params, static, key_step, x0_batch, x1_batch, w_batch, time_scheduler)
+            v_loss = val_loss_fn(params, static, key_step, x0_batch, x1_batch, w_batch, time_scheduler, **loss_params)
             current_val_loss += float(v_loss.item()) * float(jnp.sum(w_batch))
             val_w += float(jnp.sum(w_batch))
 

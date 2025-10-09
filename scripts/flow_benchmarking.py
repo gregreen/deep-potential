@@ -38,7 +38,7 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
     ]
     labels = {k:l for k,l in zip(keys,labels)}
     n_cols = -(-len(dims) // n_rows)  # Ceiling division to get number of columns
-    
+
     # Create a figure with a main plot and a pull plot for each dimension.
     fig, axs = plt.subplots(
         2 * n_rows, n_cols,
@@ -320,13 +320,46 @@ def batch_loss_fn(model, x_batch, weights_batch):
     return jnp.sum(weights_batch * log_probs)
 
 
-@eqx.filter_jit
-def sample_batch_fn(model, sample_key, batch_size):
-    return model.sample(sample_key, (batch_size,))
-
-
 def value_and_grad_fn(model, eta_batch):
     return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
+
+
+def do_plots(coords_sample, coords_train, weights_train, fig_dir, fig_fmt=('png',)):
+    # Cartesian projections
+    plot_simple_1d_marginal(
+        coords_sample, coords_train, weights_train,
+        'x', 'y', 'z', 'vx', 'vy', 'vz',
+        n_rows=2, fig_dir=fig_dir, fname='1d_sample_density_cartesian', fig_fmt=fig_fmt
+    )
+
+    # Spherical projections
+    plot_simple_1d_marginal(
+        coords_sample, coords_train, weights_train,
+        'r', 'phi', 'cth', 'vr', 'vT', 'vth',
+        n_rows=2, fig_dir=fig_dir, fname='1d_sample_density_spherical', fig_fmt=fig_fmt
+    )
+
+    # Cylindrical projections
+    plot_simple_1d_marginal(
+        coords_sample, coords_train, weights_train,
+        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
+        n_rows=2, fig_dir=fig_dir, fname='1d_sample_density_cylindrical', fig_fmt=fig_fmt
+    )
+
+    print("Saved 1d sample density plots")
+
+    # Cartesian projections
+    for dim1, dim2 in [
+            ('x', 'y'), ('vx', 'vy'), ('z', 'vz'),
+            ('phi', 'cth'), ('r', 'vr'), ('r', 'phi'),
+            ('cylR', 'cylz'), ('cylvz', 'cylvT')
+    ]:
+        plot_simple_2d_marginal(
+            coords_sample, coords_train, weights_train,
+            dim1=dim1, dim2=dim2, cmap='viridis', fig_dir=fig_dir, fig_fmt=fig_fmt
+        )
+
+    print("Saved 2d sample density plots")
 
 
 def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, spherical_origin=(0.0, 0.0, 0.0), cylindrical_origin=(8.277, 0.0, 0.0), fig_fmt=('png',)):
@@ -370,7 +403,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
         final_val_loss = (-total_weighted_log_prob / jnp.sum(val_data["weights"])).item()
         dt = time_logger.get_duration("Benchmarking | Validation Loss Calculation")
         print(f"Final loss on entire validation set: {final_val_loss:.6f}  (duration: {dt:.2f} s)")
-    
+
     performance_data = {"final_val_loss": round(final_val_loss, 6)}
     fname_performance = save_dir / "performance.json"
     with open(fname_performance, "w") as f:
@@ -392,7 +425,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
         final_train_loss = (-total_weighted_log_prob / jnp.sum(train_data["weights"])).item()
         dt = time_logger.get_duration("Benchmarking | Train Loss Calculation")
         print(f"Final loss on entire train set: {final_train_loss:.6f}  (duration: {dt:.2f} s)")
-    
+
     performance_data["final_train_loss"] = round(final_train_loss, 6)
     with open(fname_performance, "w") as f:
         json.dump(performance_data, f, indent=4)
@@ -405,7 +438,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
     time_logger.start("Benchmarking | Sampling")
     samples = []
     for i in tqdm(range(n_batches)):
-        samples.append(sample_batch_fn(flow_model, sample_keys[i], batch_size))
+        samples.append(flow_model.sample(sample_keys[i], batch_size))
     samples = jnp.concatenate(samples)
     time_logger.stop("Benchmarking | Sampling")
     print(f"Sampling {n_samples} points took: {time_logger.get_duration('Benchmarking | Sampling'):.4f} s")
@@ -413,49 +446,7 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
     coords_sample = utils.calc_coords(samples, spherical_origin, cylindrical_origin)
     coords_train = utils.calc_coords(train_data["eta"], spherical_origin, cylindrical_origin)
 
-    #
-    # 1D marginals
-    #
-    
-    # Cartesian projections
-    plot_simple_1d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        'x', 'y', 'z', 'vx', 'vy', 'vz',
-        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_cartesian', fig_fmt=fig_fmt
-    )
-
-    # Spherical projections
-    plot_simple_1d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        'r', 'phi', 'cth', 'vr', 'vT', 'vth',
-        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_spherical', fig_fmt=fig_fmt
-    )
-
-    # Cylindrical projections
-    plot_simple_1d_marginal(
-        coords_sample, coords_train, train_data["weights"],
-        'cylR', 'cylz', 'cylphi', 'cylvR', 'cylvz', 'cylvT',
-        n_rows=2, fig_dir=save_dir, fname='1d_sample_density_cylindrical', fig_fmt=fig_fmt
-    )
-
-    print("Saved 1d sample density plots")
-
-    #
-    # 2D marginals
-    #
-
-    # Cartesian projections
-    for dim1, dim2 in [
-            ('x', 'y'), ('vx', 'vy'), ('z', 'vz'),
-            ('phi', 'cth'), ('r', 'vr'), ('r', 'phi'),
-            ('cylR', 'cylz'), ('cylvz', 'cylvT')
-    ]:
-        plot_simple_2d_marginal(
-            coords_sample, coords_train, train_data["weights"],
-            dim1=dim1, dim2=dim2, cmap='viridis', fig_dir=save_dir, fig_fmt=fig_fmt
-        )
-    
-    print("Saved 2d sample density plots")
+    do_plots(coords_sample, coords_train, train_data["weights"], save_dir, fig_fmt)
 
     # Calculating gradients
     n_samples = 1000
@@ -482,3 +473,56 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
     with open(fname_performance, "w") as f:
         json.dump(performance_data, f, indent=4)
     print(f"Saved performance metrics to {fname_performance}")
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Plots a df_gradients.h5.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--input", "-i", type=str,
+                        required=False, help="Input data.")
+    parser.add_argument(
+        '--df-grads-fname',
+        required=True,
+        help='Filename pattern to load the flow gradients from.'
+    )
+    parser.add_argument(
+        '--fig-dir',
+        type=str,
+        default='.',
+        help='Directory in which to save the output plot.'
+    )
+    parser.add_argument(
+        "--params",
+        type=str,
+        help="JSON with kwargs.",
+        default="options.json"
+    )
+    parser.add_argument(
+        '--fig-fmt',
+        nargs='+',
+        default=['png'],
+        help='Figure format(s) to save (e.g., png, pdf).'
+    )
+    args = parser.parse_args()
+
+    params = utils.load_params(args.params)
+
+    spherical_origin = (0.0, 0.0, 0.0)
+    cylindrical_origin = (params["df"].pop('benchmarking_r0', 8.277), 0.0, 0.0)
+
+    fig_dir = Path(args.fig_dir)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    data, attrs = utils.load_training_data(args.input)
+
+    train_data, val_data = utils.split_data(data, params["df"]["validation_frac"])
+    df_data = utils.load_flow_samples(args.df_grads_fname)
+    samples = df_data["eta"]
+
+    coords_sample = utils.calc_coords(samples, spherical_origin, cylindrical_origin)
+    coords_train = utils.calc_coords(train_data["eta"], spherical_origin, cylindrical_origin)
+
+    do_plots(coords_sample, coords_train, train_data["weights"], fig_dir, args.fig_fmt)

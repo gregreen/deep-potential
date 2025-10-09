@@ -122,7 +122,7 @@ def train_flow(
     n_epochs=100,
     batch_size=5000,
     validation_frac=0.25,
-    sb_constant=0.0,
+    loss_opts={},
     lr_opts={},
     vector_field_opts={},
     time_logger=None,
@@ -146,7 +146,8 @@ def train_flow(
         n_epochs (int): Number of training epochs.
         batch_size (int): Number of samples per training batch.
         validation_frac (float): Fraction of data to use for validation.
-        sb_constant (float): Schrödinger Bridge constant. If > 0, uses SB loss.
+        loss_opts (dict): Dictionary for the hyperparameters in the loss function.
+            They mostly control regularization.
         lr_opts (dict): Dictionary of learning rate options.
         vector_field_opts (dict): Options for the vector field neural network.
         time_logger (utils.TimeLogger): Optional logger for timing operations.
@@ -190,7 +191,7 @@ def train_flow(
     # an affine layer that inverts the first transformation.
     # We optimize the middle vector field using flow matching.
     key, subkey = jax.random.split(key)
-    vector_field_opts["pos_mean"], vector_field_opts["pos_std"] = data_mean[:dim//2], data_std[:dim//2]
+    vector_field_opts["pos_mean"], vector_field_opts["pos_std"] = data_mean[:dim//2].tolist(), data_std[:dim//2].tolist()
     flow_model = flow_ot_flow_matching.NormalizingFlow(
         key=subkey,
         data_mean=data_mean,
@@ -219,7 +220,7 @@ def train_flow(
                   schedule_type=lr_opts["type"], lr_final=lr_opts.get("final", None),
                   train_data=train_data, val_data=val_data,
                   norm_mean=data_mean, norm_std=data_std, epochs=n_epochs, batch_size=batch_size,
-                  time_scheduler_type=time_scheduler_type, sb_constant=sb_constant,
+                  time_scheduler_type=time_scheduler_type, loss_params=loss_opts,
                   time_logger=time_logger, loss_history=loss_history,
                   checkpoint_frequency_epochs=checkpoint_frequency_epochs)
     if training_method == "OTFlowMatching":
@@ -246,46 +247,6 @@ def save_df_data(df_data, fname):
         for key in df_data:
             f.create_dataset(key, data=df_data[key], **kw)
 
-def load_flow(flow_dir, params, load_history=False):
-    # Loads a trained NormalizingFlow model from a specified directory.
-    # This currently assumes that the input dimension is 6
-    flow_dir = Path(flow_dir)
-
-    model_opts = params["df"]["vector_field_opts"]
-    model_opts["pos_mean"] = jnp.zeros(3)
-    model_opts["pos_std"] = jnp.zeros(3)
-    flow_model = flow_ot_flow_matching.NormalizingFlow(
-        key=jax.random.PRNGKey(0), # Note that this key is rendundant but needed for initialization
-        data_mean=jnp.zeros(6),
-        data_std=jnp.zeros(6),
-        vector_field_params=model_opts,
-        model_dir=flow_dir
-    )
-    flow_model, loss_history = flow_model.load(flow_dir, flow_model)
-    if load_history:
-        return flow_model, loss_history
-    return flow_model
-
-
-def load_potential(potential_dir, params, load_history=False):
-    # Loads a trained PotentialModel from a specified directory.
-    # Currently assumes a 6D input
-    potential_dir = Path(potential_dir)
-
-    # Create an empty model
-    potential_model = potential.PotentialModel(
-        key=jax.random.PRNGKey(0), # Note that this key is rendundant but needed for initialization 
-        model_dir=potential_dir,
-        phi_params=params["potential_nn_opts"],
-        frameshift_params=params.get("frameshift_opts", None),
-    )
-
-    potential_model, loss_history = potential.PotentialModel.load(potential_dir, potential_model)
-
-    if load_history:
-        return potential_model, loss_history
-    return potential_model
-
 
 def train_potential(
     df_data,
@@ -294,12 +255,15 @@ def train_potential(
     loss_opts={},
     potential_nn_opts={},
     lr_opts={},
-    n_epochs=4096,
+    n_epochs_noselfn=4096,
+    n_epochs_selfn=4096,
     batch_size=1024,
     validation_frac=0.25,
     checkpoint_frequency_epochs=-1,
     frameshift_opts=None,
     selection_function_opts=None,
+    benchmark_after_first_loop=True,
+    benchmarking_args={}
 ):
     """
     Initializes and trains the gravitational potential model.
@@ -330,37 +294,76 @@ def train_potential(
     # Make the model
     key, subkey = jax.random.split(key)
     n_val = int(validation_frac * n_samples)
-    potential_nn_opts["scale"] = np.std(df_data['eta'][n_val:,:3], axis=0)
+    potential_nn_opts["scale"] = np.std(df_data['eta'][n_val:,:3], axis=0).tolist()
     potential_model = potential.PotentialModel(
         subkey, potential_dir, phi_params=potential_nn_opts, frameshift_params=frameshift_opts,
         selection_function_params=selection_function_opts
     )
 
-    # Set up the optimizer
-    optimizer, schedule = get_optimizer_and_schedule(
-        options_lr=lr_opts,
-        steps_per_epoch=(n_samples - n_val) // batch_size,
-        epochs=n_epochs
-    )
+    # We first train without selection function, then with it if applicable.
+    # jobs = [(n_epochs_selfn, True)]
+    jobs = []
+    if n_epochs_noselfn > 0:
+        jobs.append((n_epochs_noselfn, False))
+    if selection_function_opts is not None:
+        selection_function_opts["scale"] = potential_nn_opts["scale"]
+        if n_epochs_selfn > 0:
+            jobs.append((n_epochs_selfn, True))
 
-    potential_model, loss_history = potential.train_potential(
-        key,
-        potential_model,
-        optimizer,
-        schedule,
-        lr_opts["type"],
-        lr_opts.get("final", None),
-        df_data,
-        n_epochs,
-        batch_size, validation_frac, checkpoint_frequency_epochs, loss_opts
-    )
+    for i, (n_epochs, train_selfn) in enumerate(jobs):
+        # Set up the optimizer
+        optimizer, schedule = get_optimizer_and_schedule(
+            options_lr=lr_opts,
+            steps_per_epoch=(n_samples - n_val) // batch_size,
+            epochs=n_epochs
+        )
+
+        potential_model, loss_history = potential.train_potential(
+            key,
+            potential_model,
+            optimizer,
+            schedule,
+            lr_opts["type"],
+            lr_opts.get("final", None),
+            df_data,
+            n_epochs,
+            batch_size, validation_frac, checkpoint_frequency_epochs, loss_opts,
+            train_selfn=train_selfn,
+            reset_lr=True
+        )
+
+        if i == 0 and len(jobs) == 2:
+            # Benchmark the intermediate potential if requested
+            if benchmark_after_first_loop:
+                print("Benchmarking the potential after the first training loop ...")
+                spherical_origin = (0, 0, 0)
+                cylindrical_origin = (frameshift_opts.get('r0', 8.277), 0, 0)
+                potential_benchmarking.benchmark_potential(
+                    potential_model, loss_history,
+                    **benchmarking_args,
+                    spherical_origin=spherical_origin, cylindrical_origin=cylindrical_origin,
+                    checkpoint_index=potential_model.checkpoint_index - 1
+                )
     return potential_model, loss_history
 
 
-def load_params(fname):
-    if fname is not None:
-        with open(fname, "r") as f:
-            return json.load(f)
+def load_flow(flow_dir, checkpoint_index=-1, load_history=False):
+    # Loads a trained NormalizingFlow model from a specified directory.
+    # This currently assumes that the input dimension is 6
+    flow_model, loss_history = flow_ot_flow_matching.NormalizingFlow.load(Path(flow_dir), load_index=checkpoint_index, load_history=load_history)
+    if load_history:
+        return flow_model, loss_history
+    return flow_model
+
+
+def load_potential(potential_dir, checkpoint_index=-1, load_history=False):
+    # Loads a trained PotentialModel from a specified directory.
+    # Currently assumes a 6D input
+    potential_model, loss_history = potential.PotentialModel.load(Path(potential_dir), load_index=checkpoint_index, load_history=load_history)
+
+    if load_history:
+        return potential_model, loss_history
+    return potential_model
 
 
 def main():
@@ -384,6 +387,12 @@ def main():
         type=str,
         default="models/df/flow",
         help="Subdirectory to store flows in.",
+    )
+    parser.add_argument(
+        '--flow-checkpoint-index',
+        type=int,
+        default=-1,
+        help='If needed, the index of the flow checkpoint to load. If -1, loads the latest checkpoint.'
     )
     parser.add_argument(
         "--reset-flow-lr",
@@ -435,6 +444,18 @@ def main():
         help="Whether to compute basic potential benchmarks after the potential training is finished.",
     )
     parser.add_argument(
+        "--basic-potential-benchmarking-gaia-units",
+        action="store_true",
+        help="Whether to assume Gaia-like units or dimensioneless units for potential plotting.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=-1,
+        help="If passed and non-negative, overwrite the random seed used for generating the DF and the potential."
+        "Does not affect the seed used for OT pairings.",
+    )
+    parser.add_argument(
         "--params",
         type=str,
         help="JSON with kwargs.",
@@ -447,7 +468,15 @@ def main():
     potential_dir = run_dir / args.potential_dir
     df_grads_fname = run_dir / args.df_grads_fname
 
-    params = load_params(run_dir / args.params)
+    params = utils.load_params(run_dir / args.params)
+    # Overwrite the seed if requested
+    if args.seed >= 0:
+        if "df" in params:
+            params["df"]["seed"] = args.seed
+        if "flow_sampling" in params:
+            params["flow_sampling"]["seed"] = args.seed
+        if "Phi" in params:
+            params["Phi"]["seed"] = args.seed
     print("Options:")
     print(json.dumps(params, indent=2))
 
@@ -462,6 +491,7 @@ def main():
 
     # ================= Training/loading the flow =================
     if args.flow_training:
+        benchmarking_r0 = params["df"].pop('benchmarking_r0', 8.277)
         print(f'Loaded {data["eta"].shape[0]} phase-space positions.')
 
         # Train and save normalizing flows
@@ -476,22 +506,24 @@ def main():
         print(f"Training took {time_logger.get_duration('Flow training'):.2f} s.")
 
     if not args.flow_training and args.flow_sampling:
-        flow, loss_history = load_flow(flow_dir, params, load_history=True)
+        flow, loss_history = load_flow(flow_dir, args.flow_checkpoint_index, load_history=True)
 
     # ================= Basic flow benchmarking =================
     if args.basic_flow_benchmarking:
         # If flow has not been read in, read it
         if 'flow' not in locals():
-            flow, loss_history = load_flow(flow_dir, params, load_history=True)
+            flow, loss_history = load_flow(flow_dir, args.flow_checkpoint_index, load_history=True)
         validation_frac = params["df"]["validation_frac"]
         spherical_origin = (0, 0, 0)
-        cylindrical_origin = (params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'], 0, 0)
+        benchmarking_r0 = params["df"].pop('benchmarking_r0', 8.277)
+        cylindrical_origin = (benchmarking_r0, 0, 0)
         flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history, spherical_origin, cylindrical_origin)
 
+    # Exit if nothing else needs to be done
+    if not args.flow_sampling and not args.potential_training and not args.basic_potential_benchmarking:
+        return 0
+
     # ================= Sampling the flow/loading samples =================
-    n_samples = params["Phi"].pop("n_samples")
-    sample_batch_size = params["Phi"].pop("sample_batch_size")
-    grad_batch_size = params["Phi"].pop("grad_batch_size")
     if not args.flow_sampling:
         print("Loading DF gradients ...")
         df_data = utils.load_flow_samples(df_grads_fname)
@@ -505,9 +537,7 @@ def main():
             jax.random.key(params["Phi"]["seed"]),
             [flow],
             [attrs],
-            n_samples,
-            grad_batch_size=grad_batch_size,
-            sample_batch_size=sample_batch_size,
+            **params["flow_sampling"]
         )
         time_logger.stop('Flow sampling')
         print(f"Sampling took {time_logger.get_duration('Flow sampling'):.2f} s.")
@@ -528,23 +558,23 @@ def main():
         print("Fitting the potential ...")
         time_logger.start('Potential training')
 
-        phi_model, loss_history = train_potential(
+        train_potential(
             df_data,
             potential_dir,
             **params["Phi"],
+            benchmark_after_first_loop=args.basic_potential_benchmarking,
+            benchmarking_args=dict(fname_mask=args.potential_mask, data_train=data, attrs_train=attrs, df_data=df_data,
+                                   is_gaia=args.basic_potential_benchmarking_gaia_units),
         )
         time_logger.stop('Potential training')
         print(f"Training took {time_logger.get_duration('Potential training'):.2f} s.")
 
     # ================= Basic potential benchmarking =================
     if args.basic_potential_benchmarking:
-        # If potential has not been read in, read it
-        if 'phi_model' not in locals():
-            phi_model, loss_history = load_potential(potential_dir,
-                                                     params['Phi'],
-                                                     load_history=True)
+        phi_model, loss_history = load_potential(
+            potential_dir, load_history=True
+        )
         fname_mask = args.potential_mask
-        validation_frac = params["df"]["validation_frac"]
         spherical_origin = (0, 0, 0)
         cylindrical_origin = (
             params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'],
@@ -553,7 +583,8 @@ def main():
         potential_benchmarking.benchmark_potential(
             phi_model, loss_history,
             fname_mask, data, attrs, df_data,
-            spherical_origin, cylindrical_origin
+            spherical_origin, cylindrical_origin,
+            is_gaia=args.basic_potential_benchmarking_gaia_units,
         )
 
     return 0

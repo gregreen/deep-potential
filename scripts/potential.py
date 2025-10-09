@@ -98,6 +98,7 @@ class PhiNN(eqx.Module):
     """
     net: ResMLP
     scale: Array # Not trainable
+    type: str = eqx.field(static=True)
 
     def __init__(self, key, n_dim=3, depth=3, width=32, type='ResNet', scale=None):
         """
@@ -123,8 +124,9 @@ class PhiNN(eqx.Module):
                 in_size=n_dim, out_size=1, width_size=width,
                 depth=depth, activation=jax.nn.tanh, key=key,
             )
+        self.type = type
 
-        print(f"Initializing phi(x) model with coordinate scale {scale}")
+        print(f"Initializing the neural network with coordinate scale {scale}")
         if scale is None:
             coord_scale = jnp.ones(n_dim)
         else:
@@ -215,31 +217,13 @@ class FrameShift(eqx.Module):
         return u, w
 
 
-class SelectionFunctionCorrection(eqx.Module):
-    net: eqx.nn.MLP
-    scale: Array
-
-    def __init__(self, key, n_dim=3, depth=3, width=32, type='ResNet', scale=None):
-        super().__init__()
-
-        if type == 'ResNet':
-            self.net = ResMLP(
-                in_size=n_dim, out_size=1, width_size=width,
-                depth=depth, key=key,
-            )
-        elif type == 'MLP':
-            self.net = eqx.nn.MLP(
-                in_size=n_dim, out_size=1, width_size=width,
-                depth=depth, activation=jax.nn.tanh, key=key,
-            )
-        if scale is None:
-            coord_scale = jnp.ones(n_dim)
-        else:
-            coord_scale = jnp.array(scale)
-        self.scale = 1 / coord_scale
-
-    def call(self, q):
-        return jax.nn.sigmoid(self.net(self.scale * q)).squeeze()
+"""
+Selection function correction in this case actually has identical form to the potential model.
+Since the correction is between 0 and infinity in our case (upper end isn't one because we do
+extra spatial correction during the training of the NF), the log is between -infinity and infinity,
+and further the correction is a three-dimensional scalar function of position.
+"""
+LogSelectionFunctionCorrection = PhiNN
 
 
 class PotentialModel(eqx.Module):
@@ -251,7 +235,7 @@ class PotentialModel(eqx.Module):
     """
     phi_model: PhiNN
     frameshift_model: Optional[FrameShift]
-    selection_function_model: Optional[SelectionFunctionCorrection]
+    log_selection_function_model: Optional[LogSelectionFunctionCorrection]
     checkpoint_index: int
     model_dir: str = eqx.field(static=True)
     metadata: Dict[str, Any] = eqx.field(static=True)
@@ -264,9 +248,21 @@ class PotentialModel(eqx.Module):
         else:
             self.frameshift_model = None
         if selection_function_params:
-            self.selection_function_model = SelectionFunctionCorrection(**selection_function_params, key=key_sf)
+            logselfn = LogSelectionFunctionCorrection(**selection_function_params, key=key_sf)
+            self.log_selection_function_model = logselfn
+            '''# We modify the last layer to make sure the output is zero everywhere
+            if logselfn.type == "MLP":
+                last_layer = logselfn.net.layers[-1]
+            elif logselfn.type == "ResNet":
+                last_layer = logselfn.net.final_layer
+            self.log_selection_function_model = eqx.tree_at(
+                lambda m: (m.net.layers[-1].weight, m.net.layers[-1].bias),
+                logselfn,
+                replace=(jnp.zeros_like(last_layer.weight),
+                         jnp.zeros_like(last_layer.bias))
+            )'''
         else:
-            self.selection_function_model = None
+            self.log_selection_function_model = None
 
         self.checkpoint_index = checkpoint_index
         self.model_dir = model_dir
@@ -275,6 +271,9 @@ class PotentialModel(eqx.Module):
             'phi_model_type': str(self.phi_model).splitlines(),
             'frameshift_model_type': str(self.frameshift_model).splitlines(),
             'num_parameters': self.count_parameters(),
+            'phi_params': phi_params,
+            'frameshift_params': frameshift_params,
+            'selection_function_params': selection_function_params,
         }
 
     def count_parameters(self):
@@ -317,13 +316,12 @@ class PotentialModel(eqx.Module):
         return eqx.tree_at(lambda tree: tree.checkpoint_index, self, self.checkpoint_index + 1)
 
     @classmethod
-    def load(cls, model_dir, empty_model, load_history=True, load_index=-1):
+    def load(cls, model_dir, load_history=True, load_index=-1):
         """
         Loads a model from a checkpoint file.
 
         Args:
             model_dir (Path): The directory containing the model checkpoints.
-            empty_model: An instance of the model with the correct structure to load into.
             load_history (bool): If True, also loads the corresponding loss history.
             load_index (int): The checkpoint index to load. If -1, loads the latest checkpoint.
 
@@ -332,6 +330,21 @@ class PotentialModel(eqx.Module):
         """
         model_dir = Path(model_dir)
         name_suffix = 'potential'
+
+        # Load metadata (always from metadata.json)
+        metadata_file = model_dir / f"{name_suffix}-metadata.json"
+        if metadata_file.exists():
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+
+        # Create an empty model
+        empty_model = PotentialModel(
+            key=jax.random.PRNGKey(0), # Note that this key is rendundant but needed for initialization 
+            model_dir=model_dir,
+            phi_params=metadata["phi_params"],
+            frameshift_params=metadata["frameshift_params"],
+            selection_function_params=metadata["selection_function_params"]
+        )
 
         # Determine the model file to load
         checkpoint_index = -1
@@ -361,11 +374,7 @@ class PotentialModel(eqx.Module):
         # Print the model standard deviation value
         print("Model loaded!")
 
-        # Load metadata (always from metadata.json)
-        metadata_file = model_dir / f"{name_suffix}-metadata.json"
-        if metadata_file.exists():
-            with open(metadata_file, 'r') as f:
-                model.metadata.update(json.load(f))
+        model.metadata.update(metadata)
 
         loss_history = None
         if load_history:
@@ -428,24 +437,27 @@ def get_trainable_scalar_history(model: eqx.Module) -> Dict[str, float]:
     return history
 
 
-def calc_lnsel_derivatives(selection_function, q):
+def calc_selfn_derivatives(fun, q):
     """Calculates derivatives of the selection function correction at q."""
-    dlnsel_dq = jax.grad(selection_function)(q) / selection_function(q)
+    dlnselfn_dq = jax.grad(fun)(q)
+    lnselfn = fun(q)
 
-    return dlnsel_dq
+    return lnselfn, dlnselfn_dq
 
 def get_phi_loss_new(
     phi_model,
     frameshift_model,
-    selection_function_model,
+    log_selection_function_model,
     q, p,
     dlnf_dq, dlnf_dp,
     alpha=1.0,
     beta=1.0,
     lambda_=1.0,
+    lambda_selection_function=0.01,
     gamma=0.0,
     mu=0.0,
-    l2=0.01
+    l2_potential=0.01,
+    l2_selection_function=0.01
 ):
     """
     Calculates the loss based on the collisionless Boltzmann equation (CBE).
@@ -470,18 +482,17 @@ def get_phi_loss_new(
     phi_grads_fn = jax.vmap(calc_phi_derivatives, in_axes=(None, 0))
     dphi_dq, d2phi_dq2 = phi_grads_fn(phi_model, q)
 
-    lnsel_grads_fn = jax.vmap(calc_lnsel_derivatives, in_axes=(None, 0))
-    dlnsel_dq = lnsel_grads_fn(selection_function_model, q)
-
     if frameshift_model is None:
-        dlnf_dt = jnp.sum(dlnf_dp * dphi_dq - dlnf_dq * p, axis=1)
-        null_hyp = dlnf_dt
-    else:
-        u, w = frameshift_model(q, p)
-        dlnf_dt_omega = jnp.sum((p - u) * dlnf_dq - (dphi_dq + w) * dlnf_dp, axis=1)
-        null_hyp = dlnf_dt_omega
+        raise ValueError("frameshift_model cannot be None in get_phi_loss")
+    u, w = frameshift_model(q, p)
+    dlnf_dt_omega = jnp.sum((p - u) * dlnf_dq - (dphi_dq + w) * dlnf_dp, axis=1)
+    null_hyp = dlnf_dt_omega
 
-    null_hyp -= dlnsel_dq
+    if log_selection_function_model is not None:
+        lnselfn_grads_fn = jax.vmap(calc_selfn_derivatives, in_axes=(None, 0))
+        lnselfn, dlnselfn_dq = lnselfn_grads_fn(log_selection_function_model, q)
+
+        null_hyp -= jnp.sum((p - u) * dlnselfn_dq, axis=1)
 
     likelihood = jnp.arcsinh(alpha * jnp.abs(null_hyp)) / alpha
 
@@ -489,6 +500,9 @@ def get_phi_loss_new(
     if lambda_ != 0:
         prior_neg = jnp.arcsinh(beta * jnp.clip(-d2phi_dq2, a_min=0.0)) / beta
         likelihood = likelihood + lambda_ * prior_neg
+
+    if lambda_selection_function != 0 and log_selection_function_model is not None:
+        likelihood += lambda_selection_function * lnselfn**2
 
     # Punishing positive matter densities
     if mu != 0:
@@ -503,18 +517,31 @@ def get_phi_loss_new(
     loss = jnp.log(jnp.mean(likelihood))
     loss_noreg = loss
 
-    if l2 != 0:
-        all_leaves = jax.tree_util.tree_leaves(phi_model.net)
-        array_leaves = [p for p in all_leaves if isinstance(p, jax.Array)]
+    def get_l2_loss(net, l2):
+        """
+        Calculates the L2 loss exclusively on the weights of eqx.nn.Linear instances.
+        """
+        potential_leaves = jax.tree_util.tree_leaves(
+            net, is_leaf=lambda x: isinstance(x, eqx.nn.Linear)
+        )
+        linear_layers = [
+            leaf for leaf in potential_leaves if isinstance(leaf, eqx.nn.Linear)
+        ]
+        weights = [layer.weight for layer in linear_layers]
 
         # Calculate the sum of squares.
-        sum_of_squares = jnp.sum(jnp.array([jnp.sum(p**2) for p in array_leaves]))
-        # Count the total number of trainable parameters.
-        param_count = sum(p.size for p in array_leaves)
+        sum_of_squares = jnp.sum(jnp.array([jnp.sum(p**2) for p in weights]))
+        # Count the total number of parameters in these weight matrices.
+        param_count = jnp.sum(jnp.array([p.size for p in weights]))
 
         mean_of_squares = sum_of_squares / (param_count + 1e-8)
         penalty = l2 * mean_of_squares
-        loss += penalty
+        return penalty
+
+    if l2_potential != 0:
+        loss += get_l2_loss(phi_model.net, l2_potential)
+    if log_selection_function_model is not None and l2_selection_function != 0:
+        loss += get_l2_loss(log_selection_function_model.net, l2_selection_function)
 
     return loss, loss_noreg
 
@@ -601,18 +628,24 @@ def get_phi_loss(
 @eqx.filter_value_and_grad(has_aux=True)
 def loss_fn(params, static, batch, loss_params):
     model = eqx.combine(params, static)
-    q, p, df_dq, df_dp = batch
-    loss, loss_noreg = get_phi_loss(
-        model.phi_model, model.frameshift_model, q, p, df_dq, df_dp, **loss_params
+    q, p, df_dq, df_dp, f = batch
+    dlnf_dq = df_dq / f.reshape(-1, 1)
+    dlnf_dp = df_dp / f.reshape(-1, 1)
+    loss, loss_noreg = get_phi_loss_new(
+        model.phi_model, model.frameshift_model, model.log_selection_function_model,
+        q, p, dlnf_dq, dlnf_dp, **loss_params
     )
     return loss, loss_noreg
 
 @eqx.filter_jit
 def loss_fn_val(params, static, batch, loss_params):
     model = eqx.combine(params, static)
-    q, p, df_dq, df_dp = batch
-    loss, loss_noreg = get_phi_loss(
-        model.phi_model, model.frameshift_model, q, p, df_dq, df_dp, **loss_params
+    q, p, df_dq, df_dp, f = batch
+    dlnf_dq = df_dq / f.reshape(-1, 1)
+    dlnf_dp = df_dp / f.reshape(-1, 1)
+    loss, loss_noreg = get_phi_loss_new(
+        model.phi_model, model.frameshift_model, model.log_selection_function_model,
+        q, p, dlnf_dq, dlnf_dp, **loss_params
     )
     return loss, loss_noreg
 
@@ -628,7 +661,7 @@ def train_step(params, static, optimizer, opt_state, batch, loss_params, schedul
     return params, opt_state, loss, loss_noreg
 
 
-def build_trainable_filter(model):
+def build_trainable_filter(model, train_selfn=False):
     # start with the always-non-trainable names
     non_trainable_names = set(["scale"])
 
@@ -649,6 +682,10 @@ def build_trainable_filter(model):
 
     # produce the boolean filter pytree (True -> trainable)
     def filter_fn(path, leaf):
+        # If train_selfn is False, then model.selfn and its leaves are not trained.
+        if not train_selfn and path and isinstance(path[0], GetAttrKey) and path[0].name == 'log_selection_function_model':
+            return False
+
         final_key = path[-1]
         if isinstance(final_key, GetAttrKey):
             name = final_key.name
@@ -674,6 +711,8 @@ def train_potential(
     checkpoint_frequency_epochs: int = 10,
     loss_params: Dict = None,
     loss_history={'train': [], 'val': [], 'train_noreg': [], 'val_noreg': [], 'lr': []},
+    train_selfn=False,
+    reset_lr=False
 ):
     """
     Fits a gravitational potential and optionally a frameshift.
@@ -686,6 +725,7 @@ def train_potential(
         df_data["eta"][:, n_dim:],
         df_data["df_deta"][:, :n_dim],
         df_data["df_deta"][:, n_dim:],
+        df_data["f"]
     )
 
     n_val = int(validation_frac * n_samples)
@@ -697,7 +737,7 @@ def train_potential(
     # First we collect a list of every non-trainable parameter based on the _trainable flag
     # The way it's currently set up can be vulnerable to edge cases where there are multiple
     # parameters which have the same name...
-    filter_spec = build_trainable_filter(model)
+    filter_spec = build_trainable_filter(model, train_selfn=train_selfn)
     params, static = eqx.partition(model, filter_spec=filter_spec)
 
     opt_state = optimizer.init(params)
@@ -710,6 +750,8 @@ def train_potential(
     print(f"Number of epochs: {n_epochs}, Total training samples: {n_train}")
     start_epoch = len(loss_history['lr'])
     step = start_epoch * steps_per_epoch  # Continue from previous step if resuming
+    if reset_lr:
+        step = 0
 
     for epoch in (pbar := trange(n_epochs)):
         key, subkey = jax.random.split(key)
@@ -773,7 +815,7 @@ def train_potential(
             break
 
     model = eqx.combine(params, static)
-    model.save(loss_history) # We don't increment checkpoint_index here
+    model = model.save(loss_history)
     return model, loss_history
 
 
@@ -786,3 +828,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# TODO: Right now the code crashes when loading a model with selection function in it.

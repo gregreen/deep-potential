@@ -653,8 +653,8 @@ class VectorField(eqx.Module):
                 key, input_dim, width, depth,
                 sh_max_l=params["sh_max_l"],
                 time_embedding_dim=time_emb_dim,
-                pos_mean=params["pos_mean"],
-                pos_std=params["pos_std"],
+                pos_mean=jnp.array(params["pos_mean"]),
+                pos_std=jnp.array(params["pos_std"]),
                 normalize_SH=params.get("normalize_SH", False),
                 include_SH=params.get("include_SH", True),
                 include_r2=params.get("include_r2", False)
@@ -662,8 +662,8 @@ class VectorField(eqx.Module):
         elif model_type == "SHRadialEmbeddingResMLP":
             self.dynamics_net = SHRadialEmbeddingResMLP(
                 key, input_dim, width, depth,
-                pos_mean=params["pos_mean"],
-                pos_std=params["pos_std"],
+                pos_mean=jnp.array(params["pos_mean"]),
+                pos_std=jnp.array(params["pos_std"]),
                 sh_max_l=params["sh_max_l"],
                 time_embedding_dim=time_emb_dim,
                 num_radial=params["pos_emb_num_radial"],
