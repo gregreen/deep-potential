@@ -142,11 +142,11 @@ class PlummerSphere(object):
             Velocities of sampled particles.
         """
         r = self.sample_r(n, r_max=r_max, rng=rng)
-        x = r[:,None] * draw_from_sphere(n)
+        x = r[:,None] * draw_from_sphere(n, rng=rng)
 
         psi = self.psi(r)
         v = np.sqrt(psi) * self._v_sampler(n, rng=rng)
-        v = v[:,None] * draw_from_sphere(n)
+        v = v[:,None] * draw_from_sphere(n, rng=rng)
 
         return x, v
 
