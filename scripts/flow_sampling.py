@@ -106,7 +106,7 @@ def calculate_gradients(eta, flow_list, attrs_list, grad_batch_size=500):
 
             if attrs_list[i]["has_spatial_cut"]:
                 print(f'Flow {i+1} has spatial cut. Applying it to gradients and probabilities.')
-                # Replace all out-of-bounds values with np.nan. That way, np.nanmedian ignores them.
+                # Replace all out-of-bounds values with np.nan. That way, np.nanmean ignores them.
                 idx = utils.get_index_of_points_inside_attrs(eta, attrs_list[i])
                 df_deta[~idx] = np.nan
                 prob[~idx] = np.nan
@@ -117,16 +117,95 @@ def calculate_gradients(eta, flow_list, attrs_list, grad_batch_size=500):
     return f_list, df_deta_list
 
 
+def std(x, axis=None):
+    # return percentile based std
+    return 0.5 * (np.nanpercentile(x, 84, axis=axis) - np.nanpercentile(x, 16, axis=axis))
+
+
+def robust_mean(data, sigma=5.0, max_iter=5, axis=None, use_mad=True):
+    """
+    Compute a robust mean by sigma-clipping outliers along a given axis.
+
+    Parameters
+    ----------
+    data : array_like
+        Input array.
+    sigma : float, optional
+        Clipping threshold in standard deviations. Default is 5.
+    max_iter : int, optional
+        Maximum number of iterations. Default is 5.
+    axis : int or None, optional
+        Axis along which to compute the mean. If None, flatten the array.
+    use_mad : bool, optional
+        If True, use median/MAD for robust scale estimation.
+        If False, use mean/std.
+
+    Returns
+    -------
+    clipped_mean : ndarray
+        Robust mean computed along the specified axis.
+    mask : ndarray (bool)
+        Boolean mask of values kept (same shape as input).
+    """
+    data = np.asanyarray(data, dtype=float)
+    mask = np.isfinite(data)
+
+    # Initialize working copy
+    clipped = np.where(mask, data, np.nan)
+
+    for _ in range(max_iter):
+        if use_mad:
+            center = np.nanmedian(clipped, axis=axis, keepdims=True)
+            scale = 1.4826 * np.nanmedian(np.abs(clipped - center), axis=axis, keepdims=True)
+        else:
+            center = np.nanmean(clipped, axis=axis, keepdims=True)
+            scale = np.nanstd(clipped, axis=axis, keepdims=True)
+
+        # Avoid division by zero
+        scale = np.where(scale == 0, np.nan, scale)
+
+        new_mask = np.abs(clipped - center) <= sigma * scale
+        new_mask &= np.isfinite(clipped)
+
+        # Stop if mask is unchanged
+        if np.all(new_mask == mask):
+            break
+
+        mask = new_mask
+        clipped = np.where(mask, data, np.nan)
+
+    # Compute final robust mean
+    clipped_mean = np.nanmean(clipped, axis=axis)
+
+    return clipped_mean, mask
+
+
 def combine_gradients(f_list, df_data_list):
     """
-    Returns the combined gradients and probabilities over multiple flows. We do this 
-    by taking the median of the gradients and probabilities at each point, ignoring
+    Returns the combined gradients and probabilities over multiple flows. We do this
+    by taking the mean of the gradients and probabilities at each point, ignoring
     out-of-bounds values (which are already set to np.nan).
-    """
-    f = np.nanmedian(f_list, axis=0)
-    df_deta = np.nanmedian(df_data_list, axis=0)
 
-    return f, df_deta
+    Before combining the flows, we perform outlier rejection based on how similar the flows are to
+    the, initial, averaged flow. This is done by calculating the standard deviation of the deviation
+    of the densities from the averaged density, and rejecting the flows which deviate too much.
+    """
+
+    f_best = np.nanmean(f_list, axis=0)
+    df_deta_best = np.nanmean(df_data_list, axis=0)
+
+    std_f = std(np.stack(f_list, axis=1) / f_best[:, None] - 1, axis=0)
+    deviation = std_f / np.nanmedian(std_f)
+    threshold = 1.15  # Reject flows that deviate more than this factor times the median deviation
+    idx_rejected = deviation > threshold
+    n_rejected = np.sum(idx_rejected)
+    print(f'Rejecting {n_rejected} out of {f_list.shape[0]} flows based on deviation threshold {threshold}.')
+    print(f'Rejected flows: {np.where(idx_rejected)[0]}')
+
+    f_best = robust_mean(f_list[~idx_rejected], axis=0)[0]
+    df_deta_best = robust_mean(df_data_list[~idx_rejected], axis=0)[0]
+
+    return f_best, df_deta_best
 
 
 def sample_and_differentiate_from_different_flows(

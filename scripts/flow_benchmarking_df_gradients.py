@@ -15,13 +15,85 @@ def load_flow_samples(filename):
 
 
 def get_bins(data, n_bins=50):
-    min_val, max_val = np.percentile(data, [10, 90])
+    min_val, max_val = np.nanpercentile(data, [10, 90])
     return np.linspace(min_val, max_val, n_bins)
 
 
 def std(x, axis=None):
     # return percentile based std
-    return 0.5 * (np.percentile(x, 84, axis=axis) - np.percentile(x, 16, axis=axis))
+    return 0.5 * (np.nanpercentile(x, 84, axis=axis) - np.nanpercentile(x, 16, axis=axis))
+
+
+def plot_df_gradients_comparison(df_datas, df_data_reference, block_size, fig_dir, fig_fmt=('png',)):
+    """
+    Generates and saves a plot of the cyclic differences of gradients of the
+    distribution function, styled after flow_benchmarking.py.
+
+    Args:
+        df_datas (list): A list of dictionaries, each containing 'eta', 'df_deta',
+                         and 'f' arrays for a flow.
+        df_data_reference (dict): A dictionary containing 'eta', 'df_deta',
+                                  and 'f' arrays for the reference distribution.
+        block_size (int, optional): The number of consecutive flows to average
+                                    before computing cyclic differences. Defaults to 1.
+        output_filename (str or Path, optional): The path to save the output plot image.
+                                                 Defaults to 'df_gradients_cyclic_comparison.png'.
+    """
+    df_datas_reduced = []
+    for i in range(0, len(df_datas), block_size):
+        df_datas_reduced.append({
+            'f': np.mean(np.stack([x['f'] for x in df_datas[i:i + block_size]], axis=1), axis=1),
+            'df_deta': np.mean(np.stack([x['df_deta'] for x in df_datas[i:i + block_size]], axis=2), axis=2),
+        })
+
+    delta_f = []
+    for i in range(len(df_datas_reduced)):
+        x_ref = df_data_reference
+        x = df_datas_reduced[i]
+
+        delta_f.append({
+            'f': x_ref['f'] / x['f'] - 1,
+            'df_deta': x['df_deta'] / x_ref['df_deta'] - 1,
+        })
+
+    fig = plt.figure(figsize=(9, 9), layout='compressed')
+    gs = GridSpec(3, 3, figure=fig)
+
+    ax_top = fig.add_subplot(gs[0, :])
+    axs = [ax_top] + [fig.add_subplot(gs[r, c]) for r in range(1, 3) for c in range(3)]
+
+    # Plot for the mean of df_deta
+    df = np.stack([x['f'] for x in delta_f], axis=-1)
+    std_df = std(df, axis=0)
+    ax = axs[0]
+    for i in range(df.shape[1]):
+        ax.hist(df[:,i], bins=get_bins(df.flatten()), histtype='step', density=True)
+    ax.set_title(f'Mean Standard Deviation = {std_df.mean():.3f}')
+    ax.set_xlabel(r'$\Delta f / f$')
+
+
+    labels = ['x', 'y', 'z', 'v_x', 'v_y', 'v_z']
+    for j in range(6):
+        df_deta_dim = np.stack([x['df_deta'][:,j] for x in delta_f], axis=1)
+        std_df_deta_dim = std(df_deta_dim, axis=0)
+        ax = axs[1 + j]
+        for i in range(len(df_datas_reduced)):
+            ax.hist(df_deta_dim[:,i], bins=get_bins(df_deta_dim.flatten()), histtype='step', density=True)
+        ax.set_title(f'Mean Std Dev = {std_df_deta_dim.mean():.3f}')
+        ax.set_xlabel(f'$\Delta(\partial f / \partial {labels[j]}) / (\partial f / \partial {labels[j]})$')
+
+    for ax in axs:
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+        ax.yaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+        ax.grid(which='both', alpha=0.2)
+
+    plt.suptitle(f'Difference between block-averaged gradients (averaged over k={block_size} flows) and reference flow')
+
+    if fig_dir is not None:
+        for fmt in fig_fmt:
+            fname = fig_dir / f'k={block_size}_reference_df_gradients_comparison.{fmt}'
+            fig.savefig(fname, dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
 
 def plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=('png',)):
@@ -40,6 +112,7 @@ def plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=(
     df_datas_reduced = []
     for i in range(0, len(df_datas), block_size):
         df_datas_reduced.append({
+            'f': np.mean(np.stack([x['f'] for x in df_datas[i:i + block_size]], axis=1), axis=1),
             'df_deta': np.mean(np.stack([x['df_deta'] for x in df_datas[i:i + block_size]], axis=2), axis=2),
         })
 
@@ -50,6 +123,7 @@ def plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=(
         x_n = df_datas_reduced[i_n]
 
         delta_f_cyclic.append({
+            'f': x_n['f'] / x['f'] - 1,
             'df_deta': x_n['df_deta'] / x['df_deta'] - 1,
         })
 
@@ -60,13 +134,13 @@ def plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=(
     axs = [ax_top] + [fig.add_subplot(gs[r, c]) for r in range(1, 3) for c in range(3)]
 
     # Plot for the mean of df_deta
-    df = np.stack([x['df_deta'] for x in delta_f_cyclic], axis=-1).mean(axis=1)
+    df = np.stack([x['f'] for x in delta_f_cyclic], axis=-1)
     std_df = std(df, axis=0)
     ax = axs[0]
     for i in range(df.shape[1]):
         ax.hist(df[:,i], bins=get_bins(df.flatten()), histtype='step', density=True)
     ax.set_title(f'Mean Standard Deviation = {std_df.mean():.3f}')
-    ax.set_xlabel(r'$\Delta f$')
+    ax.set_xlabel(r'$\Delta f / f$')
 
 
     labels = ['x', 'y', 'z', 'v_x', 'v_y', 'v_z']
@@ -77,7 +151,7 @@ def plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=(
         for i in range(len(df_datas_reduced)):
             ax.hist(df_deta_dim[:,i], bins=get_bins(df_deta_dim.flatten()), histtype='step', density=True)
         ax.set_title(f'Mean Std Dev = {std_df_deta_dim.mean():.3f}')
-        ax.set_xlabel(f'$\Delta(\partial f / \partial {labels[j]})$')
+        ax.set_xlabel(f'$\Delta(\partial f / \partial {labels[j]}) / (\partial f / \partial {labels[j]})$')
 
     for ax in axs:
         ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
@@ -117,6 +191,18 @@ if __name__ == '__main__':
         help='Filename pattern(s) to load the individual flow gradients from. Can be a glob pattern.'
     )
     parser.add_argument(
+        '--reference-df-grads-fname',
+        type=str,
+        required=False,
+        default=None,
+        help='Filename to load a reference flow gradient from.'
+    )
+    parser.add_argument(
+        '--no-cyclic-comparison',
+        action='store_true',
+        help='If set, do not generate the cyclic comparison plots.'
+    )
+    parser.add_argument(
         '--fig-dir',
         type=str,
         default='.',
@@ -142,5 +228,11 @@ if __name__ == '__main__':
     # Select powers of two that remain at least two times smaller than n_grads
     block_sizes = [2**i for i in range(int(np.log2(n_grads))) if 2**i * 2 <= n_grads]
 
-    for block_size in block_sizes:
-        plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=('png',))
+    if args.no_cyclic_comparison is not None:
+        for block_size in block_sizes:
+            plot_df_gradients_cyclic_comparison(df_datas, block_size, fig_dir, fig_fmt=('png',))
+
+    if args.reference_df_grads_fname is not None:
+        ref_data = load_flow_samples(args.reference_df_grads_fname)
+        for block_size in block_sizes:
+            plot_df_gradients_comparison(df_datas, ref_data, block_size, fig_dir, fig_fmt=('png',))
