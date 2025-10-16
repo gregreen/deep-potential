@@ -533,10 +533,9 @@ def main():
         time_logger.start('Flow sampling')
         # Cut the flow samples to the limits specified by the attributes in 
         # training data. Supports one flow
-        df_data = flow_sampling.sample_from_different_flows(
-            jax.random.key(params["Phi"]["seed"]),
-            [flow],
-            [attrs],
+        df_data = flow_sampling.sample_and_differentiate_from_different_flows(
+            flow_list=[flow],
+            attrs_list=[attrs],
             **params["flow_sampling"]
         )
         time_logger.stop('Flow sampling')

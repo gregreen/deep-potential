@@ -84,7 +84,7 @@ def sample_from_different_flows(
 def calculate_gradients(eta, flow_list, attrs_list, grad_batch_size=500):
     # Do ceiling divide
     # https://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python
-    print("Sampling gradients of eta..")
+    print("Calculating gradients of eta..")
     n_batches = -(-len(eta) // grad_batch_size)
     df_deta_list = np.zeros((len(flow_list),) + eta.shape, dtype="f4")
     f_list = np.zeros((len(flow_list), len(eta)), dtype="f4")
@@ -190,26 +190,28 @@ def combine_gradients(f_list, df_data_list):
     the, initial, averaged flow. This is done by calculating the standard deviation of the deviation
     of the densities from the averaged density, and rejecting the flows which deviate too much.
     """
+    if len(f_list) > 1:
+        f_best = np.nanmean(f_list, axis=0)
+        df_deta_best = np.nanmean(df_data_list, axis=0)
 
-    f_best = np.nanmean(f_list, axis=0)
-    df_deta_best = np.nanmean(df_data_list, axis=0)
+        std_f = std(np.stack(f_list, axis=1) / f_best[:, None] - 1, axis=0)
+        deviation = std_f / np.nanmedian(std_f)
+        threshold = 1.15  # Reject flows that deviate more than this factor times the median deviation
+        idx_rejected = deviation > threshold
+        n_rejected = np.sum(idx_rejected)
+        print(f'Rejecting {n_rejected} out of {f_list.shape[0]} flows based on deviation threshold {threshold}.')
+        print(f'Rejected flows: {np.where(idx_rejected)[0]}')
 
-    std_f = std(np.stack(f_list, axis=1) / f_best[:, None] - 1, axis=0)
-    deviation = std_f / np.nanmedian(std_f)
-    threshold = 1.15  # Reject flows that deviate more than this factor times the median deviation
-    idx_rejected = deviation > threshold
-    n_rejected = np.sum(idx_rejected)
-    print(f'Rejecting {n_rejected} out of {f_list.shape[0]} flows based on deviation threshold {threshold}.')
-    print(f'Rejected flows: {np.where(idx_rejected)[0]}')
-
-    f_best = robust_mean(f_list[~idx_rejected], axis=0)[0]
-    df_deta_best = robust_mean(df_data_list[~idx_rejected], axis=0)[0]
-
+        f_best = robust_mean(f_list[~idx_rejected], axis=0)[0]
+        df_deta_best = robust_mean(df_data_list[~idx_rejected], axis=0)[0]
+    else:
+        f_best = f_list[0]
+        df_deta_best = df_data_list[0]
     return f_best, df_deta_best
 
 
 def sample_and_differentiate_from_different_flows(
-    key,
+    seed,
     flow_list,
     attrs_list,
     n_samples,
@@ -221,12 +223,13 @@ def sample_and_differentiate_from_different_flows(
     spatial boundaries. When getting the averaged differentials at a point,
     only flows are counted whose training data are complete in that volume.
     """
-    eta = sample_from_different_flows(key, flow_list, attrs_list, n_samples,
-                                      grad_batch_size, sample_batch_size)
+    key = jax.random.key(seed)
+    eta = sample_from_different_flows(key, flow_list, attrs_list, n_samples, sample_batch_size)
 
     f_list, df_deta_list = calculate_gradients(eta, flow_list, attrs_list, grad_batch_size)
+    # Reshape f_list to be (n_flows, n_samples) such that it works when list length is equal to 1
 
-    f, df_deta = combine_gradients(f_list, df_deta_list)
+    f, df_deta = combine_gradients(np.array(f_list), np.array(df_deta_list))
 
     ret = {"eta": eta, "df_deta": df_deta, "f": f}
     return ret
