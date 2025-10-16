@@ -93,18 +93,35 @@ class FourierTimeMLP(eqx.Module):
 
 
 class ResBlock(eqx.Module):
-    """A standard residual block with two linear layers."""
+    """
+    A residual block of the form x + f(x), where f(x) is a sequence of
+    layer normalization, linear layer, SiLU activation, linear layer.
+    """
     fn: eqx.Module
 
-    def __init__(self, width_size: int, key: PRNGKeyArray):
+    def __init__(self, hidden_size: int, key: PRNGKeyArray):
+        """
+        Initializes the ResBlock with the given hidden size and
+        pseudorandom key.
+
+        Parameters:
+            hidden_size: int, the size of the input and output vectors.
+            key: PRNGKeyArray, a JAX pseudorandom key for parameter
+                 initialization.
+        """
         key1, key2 = jax.random.split(key)
         self.fn = eqx.nn.Sequential([
-            eqx.nn.Linear(width_size, width_size, key=key1),
+            eqx.nn.LayerNorm(hidden_size, use_weight=True, use_bias=True),
+            eqx.nn.Linear(hidden_size, hidden_size, key=key1),
             eqx.nn.Lambda(jax.nn.silu),
-            eqx.nn.Linear(width_size, width_size, key=key2),
+            eqx.nn.Linear(hidden_size, hidden_size, key=key2),
         ])
 
     def __call__(self, x: Array) -> Array:
+        """
+        Applies the residual block to input x.
+        The output has the same shape as x.
+        """
         return x + self.fn(x)
 
 
