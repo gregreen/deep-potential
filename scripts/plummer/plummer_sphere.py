@@ -76,9 +76,10 @@ def draw_from_sphere(n, rng=None):
     return np.stack([x,y,z], axis=1)
 
 
-class PlummerSphere(object):
+class UnitPlummerSphere(object):
     """
-    Plummer sphere distribution function.
+    Unit Plummer sphere distribution function,
+    with G = M = a = 1.
     """
 
     def __init__(self):
@@ -97,6 +98,13 @@ class PlummerSphere(object):
         return 1 / np.sqrt(1 + r**2)
 
     def phi(self, r):
+        """
+        Gravitational potential at radius r.
+
+        Note
+        ----
+        φ(r) = -ψ(r), where ψ(r) is the relative potential.
+        """
         return -self.psi(r)
 
     def rho(self, r):
@@ -170,3 +178,205 @@ class PlummerSphere(object):
         v2 = np.sum(v**2, axis=1)
         E = self.psi(r) - 0.5*v2
         return self.df_norm * np.clip(E, 0., np.inf)**(7/2)
+    
+    def mass_enclosed(self, r):
+        """
+        Mass enclosed within radius r.
+
+        Parameters
+        ----------
+        r : ndarray
+            Radii at which to evaluate the enclosed mass.
+        
+        Returns
+        -------
+        M : ndarray
+            Enclosed mass at the given radii.
+        """
+        return r**3 / (1 + r**2)**(3/2)
+    
+    def v_escape(self, r):
+        """
+        Escape velocity at radius r.
+
+        Parameters
+        ----------
+        r : ndarray
+            Radii at which to evaluate the escape velocity.
+        
+        Returns
+        -------
+        v_esc : ndarray
+            Escape velocity at the given radii.
+        """
+        return np.sqrt(2 * self.psi(r))
+
+    def total_mass(self):
+        """
+        Total mass of the unit Plummer sphere (1 by definition).
+
+        Returns
+        -------
+        M_total : float
+            Total mass.
+        """
+        return 1.
+
+
+class PlummerSphere(object):
+    """
+    Plummer sphere distribution function with arbitrary
+    mass and scale radius.
+    
+    Instantiates a UnitPlummerSphere, and scales the outputs
+    accordingly, using the following transformations:
+    
+      x' = k x,
+      v' = gamma v,
+
+    which then imply
+
+      f(x', v') = f(x, v) / (k^3 gamma^3),
+      Phi(r') = gamma^2 Phi(r),
+      rho(r') = (gamma/k)^2 rho(r),
+      M(<r') = k gamma^2 M(<r).
+
+    These transformations ensure that the new distribution function
+    and potential satisfy the collisionless Boltzmann equation.
+    """
+
+    def __init__(self, k, gamma):
+        self.unit_plummer = UnitPlummerSphere()
+        self.k = k
+        self.gamma = gamma
+        self.df_rescale = 1 / (k**3 * gamma**3)
+        self.rho_rescale = 1 / k**3
+        self.phi_rescale = gamma**2
+        self.mass_rescale = k * gamma**2
+    
+    @classmethod
+    def from_mass_scale(cls, M, a):
+        """
+        Constructs a Plummer sphere from total mass and scale radius.
+
+        Parameters
+        ----------
+        M : float
+            Total mass.
+        a : float
+            Scale radius.
+        """
+        k = a
+        gamma = np.sqrt(M / a)
+        return cls(k, gamma)
+
+    @classmethod
+    def from_density_scale(cls, rho_0, a):
+        """
+        Constructs a Plummer sphere from central density and scale radius.
+
+        Parameters
+        ----------
+        rho_0 : float
+            Central density.
+        a : float
+            Scale radius.
+        """
+        k = a
+        gamma = a * np.sqrt(4*np.pi*rho_0/3)
+        return cls(k, gamma)
+
+    def psi(self, r):
+        return self.unit_plummer.psi(r / self.k) * self.phi_rescale
+    
+    def phi(self, r):
+        return -self.psi(r)
+    
+    def rho(self, r):
+        return self.unit_plummer.rho(r / self.k) * self.rho_rescale
+    
+    def energy(self, x, v):
+        r = np.sqrt(np.sum(x**2, axis=1))
+        v2 = np.sum(v**2, axis=1)
+        return 0.5*v2 + self.phi(r)
+
+    def df(self, x, v):
+        """
+        Evaluates the distribution function at given positions and velocities.
+        """
+        return self.df_rescale * self.unit_plummer.df(x/self.k, v/self.gamma)
+
+    def sample_r(self, n, r_max=None, rng=None):
+        # If r_max is provided, scale it to unit system for the parent sampler,
+        # then rescale the sampled radii back to physical units by multiplying with self.k.
+        r_max_scaled = r_max / self.k if r_max is not None else None
+        r = self.unit_plummer.sample_r(n, r_max=r_max_scaled, rng=rng)
+        return r * self.k
+    
+    def sample_df(self, n, r_max=None, rng=None):
+        """
+        Samples n particles from the Plummer sphere distribution function.
+
+        Note
+        ----
+        Positions and velocities are first sampled from the unit Plummer sphere,
+        and then scaled: positions by k, velocities by gamma. The velocity
+        distribution is sampled in unit space and then scaled by gamma.
+
+        Parameters
+        ----------
+        n : int
+            Number of particles to sample.
+        r_max : float, optional
+            Maximum radius to sample. If None, samples from 0 to infinity.
+            Default is None.
+        rng : np.random.Generator, optional
+            Random number generator to use. If None, uses default_rng().
+            Default is None.
+
+        Returns
+        -------
+        x : ndarray, shape (n, 3)
+            Positions of sampled particles.
+        v : ndarray, shape (n, 3)
+            Velocities of sampled particles.
+        """
+        r_max_scaled = r_max / self.k if r_max is not None else None
+        x, v = self.unit_plummer.sample_df(n, r_max=r_max_scaled, rng=rng)
+        x *= self.k
+        v *= self.gamma
+        return x, v
+    
+    def v_escape(self, r):
+        """
+        Escape velocity at radius r for the scaled Plummer sphere.
+
+        Note
+        ----
+        The escape velocity is computed as v_esc(r) = sqrt(2 * psi(r)),
+        where psi(r) is already scaled according to the Plummer sphere's
+        mass and scale radius parameters.
+        """
+        return np.sqrt(2*self.psi(r))
+
+    def mass_enclosed(self, r):
+        """
+        Mass enclosed within radius r for the scaled Plummer sphere.
+
+        Parameters
+        ----------
+        r : float
+            Radius at which to compute the enclosed mass.
+
+        Returns
+        -------
+        M_enc : float
+            Enclosed mass.
+        """
+        return self.unit_plummer.mass_enclosed(r / self.k) * self.mass_rescale
+
+    def mass_total(self):
+        """
+        Total mass of the Plummer sphere.
+        """
+        return 1. * self.mass_rescale # Force copy by multipying by 1.0
