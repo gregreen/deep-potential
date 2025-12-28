@@ -2,35 +2,27 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-
-
 import numpy as np
-import scipy
-import scipy.stats
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib.ticker import AutoMinorLocator, MultipleLocator
-from matplotlib.gridspec import GridSpec
-
-from time import time, sleep
 from pathlib import Path
 import json
 import h5py
-import progressbar
 
-import jax.numpy as jnp
 import jax
+import equinox as eqx
 import optax
 from optax.contrib import reduce_on_plateau
 
 import flow_ot_flow_matching
+import flow_ot_flow_matching_conditional
 import flow_matching
+import flow_matching_conditional
 import utils
 import flow_benchmarking
 import potential_benchmarking
 import flow_sampling
 import potential
 import flow_ot_dataset_loader_maker
+from plummer import plummer_sphere
 
 # limit jax gpu usage to be adaptive
 import os
@@ -54,6 +46,7 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
     Returns:
         tuple: A tuple containing the configured Optax optimizer and the schedule function.
     """
+    global_norm_clip = options_lr.get("global_norm_clip", 1.0)
     if options_lr["type"] == "CosineAnnealing":
         cycle_length = epochs * steps_per_epoch // options_lr["num_cycles"]
         schedule = utils.warmup_cosine_restarts_schedule(
@@ -65,10 +58,9 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
             min_value_ratio=options_lr["lr_factor"]
         )
         optimizer = optax.chain(
-            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.clip_by_global_norm(global_norm_clip),
             optax.radam(schedule)
         )
-        schedule = schedule
     elif options_lr["type"] == "step":
         n_warmup = options_lr["warmup_epochs"] * steps_per_epoch
         warmup_schedule = optax.linear_schedule(
@@ -84,7 +76,7 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
         # Accumulation defines the number of steps per evaluation
         # Patience is the number of evaluation steps before reducing lr
         optimizer = optax.chain(
-            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.clip_by_global_norm(global_norm_clip),
             optax.radam(learning_rate=schedule),
             reduce_on_plateau(
                 factor=0.5,
@@ -105,10 +97,150 @@ def get_optimizer_and_schedule(options_lr, steps_per_epoch, epochs):
             end_value=options_lr["final"]
         )
         optimizer = optax.chain(
-            optax.clip_by_global_norm(options_lr.get("global_norm_clip", 1.0)),
+            optax.clip_by_global_norm(global_norm_clip),
             optax.radam(schedule)
         )
     return optimizer, schedule
+
+
+def train_flow_conditional(
+    data,
+    flow_dir,
+    data_fname=None,
+    training_method="OTFlowMatching",
+    time_scheduler_type="uniform",
+    ot_pairings_opts={},
+    seed=0,
+    validation_frac=0.25,
+    checkpoint_frequency_epochs=-1,
+    spatial_flow_opts={},
+    conditional_velocity_flow_opts={},
+    time_logger=None,
+    reset_flow_lr=False,
+    extra_kw=dict(),
+):
+    """
+    Initializes and trains a normalizing flow model for the distribution function.
+
+    This function sets up the model, data, optimizer, and then calls the main
+    training routine from `flow_ot_flow_matching`.
+
+    Args:
+        data (dict): The training data, containing 'eta' and 'weights'.
+        flow_dir (str): Directory to save the trained model and checkpoints.
+        training_method (str): The type of flow model to train.
+        ot_pairings_opts (dict): Dictionary of the params required for precomputing
+            OT pairings. If empty, OT pairings are not used.
+        time_scheduler_type (str): Type of time scheduler for flow matching.
+        seed (int): Random seed for reproducibility.
+        n_epochs (int): Number of training epochs.
+        batch_size (int): Number of samples per training batch.
+        validation_frac (float): Fraction of data to use for validation.
+        loss_opts (dict): Dictionary for the hyperparameters in the loss function.
+            They mostly control regularization.
+        lr_opts (dict): Dictionary of learning rate options.
+        vector_field_opts (dict): Options for the vector field neural network.
+        time_logger (utils.TimeLogger): Optional logger for timing operations.
+        reset_flow_lr (bool): Whether to reset the learning rate when resuming.
+        checkpoint_frequency_epochs (int): Frequency (in epochs) for saving checkpoints.
+
+    Returns:
+        tuple: A tuple containing the trained flow model and the loss history.
+    """
+    key = jax.random.key(seed)
+
+    train_data, val_data = utils.split_data(data, validation_frac)
+    n_samples = train_data["eta"].shape[0]
+    dim = train_data["eta"].shape[1]
+
+    data_mean = np.mean(train_data["eta"], axis=0)
+    data_std = np.std(train_data["eta"], axis=0)
+    print(f"Using mean: {data_mean}")
+    print(f"       std: {data_std}")
+
+    if training_method == "OTFlowMatching":
+        if ot_pairings_opts == {}:
+            raise ValueError("OT pairings not found, and ot_pairings_opts is empty. Cannot proceed.")
+        # Infer the filename pattern of the OT pairing file based on the data file name
+        ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_spatial_seed{ot_pairings_opts['seed']}"
+
+        # Check if the OT pairing files exist
+        ot_pairings_exist = any(ot_pairings_dir.glob("train_epochs_*_*.npz")) and any(ot_pairings_dir.glob("val_epochs_*_*.npz"))
+        if not ot_pairings_exist:
+            print("OT pairings not found, precomputing them now ...")
+            flow_ot_dataset_loader_maker.make_ot_dataloader(
+                data_fname=data_fname,
+                **ot_pairings_opts
+            )
+            print("OT pairings precomputation done.")
+
+    # NormalizingFlow is a wrapper around a flowjax flow which itself is equipped with
+    # a base distribution and a bijection.
+    # The bijection is made up of an affine component responsible for data normalization,
+    # then a vector field that integrates the source distribution to the target, and finally
+    # an affine layer that inverts the first transformation.
+    # We optimize the middle vector field using flow matching.
+    key, subkey = jax.random.split(key)
+
+    # Initalize the flow model
+    # The spatial model needs the position mean and std for spherical harmonics
+    spatial_flow_opts["vector_field_opts"]["pos_mean"], spatial_flow_opts["vector_field_opts"]["pos_std"] = data_mean[:dim//2].tolist(), data_std[:dim//2].tolist()
+    flow_model = flow_ot_flow_matching_conditional.ConditionalPhaseSpaceFlow(
+        key=subkey,
+        data_mean=data_mean,
+        data_std=data_std,
+        spatial_vf_params=spatial_flow_opts["vector_field_opts"],
+        conditional_vf_params=conditional_velocity_flow_opts["vector_field_opts"],
+        model_dir=flow_dir
+    )
+
+    loss_history = None
+    for i, training_opts in enumerate([spatial_flow_opts, conditional_velocity_flow_opts]):
+        train_ot = training_method == "OTFlowMatching"
+        if i == 0:
+            which_flow = "spatial"
+        else:
+            which_flow = "conditional_velocity"
+            if train_ot:
+                print("Note: OTFlowMatching is only supported for the spatial flow.")
+                train_ot = False
+        loss_opts = training_opts["loss_opts"]
+        lr_opts = training_opts["lr_opts"]
+        n_epochs = training_opts["n_epochs"]
+        batch_size = training_opts["batch_size"]
+
+        optimizer, schedule = get_optimizer_and_schedule(
+            options_lr=lr_opts,
+            steps_per_epoch=n_samples // batch_size,
+            epochs=n_epochs
+        )
+
+        kwargs = dict(
+            key=key, model=flow_model, which_flow=which_flow, optimizer=optimizer, schedule=schedule,
+            schedule_type=lr_opts["type"], lr_final=lr_opts.get("final", None),
+            train_data=train_data, val_data=val_data,
+            norm_mean=data_mean, norm_std=data_std, epochs=n_epochs, batch_size=batch_size,
+            time_scheduler_type=time_scheduler_type, loss_params=loss_opts,
+            time_logger=time_logger, loss_history=loss_history,
+            checkpoint_frequency_epochs=checkpoint_frequency_epochs
+        )
+        if train_ot:
+            ot_pairings_dir = Path(data_fname).parent / "ot_pairings" / f"pairings_{Path(data_fname).stem}_spatial_seed{ot_pairings_opts['seed']}"
+            flow_model, loss_history = flow_ot_flow_matching_conditional.train_ot_flow_matching_model(
+                **kwargs, ot_pairings_dir=ot_pairings_dir, **extra_kw
+            )
+        else:
+            flow_model, loss_history = flow_matching_conditional.train_flow_matching_model(
+                **kwargs, **extra_kw
+            )
+        jax.clear_caches()
+        if loss_history is None:
+            break
+
+    # We decrease the increment of checkpoint index by 1 so the index stays consistent with what's saved on the disk
+    flow_model = eqx.tree_at(lambda m: m.checkpoint_index, flow_model, flow_model.checkpoint_index - 1)
+
+    return flow_model, loss_history
 
 
 def train_flow(
@@ -200,14 +332,6 @@ def train_flow(
         model_dir=flow_dir
     )
 
-    # TODO: Load the latest checkpoint if it exists
-    # # flow_dir defines the directory the flow is in
-    # if type(flow_dir) is not str:
-    #     flow_dir = Path(flow_dir)
-    # # Make sure the directory exists
-    # checkpoint_dir = flow_dir.parent
-    # checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
     # Set up the optimizer
     optimizer, schedule = get_optimizer_and_schedule(
         options_lr=lr_opts,
@@ -263,7 +387,9 @@ def train_potential(
     frameshift_opts=None,
     selection_function_opts=None,
     benchmark_after_first_loop=True,
-    benchmarking_args={}
+    benchmarking_args={},
+    timeout_hours=None,
+    ignore_nobs=False
 ):
     """
     Initializes and trains the gravitational potential model.
@@ -294,21 +420,21 @@ def train_potential(
     # Make the model
     key, subkey = jax.random.split(key)
     n_val = int(validation_frac * n_samples)
-    potential_nn_opts["scale"] = np.std(df_data['eta'][n_val:,:3], axis=0).tolist()
+    scale = np.std(df_data['eta'][:n_samples - n_val,:3], axis=0).tolist()
+    potential_nn_opts["scale"] = scale
+    if selection_function_opts is not None:
+        selection_function_opts["scale"] = scale
     potential_model = potential.PotentialModel(
         subkey, potential_dir, phi_params=potential_nn_opts, frameshift_params=frameshift_opts,
         selection_function_params=selection_function_opts
     )
 
     # We first train without selection function, then with it if applicable.
-    # jobs = [(n_epochs_selfn, True)]
     jobs = []
     if n_epochs_noselfn > 0:
         jobs.append((n_epochs_noselfn, False))
-    if selection_function_opts is not None:
-        selection_function_opts["scale"] = potential_nn_opts["scale"]
-        if n_epochs_selfn > 0:
-            jobs.append((n_epochs_selfn, True))
+    if selection_function_opts is not None and n_epochs_selfn > 0:
+        jobs.append((n_epochs_selfn, True))
 
     for i, (n_epochs, train_selfn) in enumerate(jobs):
         # Set up the optimizer
@@ -329,28 +455,21 @@ def train_potential(
             n_epochs,
             batch_size, validation_frac, checkpoint_frequency_epochs, loss_opts,
             train_selfn=train_selfn,
-            reset_lr=True
+            reset_lr=True,
+            timeout_hours=timeout_hours,
+            ignore_nobs=ignore_nobs,
         )
 
-        if i == 0 and len(jobs) == 2:
-            # Benchmark the intermediate potential if requested
-            if benchmark_after_first_loop:
-                print("Benchmarking the potential after the first training loop ...")
-                spherical_origin = (0, 0, 0)
-                cylindrical_origin = (frameshift_opts.get('r0', 8.277), 0, 0)
-                potential_benchmarking.benchmark_potential(
-                    potential_model, loss_history,
-                    **benchmarking_args,
-                    spherical_origin=spherical_origin, cylindrical_origin=cylindrical_origin,
-                    checkpoint_index=potential_model.checkpoint_index - 1
-                )
     return potential_model, loss_history
 
 
-def load_flow(flow_dir, checkpoint_index=-1, load_history=False):
+def load_flow(flow_dir, checkpoint_index=-1, load_history=False, old_style=False):
     # Loads a trained NormalizingFlow model from a specified directory.
     # This currently assumes that the input dimension is 6
-    flow_model, loss_history = flow_ot_flow_matching.NormalizingFlow.load(Path(flow_dir), load_index=checkpoint_index, load_history=load_history)
+    if old_style:
+        flow_model, loss_history = flow_ot_flow_matching.NormalizingFlow.load(Path(flow_dir), load_index=checkpoint_index, load_history=load_history)
+    else:
+        flow_model, loss_history = flow_ot_flow_matching_conditional.ConditionalPhaseSpaceFlow.load(Path(flow_dir), load_index=checkpoint_index, load_history=load_history)
     if load_history:
         return flow_model, loss_history
     return flow_model
@@ -419,9 +538,21 @@ def main():
         help="Filename for the mask for the potential. The mask is in distance - healpix format.",
     )
     parser.add_argument(
+        "--plummer-mask-p-min",
+        type=float,
+        required=False,
+        default=0,
+        help="Minimum observation probability for the volume of validity with Plummer Sphere",
+    )
+    parser.add_argument(
         "--potential-training",
         action="store_true",
         help="Train the potential. If not set, the potential is loaded from potential-dir.",
+    )
+    parser.add_argument(
+        '--potential-ignore-nobs',
+        action="store_true",
+        help='If set, only fit the potential using f(v | x).',
     )
     parser.add_argument(
         "--flow-training",
@@ -437,6 +568,23 @@ def main():
         "--basic-flow-benchmarking",
         action="store_true",
         help="Whether to compute basic flow benchmarks after the flow training is finished.",
+    )
+    parser.add_argument(
+        "--basic-flow-benchmarking-n-samples",
+        type=int,
+        default=100000,
+        help="Number of samples to use for basic flow benchmarking.",
+    )
+    parser.add_argument(
+        "--basic-flow-benchmarking-skip-loss-calculation",
+        action="store_true",
+        help="Whether to skip the loss calculation during basic flow benchmarking.",
+    )
+    parser.add_argument(
+        "--basic-flow-benchmarking-fig-fmt",
+        nargs="+",
+        default=["png",],
+        help="File formats to save basic flow benchmarking figures in.",
     )
     parser.add_argument(
         "--basic-potential-benchmarking",
@@ -497,7 +645,8 @@ def main():
         # Train and save normalizing flows
         print("Training normalizing flows ...")
         time_logger.start('Flow training')
-        flow, loss_history = train_flow(
+        # TODO: Made the flow training conditional. In the future, we will phase out the old code for train_flow
+        flow, loss_history = train_flow_conditional(
             data, flow_dir, args.input, **params["df"],
             reset_flow_lr=args.reset_flow_lr,
             time_logger=time_logger
@@ -517,7 +666,13 @@ def main():
         spherical_origin = (0, 0, 0)
         benchmarking_r0 = params["df"].pop('benchmarking_r0', 8.277)
         cylindrical_origin = (benchmarking_r0, 0, 0)
-        flow_benchmarking.benchmark(flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac), loss_history, spherical_origin, cylindrical_origin)
+        flow_benchmarking.benchmark(
+            flow, jax.random.key(0), time_logger, *utils.split_data(data, validation_frac),
+            loss_history, spherical_origin, cylindrical_origin,
+            n_samples=args.basic_flow_benchmarking_n_samples,
+            skip_loss_calculation=args.basic_flow_benchmarking_skip_loss_calculation,
+            fig_fmt=args.basic_flow_benchmarking_fig_fmt
+        )
 
     # Exit if nothing else needs to be done
     if not args.flow_sampling and not args.potential_training and not args.basic_potential_benchmarking:
@@ -531,9 +686,9 @@ def main():
         # Sample from the flows and calculate gradients
         print("Sampling from flows ...")
         time_logger.start('Flow sampling')
-        # Cut the flow samples to the limits specified by the attributes in 
+        # Cut the flow samples to the limits specified by the attributes in
         # training data. Supports one flow
-        df_data = flow_sampling.sample_and_differentiate_from_different_flows(
+        df_data = flow_sampling.sample_and_calculate_log_prob_derivatives(
             flow_list=[flow],
             attrs_list=[attrs],
             **params["flow_sampling"]
@@ -544,8 +699,22 @@ def main():
 
     # ================= Applying a spatial mask ================
     if args.potential_mask is not None:
-        # Update df_data to include only the data within the mask
-        mask = utils.get_mask_eta(df_data["eta"], args.potential_mask)[0]
+        if args.plummer_mask_p_min > 0:
+            # Assume that this is a Plummer Sphere with dust
+            # args.potential_mask is assumed to contain the file name of the dustmap
+            # The plummer sphere has spatial and velocity scaled up by 10 from unity, and a sharp cut-off at r=8
+            print(f"Applying Plummer Sphere mask with p_min = {args.plummer_mask_p_min} ... from dust map {args.potential_mask}")
+            plummer = plummer_sphere.PlummerSphereSelfn(
+                k=10, gamma=10, r_max=8.0,
+                dustmap_fname=args.potential_mask,
+                dustmap_n_samples=1024*1024
+            )
+            p_obs = plummer.p_obs(df_data["eta"][:, :3])
+            mask = p_obs >= args.plummer_mask_p_min
+        else:
+            # Update df_data to include only the data within the mask
+            print(f"Applying potential mask from {args.potential_mask} ...")
+            mask = utils.get_mask_eta(df_data["eta"], args.potential_mask)[0]
         df_data["eta"] = df_data["eta"][mask]
         df_data["df_deta"] = df_data["df_deta"][mask]
         if "f" in df_data:
@@ -561,6 +730,7 @@ def main():
             df_data,
             potential_dir,
             **params["Phi"],
+            ignore_nobs=args.potential_ignore_nobs,
             benchmark_after_first_loop=args.basic_potential_benchmarking,
             benchmarking_args=dict(fname_mask=args.potential_mask, data_train=data, attrs_train=attrs, df_data=df_data,
                                    is_gaia=args.basic_potential_benchmarking_gaia_units),
@@ -574,6 +744,8 @@ def main():
             potential_dir, load_history=True
         )
         fname_mask = args.potential_mask
+        if args.plummer_mask_p_min > 0:
+            fname_mask = None
         spherical_origin = (0, 0, 0)
         cylindrical_origin = (
             params['Phi'].get('frameshift_opts', {'r0': 8.277})['r0'],

@@ -248,8 +248,8 @@ def precompute_ot_indices(
     print(f"Saved index arrays with shape: {final_x0.shape}")
 
 
-def make_ot_dataloader(data_fname: str, epochs: int, batch_size: int, batch_size_storing_epochs: int, 
-                       num_workers: int, seed: int):
+def make_ot_dataloader(data_fname: str, epochs: int, batch_size: int, batch_size_storing_epochs: int,
+                       num_workers: int, seed: int, spatial_only: bool):
     """
     Pre-computes Optimal Transport (OT) pairings for generative modeling, see
     https://arxiv.org/abs/2302.00482.
@@ -277,7 +277,10 @@ def make_ot_dataloader(data_fname: str, epochs: int, batch_size: int, batch_size
     data_fname = Path(data_fname)
 
     save_dir = data_fname.parent / "ot_pairings"
-    ot_pairings_dir = save_dir / f"pairings_{data_fname.stem}_seed{seed}"
+    if spatial_only:
+        ot_pairings_dir = save_dir / f"pairings_{data_fname.stem}_spatial_seed{seed}"
+    else:
+        ot_pairings_dir = save_dir / f"pairings_{data_fname.stem}_full_seed{seed}"
     ot_pairings_dir.mkdir(parents=True, exist_ok=True)
     train_output_fname_prefix = ot_pairings_dir / "train"
     val_output_fname_prefix = ot_pairings_dir / "val"
@@ -290,9 +293,14 @@ def make_ot_dataloader(data_fname: str, epochs: int, batch_size: int, batch_size
     print(f"  Batch size for storing epochs: {batch_size_storing_epochs}")
     print(f"  Number of parallel workers: {num_workers}")
     print(f"  Random seed: {seed}\n")
+    print(f"  Spatial only: {spatial_only}\n")
 
     # Assuming load_and_split_data might return JAX arrays
     train_data, val_data = utils.load_and_split_data(path=data_fname, val_split=0.25)
+    if spatial_only:
+        print("Using only spatial dimensions for OT matching (ignoring velocities).")
+        train_data['eta'] = train_data['eta'][:, :3]
+        val_data['eta'] = val_data['eta'][:, :3]
     #train_data['weights'] = np.ones_like(train_data['weights'])
 
     # Convert to NumPy for JAX-free processing
@@ -335,7 +343,10 @@ if __name__ == "__main__":
         python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_400pc_lite.npz --epochs 2000 --batch-size-storing-epochs 2000 --num-workers 40 --seed 0
         python flow_ot_dataset_loader_maker.py --data-fname ../runs/plummer_no_selfn/data/plummer_sphere.h5 --epochs 1500 --batch-size-storing-epochs 1500 --num-workers 30 --seed 0
         python flow_ot_dataset_loader_maker.py --data-fname ../data/simple_datasets/data_1000pc_corner.npz --epochs 10 --batch-size-storing-epochs 10 --num-workers 1 --seed 0
-        python flow_ot_dataset_loader_maker.py --data-fname ../data/gdr3_pad_sph_v3/sph_1000pc.h5 --epochs 500 --batch-size-storing-epochs 50 --num-workers 25 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/gdr3_pad_sph_v3/sph_1000pc.h5 --epochs 500 --batch-size-storing-epochs 50 --num-workers 25 --seed 0 --spatial-only
+        python flow_ot_dataset_loader_maker.py --data-fname data/plummer_sphere_allstars.h5 --epochs 2048 --batch-size-storing-epochs 256 --num-workers 20 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/plummer_1m/plummer_sphere_obsstars_v2.h5 --epochs 2048 --batch-size-storing-epochs 256 --num-workers 40 --seed 0
+        python flow_ot_dataset_loader_maker.py --data-fname ../data/gdr3_pad_sph_v4/sph_1000pc.h5 --epochs 500 --batch-size-storing-epochs 50 --num-workers 25 --seed 0 --spatial-only
     """
     parser = argparse.ArgumentParser(description="Precompute OT pairings between a noise distribution (x0) and a dataset (x1).")
     parser.add_argument("--data-fname", type=str, default="", help="Dataset file name.")
@@ -344,6 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size-storing-epochs", type=int, default=1000, help="Batch size the number of epochs to save on disk.")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers to use.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for JAX key generation.")
+    parser.add_argument("--spatial-only", action="store_true", help="Use only spatial dimensions for OT matching (ignores velocities).")
     args = parser.parse_args()
 
     make_ot_dataloader(
@@ -352,5 +364,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         batch_size_storing_epochs=args.batch_size_storing_epochs,
         num_workers=args.num_workers,
-        seed=args.seed
+        seed=args.seed,
+        spatial_only=args.spatial_only,
     )

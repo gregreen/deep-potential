@@ -14,8 +14,15 @@ from pathlib import Path
 import glob
 
 
-def value_and_grad_fn(model, eta_batch):
+def value_and_grad_lnf_fn(model, eta_batch):
+    """Calculates the value and gradient of the log probability of the full phase space."""
     return jax.vmap(eqx.filter_value_and_grad(model.log_prob))(eta_batch)
+
+
+def value_and_grad_lnp_fn(model, eta_batch):
+    """Calculates the value and gradient of the log probability of the velocity given position.
+    The velocity gradient is identical to the gradient of the full log probability."""
+    return jax.vmap(eqx.filter_value_and_grad(model.log_prob_velocity_given_position))(eta_batch)
 
 
 def sample_from_different_flows(
@@ -81,40 +88,58 @@ def sample_from_different_flows(
     return eta
 
 
-def calculate_gradients(eta, flow_list, attrs_list, grad_batch_size=500):
-    # Do ceiling divide
-    # https://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python
-    print("Calculating gradients of eta..")
+def calculate_log_prob_and_derivatives(eta, flow_list, attrs_list, grad_batch_size=500):
+    """
+    Calculates lnf, dlnf/deta, and dlnp/deta for a given sample of phase-space points eta.
+    """
+    print("Calculating log probabilities and their derivatives..")
     n_batches = -(-len(eta) // grad_batch_size)
-    df_deta_list = np.zeros((len(flow_list),) + eta.shape, dtype="f4")
-    f_list = np.zeros((len(flow_list), len(eta)), dtype="f4")
+    dlnf_deta_list = np.zeros((len(flow_list),) + eta.shape, dtype="f4")
+    lnf_list = np.zeros((len(flow_list), len(eta)), dtype="f4")
+    dlnp_deta_list = np.zeros((len(flow_list),) + eta.shape, dtype="f4")
+    lnp_list = np.zeros((len(flow_list), len(eta)), dtype="f4")
 
-    with tqdm(total=n_batches * len(flow_list), desc="Calculating f, df/deta") as pbar:
+    with tqdm(total=n_batches * len(flow_list), desc="Calculating lnf, lnp, dlnf/deta, dlnp/deta") as pbar:
         for i, flow in enumerate(flow_list):
-            df_deta = []
-            prob = []
+            dlnf_deta = []
+            lnf = []
+            dlnp_deta = []
+            lnp = []
             for k in range(n_batches):
                 eta_batch = eta[k * grad_batch_size: (k + 1) * grad_batch_size]
-                logp_batch, dlogp_deta_batch = value_and_grad_fn(flow, eta_batch)
-                prob.append(np.exp(logp_batch))
-                df_deta.append(dlogp_deta_batch * np.exp(logp_batch)[:, None])
+
+                # Calculate lnf and dlnf_deta
+                lnf_batch, dlnf_deta_batch = value_and_grad_lnf_fn(flow, eta_batch)
+                lnf.append(lnf_batch)
+                dlnf_deta.append(dlnf_deta_batch)
+
+                # Calculate dlnp_deta
+                lnp_batch, dlnp_deta_batch = value_and_grad_lnp_fn(flow, eta_batch)
+                lnp.append(lnp_batch)
+                dlnp_deta.append(dlnp_deta_batch)
 
                 pbar.update(1)
 
-            df_deta = np.concatenate([np.array(b) for b in df_deta])
-            prob = np.concatenate([np.array(b) for b in prob])
+            dlnf_deta = np.concatenate([np.array(b) for b in dlnf_deta])
+            lnf = np.concatenate([np.array(b) for b in lnf])
+            dlnp_deta = np.concatenate([np.array(b) for b in dlnp_deta])
+            lnp = np.concatenate([np.array(b) for b in lnp])
 
             if attrs_list[i]["has_spatial_cut"]:
-                print(f'Flow {i+1} has spatial cut. Applying it to gradients and probabilities.')
+                print(f'Flow {i+1} has spatial cut. Applying it to gradients and log probabilities.')
                 # Replace all out-of-bounds values with np.nan. That way, np.nanmean ignores them.
                 idx = utils.get_index_of_points_inside_attrs(eta, attrs_list[i])
-                df_deta[~idx] = np.nan
-                prob[~idx] = np.nan
+                dlnf_deta[~idx] = np.nan
+                lnf[~idx] = np.nan
+                dlnp_deta[~idx] = np.nan
+                lnp[~idx] = np.nan
 
-            df_deta_list[i] = df_deta
-            f_list[i] = prob
+            dlnf_deta_list[i] = dlnf_deta
+            lnf_list[i] = lnf
+            dlnp_deta_list[i] = dlnp_deta
+            lnp_list[i] = lnp
 
-    return f_list, df_deta_list
+    return lnf_list, dlnf_deta_list, lnp_list, dlnp_deta_list
 
 
 def std(x, axis=None):
@@ -149,6 +174,7 @@ def robust_mean(data, sigma=5.0, max_iter=5, axis=None, use_mad=True):
     """
     data = np.asanyarray(data, dtype=float)
     mask = np.isfinite(data)
+    n0 = np.sum(mask)
 
     # Initialize working copy
     clipped = np.where(mask, data, np.nan)
@@ -156,10 +182,10 @@ def robust_mean(data, sigma=5.0, max_iter=5, axis=None, use_mad=True):
     for _ in range(max_iter):
         if use_mad:
             center = np.nanmedian(clipped, axis=axis, keepdims=True)
-            scale = 1.4826 * np.nanmedian(np.abs(clipped - center), axis=axis, keepdims=True)
+            scale = 1.4826 * np.nanmedian(np.abs(clipped - center), axis=axis, keepdims=True) + 1e-8
         else:
             center = np.nanmean(clipped, axis=axis, keepdims=True)
-            scale = np.nanstd(clipped, axis=axis, keepdims=True)
+            scale = np.nanstd(clipped, axis=axis, keepdims=True) + 1e-8
 
         # Avoid division by zero
         scale = np.where(scale == 0, np.nan, scale)
@@ -176,41 +202,56 @@ def robust_mean(data, sigma=5.0, max_iter=5, axis=None, use_mad=True):
 
     # Compute final robust mean
     clipped_mean = np.nanmean(clipped, axis=axis)
+    n1 = np.sum(mask)
+    print(f'Robust mean: {100 * (1 - n1 / n0):.3f}% outliers removed.')
+    return clipped_mean
 
-    return clipped_mean, mask
 
-
-def combine_gradients(f_list, df_data_list):
+def combine_log_prob_and_derivatives(lnf_list, dlnf_deta_list, lnp_list, dlnp_deta_list):
     """
-    Returns the combined gradients and probabilities over multiple flows. We do this
-    by taking the mean of the gradients and probabilities at each point, ignoring
+    Returns the combined gradients and log probabilities over multiple flows. We do this
+    by taking the mean of the gradients and log probabilities at each point, ignoring
     out-of-bounds values (which are already set to np.nan).
 
     Before combining the flows, we perform outlier rejection based on how similar the flows are to
     the, initial, averaged flow. This is done by calculating the standard deviation of the deviation
-    of the densities from the averaged density, and rejecting the flows which deviate too much.
+    of the log densities from the averaged log density, and rejecting the flows which deviate too much.
     """
-    if len(f_list) > 1:
-        f_best = np.nanmean(f_list, axis=0)
-        df_deta_best = np.nanmean(df_data_list, axis=0)
+    if len(lnf_list) > 1:
+        # Initial robust average to find a baseline
+        lnf_best = robust_mean(lnf_list, axis=0)
 
-        std_f = std(np.stack(f_list, axis=1) / f_best[:, None] - 1, axis=0)
-        deviation = std_f / np.nanmedian(std_f)
+        # Deviation is calculated in log space
+        deviation = std(np.stack(lnf_list, axis=1) - lnf_best[:, None], axis=0)
+
+        # Normalize deviation to be comparable across phase space
+        median_deviation = np.nanmedian(deviation)
+        if median_deviation > 0:
+            deviation /= median_deviation
+
         threshold = 1.15  # Reject flows that deviate more than this factor times the median deviation
         idx_rejected = deviation > threshold
         n_rejected = np.sum(idx_rejected)
-        print(f'Rejecting {n_rejected} out of {f_list.shape[0]} flows based on deviation threshold {threshold}.')
+        print(f'Rejecting {n_rejected} out of {lnf_list.shape[0]} flows based on deviation threshold {threshold}.')
         print(f'Rejected flows: {np.where(idx_rejected)[0]}')
 
-        f_best = robust_mean(f_list[~idx_rejected], axis=0)[0]
-        df_deta_best = robust_mean(df_data_list[~idx_rejected], axis=0)[0]
+        # Create a masked array to perform the final robust mean
+        # We mask entire flows, not individual points
+        lnf_best = robust_mean(lnf_list[~idx_rejected], axis=0)
+        dlnf_deta_best = robust_mean(dlnf_deta_list[~idx_rejected], axis=0)
+        lnp_best = robust_mean(lnp_list[~idx_rejected], axis=0)
+        dlnp_deta_best = robust_mean(dlnp_deta_list[~idx_rejected], axis=0)
+
     else:
-        f_best = f_list[0]
-        df_deta_best = df_data_list[0]
-    return f_best, df_deta_best
+        lnf_best = lnf_list[0]
+        lnp_best = lnp_list[0]
+        dlnf_deta_best = dlnf_deta_list[0]
+        dlnp_deta_best = dlnp_deta_list[0]
+
+    return lnf_best, dlnf_deta_best, lnp_best, dlnp_deta_best
 
 
-def sample_and_differentiate_from_different_flows(
+def sample_and_calculate_log_prob_derivatives(
     seed,
     flow_list,
     attrs_list,
@@ -219,19 +260,17 @@ def sample_and_differentiate_from_different_flows(
     sample_batch_size=5000,
 ):
     """
-    Returns a combined sample from different flows, while respecting their own
-    spatial boundaries. When getting the averaged differentials at a point,
-    only flows are counted whose training data are complete in that volume.
+    Samples from different flows, calculates log probabilities and their derivatives,
+    and combines them.
     """
     key = jax.random.key(seed)
     eta = sample_from_different_flows(key, flow_list, attrs_list, n_samples, sample_batch_size)
 
-    f_list, df_deta_list = calculate_gradients(eta, flow_list, attrs_list, grad_batch_size)
-    # Reshape f_list to be (n_flows, n_samples) such that it works when list length is equal to 1
+    lnf_list, dlnf_deta_list, lnp_list, dlnp_deta_list = calculate_log_prob_and_derivatives(eta, flow_list, attrs_list, grad_batch_size)
 
-    f, df_deta = combine_gradients(np.array(f_list), np.array(df_deta_list))
+    lnf, dlnf_deta, lnp, dlnp_deta = combine_log_prob_and_derivatives(np.array(lnf_list), np.array(dlnf_deta_list), np.array(lnp_list), np.array(dlnp_deta_list))
 
-    ret = {"eta": eta, "df_deta": df_deta, "f": f}
+    ret = {"eta": eta, "dlnf_deta": dlnf_deta, "lnf": lnf, "lnp": lnp, "dlnp_deta": dlnp_deta}
     return ret
 
 
@@ -351,16 +390,16 @@ if __name__ == "__main__":
                 print(f'Calculating gradients for flow {i+1}/{n_flows}')
                 params = utils.load_params(args.params)
                 grad_batch_size = params['flow_sampling']['grad_batch_size']
-                f_list, df_deta_list = calculate_gradients(eta, [flow_list[i]], [attrs_list[i]], grad_batch_size)
+                lnf_list, dlnf_deta_list, lnp_list, dlnp_deta_list = calculate_log_prob_and_derivatives(eta, [flow_list[i]], [attrs_list[i]], grad_batch_size)
 
-                print(f'Saving gradients to {df_grads_fname}')
-                fit_all.save_df_data({'eta': eta, 'f': f_list[0], 'df_deta': df_deta_list[0]}, df_grads_fname)
+                print(f'Saving derivatives to {df_grads_fname}')
+                fit_all.save_df_data({'eta': eta, 'lnf': lnf_list[0], 'dlnf_deta': dlnf_deta_list[0], 'lnp': lnp_list[0], 'dlnp_deta': dlnp_deta_list[0]}, df_grads_fname)
 
     # 4. Combine gradients from flows. Save the combined gradients
     if args.df_grads_final_fname is not None:
         df_grads_final_fname = Path(args.df_grads_final_fname)
         if not df_grads_final_fname.exists():
-            if 'f_list' not in locals() or 'df_deta_list' not in locals():
+            if 'lnf_list' not in locals() or 'dlnf_deta_list' not in locals() or 'lnp_list' not in locals() or 'dlnp_deta_list' not in locals():
                 if args.df_grads_fname_pattern is None:
                     raise ValueError("If df_grads_final_fname is specified, df_grads_fname_pattern must also be specified.")
                 print(f'Loading in individual gradients from {args.df_grads_fname_pattern}')
@@ -368,23 +407,29 @@ if __name__ == "__main__":
                 if len(df_grads_fname_list) != n_flows:
                     raise ValueError("Number of files matching df_grads_fname_pattern must be equal to number of flows.")
 
-                f_list = []
-                df_deta_list = []
+                lnf_list = []
+                dlnf_deta_list = []
+                lnp_list = []
+                dlnp_deta_list = []
                 for i in range(n_flows):
                     df_grads_fname = Path(df_grads_fname_list[i])
                     if not df_grads_fname.exists():
                         raise ValueError(f"File {df_grads_fname} does not exist.")
                     df_data = utils.load_flow_samples(df_grads_fname)
-                    f_list.append(df_data['f'])
-                    df_deta_list.append(df_data['df_deta'])
+                    lnf_list.append(df_data['lnf'])
+                    dlnf_deta_list.append(df_data['dlnf_deta'])
+                    lnp_list.append(df_data['lnp'])
+                    dlnp_deta_list.append(df_data['dlnp_deta'])
                     if i == 0:
                         eta = df_data['eta']
-                f_list = np.array(f_list)
-                df_deta_list = np.array(df_deta_list)
+                lnf_list = np.array(lnf_list)
+                dlnf_deta_list = np.array(dlnf_deta_list)
+                lnp_list = np.array(lnp_list)
+                dlnp_deta_list = np.array(dlnp_deta_list)
 
             print('Combining gradients')
-            f, df_deta = combine_gradients(f_list, df_deta_list)
+            lnf, dlnf_deta, lnp, dlnp_deta = combine_log_prob_and_derivatives(lnf_list, dlnf_deta_list, lnp_list, dlnp_deta_list)
 
             print(f'Saving combined gradients to {df_grads_final_fname}')
             df_grads_final_fname.parent.mkdir(parents=True, exist_ok=True)
-            fit_all.save_df_data({'eta': eta, 'f': f, 'df_deta': df_deta}, df_grads_final_fname)
+            fit_all.save_df_data({'eta': eta, 'lnf': lnf, 'dlnf_deta': dlnf_deta, 'lnp': lnp, 'dlnp_deta': dlnp_deta}, df_grads_final_fname)

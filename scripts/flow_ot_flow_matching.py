@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import jax
 from jaxtyping import Array, Float, PRNGKeyArray
-from jax.tree_util import tree_map_with_path, GetAttrKey
 from typing import Optional, Dict, Any
 
 import flowjax.distributions as flowjax_dist
@@ -20,6 +19,7 @@ import bisect
 
 import flow_vector_fields as fvf
 import utils
+from flow_ot_flow_matching_conditional import uniform_scheduler, power_law_scheduler, logit_normal_scheduler, get_time_scheduler, custom_filter_spec
 
 
 class NormalizingFlow(eqx.Module):
@@ -83,7 +83,6 @@ class NormalizingFlow(eqx.Module):
 
         self.metadata = {
             'creation_date': datetime.now().isoformat(),
-            'training_epochs': 0,
             'vector_field_type': str(self.flow).splitlines(),
             'input_dim': dim,
             'num_parameters': self.count_parameters(),
@@ -137,7 +136,7 @@ class NormalizingFlow(eqx.Module):
 
         # Save loss
         if loss_history is not None:
-            utils.plot_loss_new(loss_history, Path(self.model_dir) / f"{name_prefix}-{self.checkpoint_index}_loss.pdf")
+            utils.plot_loss(loss_history, Path(self.model_dir) / f"{name_prefix}-{self.checkpoint_index}_loss.pdf")
 
         # Increment checkpoint_index
         return eqx.tree_at(lambda tree: tree.checkpoint_index, self, self.checkpoint_index + 1)
@@ -405,33 +404,6 @@ def train_step(params, static, opt_state, key, x0, x1, weights, optimizer, time_
     return params, opt_state, loss, global_grad_norm
 
 
-# ----------------- Time Schedulers -----------------
-
-
-def uniform_scheduler(key, shape):
-    """Standard uniform sampling for t."""
-    return jax.random.uniform(key, shape)
-
-
-def power_law_scheduler(key, shape, p=2.0):
-    """
-    Samples t according to a power law: t = u^(1/p).
-    p > 1.0 weighs t=1 more heavily (e.g., p=2.0 for a sqrt distribution of u).
-    """
-    u = jax.random.uniform(key, shape)
-    return u**(1 / p)
-
-
-def logit_normal_scheduler(key, shape, mu=0.0, sigma=1.0):
-    """
-    Logit-Normal sampling, which concentrates samples around t=0.5.
-    """
-    u = jax.random.uniform(key, shape)
-    # Use the inverse CDF of the normal distribution (percent point function)
-    x = jax.scipy.stats.norm.ppf(u, loc=mu, scale=sigma)
-    return jax.scipy.special.expit(x)
-
-
 # ----------------- Main Training Function -----------------
 
 def train_ot_flow_matching_model(
@@ -453,6 +425,7 @@ def train_ot_flow_matching_model(
     time_logger=None,
     loss_history={'train': [], 'val': [], 'lr': []},
     checkpoint_frequency_epochs=-1,
+    timeout_hours=None,
 ):
     # Normalize data for training.
     train_x = (train_data['eta'] - norm_mean) / norm_std
@@ -471,24 +444,9 @@ def train_ot_flow_matching_model(
     path_val_ot = ot_pairings_dir / "val_epochs"
     x0_x1_val_indices_loader = PrecomputedOTDataLoader(path_val_ot, n=n_val, x1_data=val_x, w1_weights=val_weights)
 
-    if time_scheduler_type == "uniform":
-        time_scheduler = uniform_scheduler
-    elif time_scheduler_type == "power_law":
-        time_scheduler = power_law_scheduler
-    elif time_scheduler_type == "logit_normal":
-        time_scheduler = logit_normal_scheduler
+    time_scheduler = get_time_scheduler(time_scheduler_type)
 
     # --- Partition Model into trainable/non-trainable parts and initialize the optimizer ---
-    def custom_filter_spec(model):
-        def filter_fn(path, leaf):
-            final_key = path[-1]
-            if isinstance(final_key, GetAttrKey):
-                # Treat pos_mean and pos_std as non-trainable (static)
-                if final_key.name in ["pos_mean", "pos_std"]:
-                    return False
-            # Treat all other JAX arrays as trainable parameters
-            return isinstance(leaf, jax.Array)
-        return tree_map_with_path(filter_fn, model)
     params, static = eqx.partition(dynamics_net, filter_spec=custom_filter_spec(dynamics_net))
 
     opt_state = optimizer.init(params)
@@ -524,6 +482,7 @@ def train_ot_flow_matching_model(
         if time_logger is not None:
             time_logger.stop("Training | setup")
 
+        avg_train_loss = 0.0
         epoch_w = 0.0 # avg training loss is the weighted average
         epoch_lr = []
         epoch_global_grad_norms = []
@@ -571,6 +530,7 @@ def train_ot_flow_matching_model(
 
         # Calculate validation loss
         key, key_loop = jax.random.split(key)
+        avg_val_loss = 0.0
         val_w = 0.0
         if time_logger is not None:
             time_logger.start("Training | val")
@@ -606,6 +566,16 @@ def train_ot_flow_matching_model(
         if schedule_type == "step" and loss_history['lr'][-1] < lr_final:
             print("Early stopping triggered.")
             break
+
+        # If ETA is too long, break
+        if timeout_hours is not None:
+            elapsed_time = pbar.format_dict["elapsed"]
+            # Only do this after a minute
+            if elapsed_time > 60:
+                estimated_total_time = (elapsed_time / (epoch - start_epoch + 1)) * (epochs - start_epoch)
+                if estimated_total_time > timeout_hours * 3600:
+                    print("Timeout limit reached, stopping training.")
+                    return model, loss_history
 
     dynamics_net = eqx.combine(params, static)
     model = eqx.tree_at(lambda m: m.flow.bijection[0].dynamics_net, model, dynamics_net)
