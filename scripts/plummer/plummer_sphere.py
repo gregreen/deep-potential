@@ -101,6 +101,13 @@ class UnitPlummerSphere:
         return 1 / jnp.sqrt(1 + r**2)
 
     def phi(self, r):
+        """
+        Gravitational potential at radius r.
+
+        Note
+        ----
+        φ(r) = -ψ(r), where ψ(r) is the relative potential.
+        """
         return -self.psi(r)
 
     def rho(self, r):
