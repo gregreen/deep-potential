@@ -1,4 +1,5 @@
 from __future__ import print_function, division
+from typing import Optional, Tuple, Dict, Any, Union, List
 
 import matplotlib.colors as colors
 import matplotlib.ticker as ticker
@@ -6,6 +7,7 @@ import matplotlib.ticker as ticker
 import json
 import glob
 import numpy as np
+import numpy.typing as npt
 import scipy.ndimage
 import pandas as pd
 import os
@@ -15,6 +17,11 @@ import time
 
 import matplotlib.pyplot as plt
 from tqdm.auto import trange, tqdm
+
+# Type aliases for common array types
+ArrayLike = npt.NDArray[np.floating[Any]]
+IntArrayLike = npt.NDArray[np.integer[Any]]
+BoolArrayLike = npt.NDArray[np.bool_]
 
 
 def warmup_cosine_restarts_schedule(
@@ -94,7 +101,10 @@ class TimeLogger:
         return self.times.get(key, default_value)
 
 
-def load_training_data(fname, cut_attrs=False):
+def load_training_data(
+    fname: Union[str, Path],
+    cut_attrs: bool = False
+) -> Tuple[Dict[str, ArrayLike], Dict[str, Any]]:
     """
     Loads in the training data, in the form of a (n, d)-dimensional numpy array
     where n is the number of datapoints and d the dimensionality. The attributes,
@@ -105,50 +115,17 @@ def load_training_data(fname, cut_attrs=False):
     datapoints due to upsampling, usually in order to account for the non-
     uniformity of the selection function).
 
-    Inputs:
-        fnanme (str): File path to be loaded in. Specifies a hdf5 group
-        cut_attrs (bool): Whether the data should be cut to obey the spatial
+    Args:
+        fname: File path to be loaded in. Specifies a hdf5 group.
+        cut_attrs: Whether the data should be cut to obey the spatial
             extent specified by attrs. This is relevant when handling padded
             data (padding is done for helping flow training by avoiding sharp
             cut-offs).
+
+    Returns:
+        Tuple of (data dict, attrs dict). Data contains 'eta' and optionally
+        'weights', 'eta_train', 'eta_val', 'weights_train', 'weights_val'.
     """
-    def get_inside_index(eta, attrs):
-        # Don't perform a cut if there are no attrs
-        if attrs == {}:
-            return np.ones(len(eta), dtype=bool)
-
-        # Cuts eta based on attrs
-        r2 = np.sum(eta[:, :3] ** 2, axis=1)
-        R2 = np.sum(eta[:, :2] ** 2, axis=1)
-        r = r2**0.5
-        R = R2**0.5
-        z = eta[:, 2]
-
-        if "volume_type" not in attrs or attrs["volume_type"] == "sphere":
-            if "r_out" in attrs:
-                r_out = attrs["r_out"]
-            else:
-                r_out = 1 / attrs["parallax_min"]
-            if "r_in" in attrs:
-                r_in = attrs["r_in"]
-            else:
-                r_in = 1 / attrs["parallax_max"]
-            idx = (r2 > r_in**2) & (r2 < r_out**2)
-        elif attrs["volume_type"] == "cylinder":
-            R_out, H_out = attrs["R_out"], attrs["H_out"]
-            if "r_in" in attrs:
-                r_in = attrs["r_in"]
-                idx = (r >= r_in) & (R <= R_out) & (np.abs(z) <= H_out)
-            if ("R_in" in attrs) and ("H_in" in attrs):
-                R_in, H_in = attrs["R_in"], attrs["H_in"]
-                idx = (
-                    ((R >= R_in) | (np.abs(z) >= H_in)) &
-                    (R <= R_out) &
-                    (np.abs(z) <= H_out)
-                )
-
-        return idx
-
     _, ext = os.path.splitext(fname)
     attrs = None
     data = {}
@@ -171,14 +148,14 @@ def load_training_data(fname, cut_attrs=False):
 
             if cut_attrs:
                 if "weights" in data:
-                    data["weights"] = data["weights"][get_inside_index(data["eta"], attrs)]
+                    data["weights"] = data["weights"][get_index_of_points_inside_attrs(data["eta"], attrs)]
                 if "weights_train" in data and "weights_val" in data:
-                    data["weights_train"] = data["weights_train"][get_inside_index(data["eta_train"], attrs)]
-                    data["weights_val"] = data["weights_val"][get_inside_index(data["eta_val"], attrs)]
+                    data["weights_train"] = data["weights_train"][get_index_of_points_inside_attrs(data["eta_train"], attrs)]
+                    data["weights_val"] = data["weights_val"][get_index_of_points_inside_attrs(data["eta_val"], attrs)]
                 if "eta_train" in data and "eta_val" in data:
-                    data["eta_train"] = data["eta_train"][get_inside_index(data["eta_train"], attrs)]
-                    data["eta_val"] = data["eta_val"][get_inside_index(data["eta_val"], attrs)]
-                data["eta"] = data["eta"][get_inside_index(data["eta"], attrs)]
+                    data["eta_train"] = data["eta_train"][get_index_of_points_inside_attrs(data["eta_train"], attrs)]
+                    data["eta_val"] = data["eta_val"][get_index_of_points_inside_attrs(data["eta_val"], attrs)]
+                data["eta"] = data["eta"][get_index_of_points_inside_attrs(data["eta"], attrs)]
 
             attrs["has_spatial_cut"] = True if attrs != {} else False
             attrs["n"] = len(data["eta"])
@@ -286,11 +263,14 @@ def load_flow_samples(fname, recalc_avg=None, attrs_to_cut_by=None):
     return d
 
 
-def get_model_values(phi_model, q_eval,
-                     batch_size=131072,
-                     fname=None,
-                     disable_tqdm=False,
-                     convert_rho_to_msunpc3=True):
+def get_model_values(
+    phi_model: Any,
+    q_eval: ArrayLike,
+    batch_size: int = 131072,
+    fname: Optional[Union[str, Path]] = None,
+    disable_tqdm: bool = False,
+    convert_rho_to_msunpc3: bool = True
+) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
     """
     Calculate the potential, acceleration and density implied by the
     differentiable model of the potential. If specified, the results are saved to a file
@@ -300,14 +280,16 @@ def get_model_values(phi_model, q_eval,
     is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
     (100 km/s)^2/kpc
 
-    Parameters:
-        phi_model (dict): The model of the potential to be used.
-        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the potential
-        fig_dir (str): The directory where the data is to be saved
-        fname (str): The name of the file where the data is to be saved
-        batch_size (int): The batch size to be used when evaluating the model
-        disable_tqdm (bool): Whether to disable the tqdm progress bar
-        convert_rho_to_msunpc3 (bool): Whether to convert the density to M_sun/pc^3
+    Args:
+        phi_model: The model of the potential to be used.
+        q_eval: An array of shape (n, 3) specifying where to evaluate the potential.
+        batch_size: The batch size to be used when evaluating the model.
+        fname: The name of the file where the data is to be saved.
+        disable_tqdm: Whether to disable the tqdm progress bar.
+        convert_rho_to_msunpc3: Whether to convert the density to M_sun/pc^3.
+
+    Returns:
+        Tuple of (phis, accs, rhos) arrays.
     """
     import jax
     import jax.numpy as jnp
@@ -379,36 +361,37 @@ def get_selfn_values(selfn_model, q_eval,
                      fname=None,
                      disable_tqdm=False,):
     """
-    Calculate the selection function implied by the model.
+    Calculate the selection function and its gradients implied by the model.
     If specified, the results are saved to a file in a subdirectory of fig_dir,
     named data.
     Currently, the spatial dimension is expected to be in units of kpc
-    and velocity dimension 100 km/s. By default, the conversion factor for rho
-    is chosen for it to return density in M_sun/pc^3. Acceleration is in units of
-    (100 km/s)^2/kpc
+    and velocity dimension 100 km/s.
 
     Parameters:
         selfn_model (eqx.Module): The model of the selection function to be used.
         q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the selection function
-        fig_dir (str): The directory where the data is to be saved
         fname (str): The name of the file where the data is to be saved
         batch_size (int): The batch size to be used when evaluating the model
         disable_tqdm (bool): Whether to disable the tqdm progress bar
-        convert_rho_to_msunpc3 (bool): Whether to convert the density to M_sun/pc^3
     """
     import jax
     import jax.numpy as jnp
     import equinox as eqx
 
     @eqx.filter_jit
-    def calc_selfn(selfn, q):
-        return jnp.exp(selfn(q))
+    def calc_selfn_derivatives(selfn_func, q):
+        """Calculates selection function and its gradient at q."""
+        log_selfn = selfn_func(q)
+        selfn = jnp.exp(log_selfn)
+        dlog_selfn_dq = jax.grad(selfn_func)(q)
 
-    # If selfn_model is an instance of class PotentialModel, then extract the selfn function
+        return selfn, dlog_selfn_dq
+
+    # If selfn_model is an instance of class with log_selection_function_model, extract it
     if hasattr(selfn_model, 'log_selection_function_model'):
         selfn_model = selfn_model.log_selection_function_model
     # vmap the function w.r.t. q
-    jit_calc_selfn = jax.vmap(calc_selfn, in_axes=(None, 0))
+    jit_selfn_derivs = jax.vmap(calc_selfn_derivatives, in_axes=(None, 0))
 
     n0 = len(q_eval)
 
@@ -419,23 +402,58 @@ def get_selfn_values(selfn_model, q_eval,
 
     if fname is None or (fname is not None and not fname.exists()):
         selfns = []
+        grads = []
 
         for i in (pbar := tqdm(range(0, n0, batch_size), disable=disable_tqdm)):
             b = q_eval[i: i + batch_size]
 
-            selfns.append(jit_calc_selfn(selfn_model, b))
+            selfn, dlog_selfn_dq = jit_selfn_derivs(selfn_model, b)
+            selfns.append(selfn)
+            grads.append(dlog_selfn_dq)
 
             pbar.set_description("Calculating selfn values")
         selfns = np.concatenate(selfns)
+        grads = np.concatenate(grads)
         if fname is not None:
             # Make sure save_path directory exists
             fname.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(fname, selfn=selfns)
+            np.savez(fname, selfn=selfns, grad=grads)
     else:
         npzfile = np.load(fname)
         selfns = npzfile['selfn']
+        grads = npzfile['grad']
 
-    return selfns
+    return selfns, grads
+
+
+def get_n_values(selfn_model, q_eval,
+                 batch_size=131072,
+                 fname=None,
+                 disable_tqdm=False,):
+    """
+    Calculates the n(x) implied by the selfn_model and its gradients.
+    selfn_model and Phi must have been trained with the --potential-ignore-nobs flag,
+    i.e. by only fitting with p(v | x) and not n(x). In that case, selfn_model is a 
+    proxy for n(x) via the relation n(x) \propto 1 / selfn(x).
+    selfn_model is used that it's a proxy for n(x) due to the way it's set up
+
+    Parameters:
+        selfn_model (eqx.Module): The model of the selection function to be used.
+        q_eval (np.ndarray): An array of shape (n, 3) specifying where to evaluate the selection function
+        fname (str): The name of the file where the data is to be saved
+        batch_size (int): The batch size to be used when evaluating the model
+        disable_tqdm (bool): Whether to disable the tqdm progress bar
+    """
+    selfns, grads = get_selfn_values(selfn_model, q_eval,
+                                     batch_size=batch_size,
+                                     fname=fname,
+                                     disable_tqdm=disable_tqdm)
+
+    n_vals = 1 / selfns
+    dlog_selfn_dq = grads
+    dn_dq = -n_vals[:, None] * dlog_selfn_dq
+
+    return n_vals, dn_dq
 
 
 def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
@@ -461,135 +479,7 @@ def clipped_vector_mean(v_samp, clip_threshold=5, rounds=5, **kwargs):
     return v_mean
 
 
-def plot_loss(train_loss_hist, val_loss_hist=None, lr_hist=None, smoothing="auto"):
-    """
-    Plots the loss history for the training set (train_loss_hist) and validation set
-    (val_loss_hist) and marks where the learning rate dropped (based on lr_hist)
-    'significantly'. Draws two views, one for the whole history, the other
-    for the last 50%.
-    """
-    if smoothing == "auto":
-        n_smooth = np.clip(len(train_loss_hist) // 16, 4, 128)
-    else:
-        n_smooth = smoothing
-
-    def smooth_time_series(x):
-        w = np.kaiser(2 * n_smooth, 5)
-        w /= np.sum(w)
-        x_conv = scipy.ndimage.convolve(x, w, mode="reflect")
-        return x_conv
-
-    train_loss_conv = smooth_time_series(train_loss_hist)
-    if val_loss_hist is not None:
-        val_loss_conv = smooth_time_series(val_loss_hist)
-
-    n = np.arange(len(train_loss_hist))
-
-    # Detect discrete drops in learning rate
-    if lr_hist is not None:
-        lr_hist = np.array(lr_hist)
-        lr_ratio = lr_hist[lr_hist > 0][1:] / lr_hist[lr_hist > 0][:-1]
-        n_drop = np.where(lr_ratio < 0.95)[0]
-
-    fig, ax_arr = plt.subplots(1, 2, figsize=(8, 4))
-    fig.subplots_adjust(left=0.14, right=0.98, wspace=0.25)
-
-    for i, ax in enumerate(ax_arr):
-        if i == 1:
-            i0 = len(train_loss_hist) // 2
-            train_loss_hist = train_loss_hist[i0:]
-            train_loss_conv = train_loss_conv[i0:]
-            if val_loss_hist is not None:
-                val_loss_hist = val_loss_hist[i0:]
-                val_loss_conv = val_loss_conv[i0:]
-            if lr_hist is not None:
-                lr_hist = lr_hist[i0:]
-            n = n[i0:]
-
-        if lr_hist is not None:
-            for k in n_drop:
-                ax.axvline(k, c="k", alpha=0.1, ls="--")
-
-        (l,) = ax.plot(
-            n, train_loss_hist, alpha=0.1, label=r"$\mathrm{training\ loss}$"
-        )
-        ax.plot(
-            n,
-            train_loss_conv,
-            alpha=0.8,
-            color=l.get_color(),
-            label=r"$\mathrm{training\ loss\ (smoothed)}$",
-        )
-        if val_loss_hist is not None:
-            ax.plot(
-                n,
-                val_loss_conv,
-                alpha=0.8,
-                label=r"$\mathrm{validation\ loss\ (smoothed)}$",
-            )
-
-        ax.set_xlim(n[0], n[-1])
-        if i == 1:
-            # Choose the y-limit as the 2nd and 98th percentile of the training
-            # and validation smoothed loss, with 10% padding
-            limit_percent = 2, 98
-            ylim = np.percentile(train_loss_conv, limit_percent)
-            if val_loss_hist is not None:
-                ylim_val = np.percentile(val_loss_conv, limit_percent)
-                ylim = (min(ylim[0], ylim_val[0]), max(ylim[1], ylim_val[1]))
-            ylim = (
-                ylim[0] - 0.1 * (ylim[1] - ylim[0]),
-                ylim[1] + 0.1 * (ylim[1] - ylim[0]),
-            )
-            ax.set_ylim(*ylim)
-
-        ax.grid("on", which="major", alpha=0.25)
-        ax.grid("on", which="minor", alpha=0.05)
-        ax.set_ylabel(r"$\mathrm{training\ loss}$")
-        ax.set_xlabel(r"$\mathrm{training\ step}$")
-        if i == 0:
-            if val_loss_hist is not None:
-                # Rearrange the legend so validation is above training loss.
-                # This is because validation lines in general are above training
-                # in the plot.
-                handles, labels = ax.get_legend_handles_labels()
-                ax.legend(
-                    [handles[0], handles[2], handles[1]],
-                    [labels[0], labels[2], labels[1]],
-                    loc="upper right",
-                )
-            else:
-                ax.legend(loc="upper right")
-        else:
-            kw = dict(
-                fontsize=8,
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                bbox=dict(boxstyle="round", alpha=0.2, facecolor="white"),
-            )
-            if val_loss_hist is not None:
-                ax.text(
-                    0.95,
-                    0.95,
-                    f"$\mathrm{{validation\ loss\ final\ (smoothed)}} = \
-                        {val_loss_conv[-1]:.4f}$\n$\mathrm{{training\ loss\ \
-                        final\ (smoothed)}} = {train_loss_conv[-1]:.4f}$",
-                    **kw,
-                )
-            else:
-                ax.text(
-                    0.95,
-                    0.95,
-                    f"$\mathrm{{training\ loss\ final\ (smoothed)}} = \
-                        {train_loss_conv[-1]:.4f}$",
-                    **kw,
-                )
-
-    return fig
-
-
-def plot_loss_new(loss_history, fname, final_train_loss=None, final_val_loss=None, share_loss_axis=True, w=10):
+def plot_loss(loss_history, fname, final_train_loss=None, final_val_loss=None, share_loss_axis=True, w=10):
     # Save loss curve
     fig, axs = plt.subplots(2, 1, figsize=(8, 6), layout='compressed')
 
@@ -603,6 +493,10 @@ def plot_loss_new(loss_history, fname, final_train_loss=None, final_val_loss=Non
         final_train_loss = loss_history["train"][-1]
     if final_val_loss is None:
         final_val_loss = loss_history["val"][-1]
+
+    if len(loss_history["train"]) < w:
+        w = 1
+        print(f"not enough values in loss_history to apply smoothing with w={w}, setting w=1")
 
     alpha = 0.8
     for i, ax in enumerate(axs):
@@ -796,7 +690,7 @@ def plot_corr(
     d = y - x
     n, x_edges, _ = np.histogram2d(x, d, range=(xlim, dlim), bins=bins)
 
-    if normalization == None:
+    if normalization is None:
         norm = np.ones(n.shape[0])
     elif normalization == "sum":
         norm = np.sum(n, axis=1) + 1.0e-10
@@ -860,11 +754,31 @@ def hist2d_mean(ax, x, y, c, vmin=None, vmax=None, cmap=None, bins=10, range=Non
     return im
 
 
-def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
+def get_index_of_points_inside_attrs(
+    eta: ArrayLike,
+    attrs: Dict[str, Any],
+    r: Optional[ArrayLike] = None,
+    R: Optional[ArrayLike] = None,
+    z: Optional[ArrayLike] = None
+) -> BoolArrayLike:
     """
     Attrs defines a volume, the inside of which is considered fully complete and is used for training the potential.
     This function returns the index of points which lie inside the volume defined by attrs.
+
+    Args:
+        eta: Array of shape (n, d) with at least 3 columns for x, y, z coordinates.
+        attrs: Dictionary defining the volume. If empty, returns all True.
+        r: Optional precomputed spherical radius.
+        R: Optional precomputed cylindrical radius.
+        z: Optional precomputed height coordinate.
+
+    Returns:
+        Boolean index array of shape (n,).
     """
+    # Don't perform a cut if there are no attrs
+    if not attrs:
+        return np.ones(len(eta), dtype=bool)
+
     if r is None or R is None or z is None:
         r = np.sum(eta[:, :3] ** 2, axis=1) ** 0.5
         R = np.sum(eta[:, :2] ** 2, axis=1) ** 0.5
@@ -894,15 +808,35 @@ def get_index_of_points_inside_attrs(eta, attrs, r=None, R=None, z=None):
     return idx
 
 
-def calc_coords(eta, spherical_origin=(0,0,0), cylindrical_origin=(0,0,0), spherical_vel_origin=(0,0,0), cylindrical_vel_origin=(0,0,0), vector_field=None):
-    """Calculate components in different coordinate systems. If a vector field is specified, then the function
-    returns the components of the vector field in Cartesian, Spherical, and Cylindrical coordinates. This assumes
-    that the positions of the vector fields values are specified by eta (eta is in Cartesian). If vector_field is
-    None, then the function returns the coordinates of eta in different coordinates.
+def calc_coords(
+    eta: ArrayLike,
+    spherical_origin: Tuple[float, float, float] = (0, 0, 0),
+    cylindrical_origin: Tuple[float, float, float] = (0, 0, 0),
+    spherical_vel_origin: Tuple[float, float, float] = (0, 0, 0),
+    cylindrical_vel_origin: Tuple[float, float, float] = (0, 0, 0),
+    vector_field: Optional[ArrayLike] = None
+) -> Dict[str, ArrayLike]:
+    """Calculate components in different coordinate systems.
 
-    Cartesian coordinates: x, y, z, vx, vy, vz
-    Spherical coordiantes: r, cos(theta), phi, v_radial, v_theta (v_phi is missing)
-    Cylindrical coordinates: cyl_R, cyl_z, cyl_phi, cyl_vR, cyl_vz, cyl_vT
+    If a vector field is specified, then the function returns the components of the
+    vector field in Cartesian, Spherical, and Cylindrical coordinates. This assumes
+    that the positions of the vector field values are specified by eta (eta is in Cartesian).
+    If vector_field is None, then the function returns the coordinates of eta in different
+    coordinate systems.
+
+    Args:
+        eta: Phase space coordinates in Cartesian, shape (n, 6).
+        spherical_origin: Origin for spherical coordinate system.
+        cylindrical_origin: Origin for cylindrical coordinate system.
+        spherical_vel_origin: Velocity origin for spherical coordinate system.
+        cylindrical_vel_origin: Velocity origin for cylindrical coordinate system.
+        vector_field: Optional vector field to transform, shape (n, 3).
+
+    Returns:
+        Dictionary with coordinate components:
+        - Cartesian: x, y, z, vx, vy, vz
+        - Spherical: r, cos(theta), phi, v_radial, v_theta
+        - Cylindrical: cylR, cylz, cylphi, cylvR, cylvz, cylvT
     """
     def dot(a, b):
         # a and b are of shape (n, 3)

@@ -187,8 +187,7 @@ def plot_simple_1d_marginal(coords_sample, coords_train, weights_train, *dims, l
 
     if fig_dir is not None:
         for fmt in fig_fmt:
-            fname = fig_dir / f'{fname}.{fmt}'
-            fig.savefig(fname, dpi=200, bbox_inches='tight')
+            fig.savefig(fig_dir / f'{fname}.{fmt}', dpi=200, bbox_inches='tight')
         plt.close(fig)
 
 
@@ -309,14 +308,19 @@ def plot_simple_2d_marginal(coords_sample, coords_train, weights_train, dim1, di
 
     if fig_dir is not None:
         for fmt in fig_fmt:
-            fname = fig_dir / f'sample_density_{dim1}_{dim2}.{fmt}'
-            fig.savefig(fname, dpi=200, bbox_inches='tight')
+            fig.savefig(fig_dir / f'sample_density_{dim1}_{dim2}.{fmt}', dpi=200, bbox_inches='tight')
         plt.close(fig)
 
 
 @eqx.filter_jit
 def batch_loss_fn(model, x_batch, weights_batch):
     log_probs = model.log_prob(x_batch)
+    return jnp.sum(weights_batch * log_probs)
+
+@eqx.filter_jit
+def batch_spatial_loss_fn(model, x_batch, weights_batch):
+    # Assumes shape (n, 3)
+    log_probs = model.log_prob_position(x_batch)
     return jnp.sum(weights_batch * log_probs)
 
 
@@ -362,7 +366,10 @@ def do_plots(coords_sample, coords_train, weights_train, fig_dir, fig_fmt=('png'
     print("Saved 2d sample density plots")
 
 
-def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, spherical_origin=(0.0, 0.0, 0.0), cylindrical_origin=(8.277, 0.0, 0.0), fig_fmt=('png',)):
+def benchmark(
+    flow_model, key, time_logger, train_data, val_data, loss_history, spherical_origin=(0.0, 0.0, 0.0),
+    cylindrical_origin=(8.277, 0.0, 0.0), fig_fmt=('png',), n_samples=100000, skip_loss_calculation=False
+):
     """
     For benchmarking we do the following, while keeping track how much time each
     thing takes:
@@ -382,16 +389,27 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Plot the loss
-    utils.plot_loss_new(loss_history, save_dir / f'flow-{flow_model.checkpoint_index}_loss.png')
+    if loss_history is not None:
+        if 'train_pos' in loss_history and 'val_pos' in loss_history:
+            lh = {'train': loss_history['train_pos'], 'val': loss_history['val_pos'], 'lr': loss_history['lr_pos']}
+            utils.plot_loss(lh, save_dir / f'flow-pos-{flow_model.checkpoint_index}_loss.png')
+            lh = {'train': loss_history['train_vel'], 'val': loss_history['val_vel'], 'lr': loss_history['lr_vel']}
+            utils.plot_loss(lh, save_dir / f'flow-vel-{flow_model.checkpoint_index}_loss.png')
+        else:
+            utils.plot_loss(loss_history, save_dir / f'flow-{flow_model.checkpoint_index}_loss.png')
 
-    batch_size = 5000
+    batch_size = 4096
     grad_batch_size = 500
+    calculate_spatial_loss = hasattr(flow_model, 'log_prob_position')
 
-    if val_data is not None:
+    performance_data = {}
+    fname_performance = save_dir / "performance.json"
+    if val_data is not None and not skip_loss_calculation:
         n_val_batches = (val_data["eta"].shape[0] + batch_size - 1) // batch_size
         print(f"Calculating final validation loss in batches of {batch_size}... (n_batches = {n_val_batches})")
 
         total_weighted_log_prob = 0.0
+        total_weighted_log_prob_spatial = 0.0
         time_logger.start("Benchmarking | Validation Loss Calculation")
         for i in tqdm(range(n_val_batches)):
             start_idx = i * batch_size
@@ -399,21 +417,30 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
             x_batch = val_data["eta"][start_idx:end_idx]
             weights_batch = val_data["weights"][start_idx:end_idx]
             total_weighted_log_prob += batch_loss_fn(flow_model, x_batch, weights_batch)
+            if calculate_spatial_loss:
+                total_weighted_log_prob_spatial += batch_spatial_loss_fn(flow_model, x_batch[:,:3], weights_batch)
         time_logger.stop("Benchmarking | Validation Loss Calculation")
         final_val_loss = (-total_weighted_log_prob / jnp.sum(val_data["weights"])).item()
+        final_val_loss_spatial = None
+        if calculate_spatial_loss:
+            final_val_loss_spatial = (-total_weighted_log_prob_spatial / jnp.sum(val_data["weights"])).item()
+            print(f"Final spatial loss on entire validation set: {final_val_loss_spatial:.6f}")
         dt = time_logger.get_duration("Benchmarking | Validation Loss Calculation")
         print(f"Final loss on entire validation set: {final_val_loss:.6f}  (duration: {dt:.2f} s)")
 
-    performance_data = {"final_val_loss": round(final_val_loss, 6)}
-    fname_performance = save_dir / "performance.json"
-    with open(fname_performance, "w") as f:
-        json.dump(performance_data, f, indent=4)
+        performance_data["final_val_loss"] = round(final_val_loss, 6)
+        if final_val_loss_spatial is not None:
+            performance_data["final_val_loss_spatial"] = round(final_val_loss_spatial, 6)
+            performance_data["final_val_loss_velocity"] = round(final_val_loss - final_val_loss_spatial, 6)
+        with open(fname_performance, "w") as f:
+            json.dump(performance_data, f, indent=4)
 
-    if train_data is not None:
+    if train_data is not None and not skip_loss_calculation:
         n_train_batches = (train_data["eta"].shape[0] + batch_size - 1) // batch_size
         print(f"Calculating final train loss in batches of {batch_size}... (n_batches = {n_train_batches})")
 
         total_weighted_log_prob = 0.0
+        total_weighted_log_prob_spatial = 0.0
         time_logger.start("Benchmarking | Train Loss Calculation")
         for i in tqdm(range(n_train_batches)):
             start_idx = i * batch_size
@@ -421,27 +448,43 @@ def benchmark(flow_model, key, time_logger, train_data, val_data, loss_history, 
             x_batch = train_data["eta"][start_idx:end_idx]
             weights_batch = train_data["weights"][start_idx:end_idx]
             total_weighted_log_prob += batch_loss_fn(flow_model, x_batch, weights_batch)
+            if calculate_spatial_loss:
+                total_weighted_log_prob_spatial += batch_spatial_loss_fn(flow_model, x_batch[:,:3], weights_batch)
         time_logger.stop("Benchmarking | Train Loss Calculation")
         final_train_loss = (-total_weighted_log_prob / jnp.sum(train_data["weights"])).item()
+        final_train_loss_spatial = None
+        if calculate_spatial_loss:
+            final_train_loss_spatial = (-total_weighted_log_prob_spatial / jnp.sum(train_data["weights"])).item()
+            print(f"Final spatial loss on entire train set: {final_train_loss_spatial:.6f}")
         dt = time_logger.get_duration("Benchmarking | Train Loss Calculation")
         print(f"Final loss on entire train set: {final_train_loss:.6f}  (duration: {dt:.2f} s)")
 
-    performance_data["final_train_loss"] = round(final_train_loss, 6)
-    with open(fname_performance, "w") as f:
-        json.dump(performance_data, f, indent=4)
+        performance_data["final_train_loss"] = round(final_train_loss, 6)
+        if final_train_loss_spatial is not None:
+            performance_data["final_train_loss_spatial"] = round(final_train_loss_spatial, 6)
+            performance_data["final_train_loss_velocity"] = round(final_train_loss - final_train_loss_spatial, 6)
+        with open(fname_performance, "w") as f:
+            json.dump(performance_data, f, indent=4)
 
-    n_samples = 100000
     n_batches = n_samples // batch_size
     key, sample_key = jax.random.split(key)
     sample_keys = jax.random.split(sample_key, n_batches)
     print(f"Generating {n_samples} samples in {n_batches} batches of {batch_size}...")
-    time_logger.start("Benchmarking | Sampling")
-    samples = []
-    for i in tqdm(range(n_batches)):
-        samples.append(flow_model.sample(sample_keys[i], batch_size))
-    samples = jnp.concatenate(samples)
-    time_logger.stop("Benchmarking | Sampling")
-    print(f"Sampling {n_samples} points took: {time_logger.get_duration('Benchmarking | Sampling'):.4f} s")
+    fname = save_dir / 'flow_samples.npz'
+    if fname.exists():
+        print(f"Samples file {fname} already exists, skipping sampling.")
+        samples = np.load(fname)['samples']
+        samples = samples[:n_samples]
+    else:
+        time_logger.start("Benchmarking | Sampling")
+        samples = []
+        for i in tqdm(range(n_batches)):
+            samples.append(flow_model.sample(sample_keys[i], batch_size))
+        samples = jnp.concatenate(samples)
+        time_logger.stop("Benchmarking | Sampling")
+        print(f"Sampling {n_samples} points took: {time_logger.get_duration('Benchmarking | Sampling'):.4f} s")
+        print(f"Saving samples to {save_dir / 'flow_samples.npz'}")
+        np.savez(save_dir / 'flow_samples.npz', samples=np.array(samples))
 
     coords_sample = utils.calc_coords(samples, spherical_origin, cylindrical_origin)
     coords_train = utils.calc_coords(train_data["eta"], spherical_origin, cylindrical_origin)

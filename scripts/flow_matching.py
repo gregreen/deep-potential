@@ -1,14 +1,14 @@
 import jax.numpy as jnp
 import jax
 from jaxtyping import Array, Float, PRNGKeyArray
-from jax.tree_util import tree_map_with_path, GetAttrKey
 
 import equinox as eqx
 import optax
 import numpy as np
 from tqdm import trange
 
-from flow_ot_flow_matching import NormalizingFlow, val_loss_fn, train_step, uniform_scheduler, power_law_scheduler, logit_normal_scheduler
+from flow_ot_flow_matching import NormalizingFlow, val_loss_fn, train_step
+from flow_ot_flow_matching_conditional import get_time_scheduler, custom_filter_spec
 
 
 # ----------------- Main Training Function -----------------
@@ -28,9 +28,11 @@ def train_flow_matching_model(
     time_scheduler_type=None,
     loss_params={},
     time_logger=None,
-    loss_history={'train': [], 'val': [], 'lr': []},
+    loss_history=None,
     checkpoint_frequency_epochs=-1,
 ):
+    if loss_history is None:
+        loss_history = {'train': [], 'val': [], 'lr': []}
     # Normalize data for training.
     train_x = (train_data['eta'] - norm_mean) / norm_std
     train_weights = train_data['weights']
@@ -42,27 +44,9 @@ def train_flow_matching_model(
     val_batch_size = batch_size
 
     # --- Setup Schedulers ---
-    if time_scheduler_type == "uniform":
-        time_scheduler = uniform_scheduler
-    elif time_scheduler_type == "power_law":
-        time_scheduler = power_law_scheduler
-    elif time_scheduler_type == "logit_normal":
-        time_scheduler = logit_normal_scheduler
-    else:
-        # Default to uniform scheduler if none is specified
-        time_scheduler = uniform_scheduler
+    time_scheduler = get_time_scheduler(time_scheduler_type)
 
     # --- Partition Model into trainable/non-trainable parts and initialize the optimizer ---
-    def custom_filter_spec(model):
-        def filter_fn(path, leaf):
-            final_key = path[-1]
-            if isinstance(final_key, GetAttrKey):
-                # Treat pos_mean and pos_std as non-trainable (static)
-                if final_key.name in ["pos_mean", "pos_std"]:
-                    return False
-            # Treat all other JAX arrays as trainable parameters
-            return isinstance(leaf, jax.Array)
-        return tree_map_with_path(filter_fn, model)
     params, static = eqx.partition(dynamics_net, filter_spec=custom_filter_spec(dynamics_net))
 
     opt_state = optimizer.init(params)
@@ -83,7 +67,6 @@ def train_flow_matching_model(
 
     avg_val_loss = 1000000.0
     for epoch in (pbar := trange(start_epoch, epochs)):
-
         # Shuffle training data at the beginning of each epoch
         key, key_shuffle = jax.random.split(key)
         perm = jax.random.permutation(key_shuffle, n_train)

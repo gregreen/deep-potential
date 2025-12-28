@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import jax
-from jaxtyping import Array, Float, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from typing import Optional
 
 import equinox as eqx
 import diffrax
@@ -10,16 +11,19 @@ import e3nn_jax as e3nn
 class MLP(eqx.Module):
     mlp: eqx.nn.MLP
 
-    def __init__(self, key, input_dim: int, width: int, depth: int):
+    def __init__(self, key, input_dim: int, width: int, depth: int, cond_dim: int = 0):
         net_key, _ = jax.random.split(key)
         self.mlp = eqx.nn.MLP(
-            in_size=input_dim + 1, out_size=input_dim, width_size=width,
+            in_size=input_dim + 1 + cond_dim, out_size=input_dim, width_size=width,
             depth=depth, key=net_key, activation=jax.nn.silu,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_vec = jnp.broadcast_to(t, z.shape[:-1] + (1,))
-        net_input = jnp.concatenate([t_vec, z], axis=-1)
+        net_input = [t_vec, z]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
 
 
@@ -73,12 +77,12 @@ class FourierTimeMLP(eqx.Module):
     time_encoder: FourierFeatures
     mlp: eqx.nn.MLP
 
-    def __init__(self, key, input_dim: int, width: int, depth: int, time_embedding_dim: int = 32):
+    def __init__(self, key, input_dim: int, width: int, depth: int, time_embedding_dim: int = 32, cond_dim: int = 0):
         self.time_encoder = FourierFeatures(
             in_dim=1, num_freqs=time_embedding_dim//2, max_freq=2**10, include_self=False
         )
         self.mlp = eqx.nn.MLP(
-            in_size=input_dim + time_embedding_dim,
+            in_size=input_dim + time_embedding_dim + cond_dim,
             out_size=input_dim,
             width_size=width,
             depth=depth,
@@ -86,9 +90,12 @@ class FourierTimeMLP(eqx.Module):
             key=key,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_emb = self.time_encoder(t)
-        net_input = jnp.concatenate([t_emb, z], axis=-1)
+        net_input = [t_emb, z]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
 
 
@@ -153,6 +160,7 @@ class FourierTimeResMLP(eqx.Module):
         width_size: int,
         depth: int,
         time_embedding_dim: int = 32,
+        cond_dim: int = 0,
     ):
         self.time_encoder = FourierFeatures(
             in_dim=1,
@@ -162,17 +170,21 @@ class FourierTimeResMLP(eqx.Module):
         )
 
         self.mlp = ResMLP(
-            in_size=input_dim + time_embedding_dim,
+            in_size=input_dim + time_embedding_dim + cond_dim,
             out_size=input_dim,
             width_size=width_size,
             depth=depth,
             key=key,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_emb = self.time_encoder(t)
-        net_input = jnp.concatenate([t_emb, z], axis=-1)
+        net_input = [t_emb, z]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
+
 
 class PosResMLP(eqx.Module):
     time_encoder: FourierFeatures
@@ -183,6 +195,7 @@ class PosResMLP(eqx.Module):
         self, key, input_dim: int, pos_width_size: int, pos_depth: int,
         width_size: int, depth: int,
         time_embedding_dim: int = 32,
+        cond_dim: int = 0
     ):
         pos_mlp_key, mlp_key = jax.random.split(key)
 
@@ -202,17 +215,20 @@ class PosResMLP(eqx.Module):
         )
 
         self.mlp = ResMLP(
-            in_size=input_dim + time_embedding_dim + pos_width_size,
+            in_size=input_dim + time_embedding_dim + pos_width_size + cond_dim,
             out_size=input_dim,
             width_size=width_size,
             depth=depth,
             key=mlp_key,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_emb = self.time_encoder(t)
         pos_emb = self.pos_mlp(z[:z.shape[-1] // 2])
-        net_input = jnp.concatenate([t_emb, z, pos_emb], axis=-1)
+        net_input = [t_emb, z, pos_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
 
 
@@ -223,7 +239,8 @@ class PositionalFourierTimeMLP(eqx.Module):
     mlp: eqx.nn.MLP
 
     def __init__(self, key, input_dim: int, width: int, depth: int, time_embedding_dim: int = 32,
-                 pos_embedding_dim: int = 12, vel_embedding_dim: int = 12, posvel_max_freq: float = 20.):
+                 pos_embedding_dim: int = 12, vel_embedding_dim: int = 12, posvel_max_freq: float = 20.,
+                 cond_dim: int = 0):
         self.time_encoder = FourierFeatures(
             in_dim=1, num_freqs=time_embedding_dim//2, max_freq=2**(time_embedding_dim//2 - 1), include_self=False
         )
@@ -235,7 +252,7 @@ class PositionalFourierTimeMLP(eqx.Module):
         )
 
         self.mlp = eqx.nn.MLP(
-            in_size=input_dim + time_embedding_dim + 3*pos_embedding_dim + 3*vel_embedding_dim,
+            in_size=input_dim + time_embedding_dim + 3*pos_embedding_dim + 3*vel_embedding_dim + cond_dim,
             out_size=input_dim,
             width_size=width,
             depth=depth,
@@ -243,11 +260,14 @@ class PositionalFourierTimeMLP(eqx.Module):
             key=key,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_emb = self.time_encoder(t)
         pos_emb = self.pos_encoder(z[:3])  # Assuming first 3 dims are position
         vel_emb = self.vel_encoder(z[3:6])  # Assuming next 3 dims are velocity
-        net_input = jnp.concatenate([t_emb, z, pos_emb, vel_emb], axis=-1)
+        net_input = [t_emb, z, pos_emb, vel_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
 
 
@@ -305,7 +325,8 @@ class AlternatePositionalFourierTimeMLP(eqx.Module):
     mlp: eqx.nn.MLP
 
     def __init__(self, key, input_dim: int, width: int, depth: int, time_embedding_dim: int = 32,
-                 pos_embedding_dim: int = 12, vel_embedding_dim: int = 12, sigma_pos: float = 20., sigma_vel: float = 20):
+                 pos_embedding_dim: int = 12, vel_embedding_dim: int = 12, sigma_pos: float = 20.,
+                 sigma_vel: float = 20, cond_dim: int = 0):
         pos_key, vel_key, mlp_key = jax.random.split(key, 3)
         self.time_encoder = FourierFeatures(
             in_dim=1, num_freqs=time_embedding_dim//2, max_freq=2**(time_embedding_dim//2 - 1), include_self=False
@@ -318,7 +339,7 @@ class AlternatePositionalFourierTimeMLP(eqx.Module):
         )
 
         self.mlp = eqx.nn.MLP(
-            in_size=input_dim + time_embedding_dim + 3*pos_embedding_dim + 3*vel_embedding_dim,
+            in_size=input_dim + time_embedding_dim + 3*pos_embedding_dim + 3*vel_embedding_dim + cond_dim,
             out_size=input_dim,
             width_size=width,
             depth=depth,
@@ -326,11 +347,14 @@ class AlternatePositionalFourierTimeMLP(eqx.Module):
             key=mlp_key,
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         t_emb = self.time_encoder(t)
         pos_emb = self.pos_encoder(z[:3])  # Assuming first 3 dims are position
         vel_emb = self.vel_encoder(z[3:6])  # Assuming next 3 dims are velocity
-        net_input = jnp.concatenate([t_emb, z, pos_emb, vel_emb], axis=-1)
+        net_input = [t_emb, z, pos_emb, vel_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.mlp(net_input)
 
 
@@ -349,7 +373,8 @@ class FactorizedResMLP(eqx.Module):
         pos_width, pos_depth,
         vel_width, vel_depth,
         main_width, main_depth,
-        time_embedding_dim=32
+        time_embedding_dim=32,
+        cond_dim: int = 0
     ):
         self.pos_dim = input_dim // 2
         self.vel_dim = input_dim - self.pos_dim
@@ -372,7 +397,7 @@ class FactorizedResMLP(eqx.Module):
             key=vel_key
         )
 
-        main_in_size = pos_width + vel_width + time_embedding_dim
+        main_in_size = pos_width + vel_width + time_embedding_dim + cond_dim
         self.main_mlp = ResMLP(
             in_size=main_in_size,
             out_size=input_dim,
@@ -381,13 +406,16 @@ class FactorizedResMLP(eqx.Module):
             key=main_key
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         pos, vel = z[:self.pos_dim], z[self.pos_dim:]
         t_emb = self.time_encoder(t)
         pos_emb = self.pos_encoder(pos)
         vel_emb = self.vel_encoder(vel)
 
-        net_input = jnp.concatenate([pos_emb, vel_emb, t_emb])
+        net_input = [pos_emb, vel_emb, t_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
         return self.main_mlp(net_input)
 
 
@@ -408,7 +436,8 @@ class SHPosTimeResMLP(eqx.Module):
     def __init__(
             self, key, input_dim, width_size, depth, sh_max_l=3, time_embedding_dim=32,
             pos_mean=jnp.zeros(3), pos_std=jnp.ones(3),
-            normalize_SH=False, include_SH=True, include_r2=False
+            normalize_SH=False, include_SH=True, include_r2=False,
+            cond_dim: int = 0
     ):
         self.pos_dim = input_dim // 2
         self.vel_dim = input_dim // 2
@@ -425,7 +454,7 @@ class SHPosTimeResMLP(eqx.Module):
         self.time_encoder = FourierFeatures(1, time_embedding_dim//2, 1024, False)
 
         num_sh_features = self.sh_irreps.dim
-        in_size = input_dim + time_embedding_dim
+        in_size = input_dim + time_embedding_dim + cond_dim
         if include_SH:
             in_size += num_sh_features
         if include_r2:
@@ -440,7 +469,7 @@ class SHPosTimeResMLP(eqx.Module):
         )
         # self.mlp = reinit_final_layer_small(self.mlp, time_key)
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         pos, vel = z[:self.pos_dim], z[self.pos_dim:]
         # e3nn.spherical_harmonics is robust and works directly on the position vector
         pos_emb = [pos]
@@ -458,7 +487,10 @@ class SHPosTimeResMLP(eqx.Module):
         pos_emb = jnp.concatenate(pos_emb, axis=-1)
 
         t_emb = self.time_encoder(t)
-        net_input = jnp.concatenate([pos_emb, vel, t_emb])
+        net_input = [pos_emb, vel, t_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
 
         return self.mlp(net_input)
 
@@ -531,6 +563,7 @@ class SHRadialEmbeddingResMLP(eqx.Module):
             sh_max_l=180, num_radial=50, r_min=0.1, r_max=5.0, gamma=10.0,
             time_embedding_dim=32,
             pos_mean=jnp.zeros(3), pos_std=jnp.ones(3),
+            cond_dim: int = 0
     ):
         self.pos_dim = input_dim // 2
         self.vel_dim = input_dim // 2
@@ -547,7 +580,7 @@ class SHRadialEmbeddingResMLP(eqx.Module):
 
         num_pos_features = self.sh_irreps.dim + num_radial
 
-        in_size = input_dim + time_embedding_dim + num_pos_features
+        in_size = input_dim + time_embedding_dim + num_pos_features + cond_dim
 
         self.mlp = ResMLP(
             in_size=in_size,
@@ -557,7 +590,7 @@ class SHRadialEmbeddingResMLP(eqx.Module):
             key=key
         )
 
-    def __call__(self, t: Float, z: Array) -> Array:
+    def __call__(self, t: Float, z: Array, condition: Optional[Array] = None) -> Array:
         pos, vel = z[:self.pos_dim], z[self.pos_dim:]
         pos_lab_frame = pos * self.pos_std + self.pos_mean
 
@@ -570,25 +603,147 @@ class SHRadialEmbeddingResMLP(eqx.Module):
         rad_features = self.rad_encoder(r_lab_frame)
 
         t_emb = self.time_encoder(t)
-        net_input = jnp.concatenate([pos, sh_features, rad_features, vel, t_emb])
+        net_input = [pos, sh_features, rad_features, vel, t_emb]
+        if condition is not None:
+            net_input.append(condition)
+        net_input = jnp.concatenate(net_input, axis=-1)
 
         return self.mlp(net_input)
 
 
+class Integrated3DFourierFeatures(eqx.Module):
+    """
+    A basis of integrated Fourier features for 3D inputs. Each Fourier feature
+    is integrated along the line of sight from 0 to the input position. This is meant
+    to imitate the line-of-sight effects from, for instance, integrated reddening.
 
-def _augmented_dynamics_fn(t: Float, y: Array, net: MLP) -> Array:
+    Fourier features transforms like
+        \sin(\vec k \cdot \vec x + \phi_0) -->
+        |\vec x|/\alpha * (\cos(\phi_0) - \cos(\alpha+\phi_0)), \alpha = \vec k \cdot \vec x
+
+    The features are described using a wavector. The num_components wavevectors
+    are uniformly spaced between k_min and k_max in log space and are isotropically
+    distributed on the unit sphere. include_zero_freq adds a |vec k| = 0 component
+    which is just |r|^2.
+    """
+    num_components: int
+    k_min: float
+    k_max: float
+    include_zero_freq: bool
+    k_basis: Array
+    phases: Array
+    in_dim: int
+    out_dim: int
+
+    def __init__(
+        self,
+        key,
+        num_components: int,
+        k_min: float,
+        k_max: float,
+        include_zero_freq: bool = True,
+    ):
+        self.num_components = num_components
+        self.k_min = k_min
+        self.k_max = k_max
+        self.include_zero_freq = include_zero_freq
+        self.in_dim = 3
+        self.out_dim = num_components
+        if include_zero_freq:
+            self.out_dim += 1
+
+        # Generate isotropic wavevectors
+        k_amp = jnp.geomspace(k_min, k_max, num_components)
+
+        # Generate unit vectors isotropically on the sphere
+        def sample_unit_sphere(key, num_samples):
+            u_key, v_key = jax.random.split(key)
+
+            phi = jax.random.uniform(u_key, shape=(num_samples,), minval=0.0, maxval=2*jnp.pi)
+            costheta = jax.random.uniform(v_key, shape=(num_samples,), minval=-1.0, maxval=1.0)
+            sintheta = jnp.sqrt(1.0 - costheta**2)
+
+            x = sintheta * jnp.cos(phi)
+            y = sintheta * jnp.sin(phi)
+            z = costheta
+
+            return jnp.stack([x, y, z], axis=-1)
+
+        key, subkey = jax.random.split(key)
+        self.k_basis = sample_unit_sphere(key, num_components) * k_amp[:, None] # (num_components, 3)
+        self.phases = jax.random.uniform(subkey, shape=(num_components,), minval=0.0, maxval=2*jnp.pi)
+
+    def __call__(self, x: Array) -> Array:
+        # Input shape is (3,), output dim is (out_dim,)
+        x = jnp.asarray(x).flatten()
+        if x.shape[-1] != self.in_dim:
+            raise ValueError(f"Input's last dim ({x.shape[-1]}) must equal in_dim ({self.in_dim}).")
+
+        alpha = jnp.sum(self.k_basis * x[None, :], axis=1) + 1e-6  # (num_components,)
+        r = jnp.linalg.norm(x) # Scalar
+        fourier_features = r / alpha * (jnp.cos(self.phases) - jnp.cos(alpha + self.phases))  # (num_components,)
+        if self.include_zero_freq:
+            r2_feature = jnp.array([r**2])
+            fourier_features = jnp.concatenate([r2_feature, fourier_features], axis=0)  # (num_components + 1,)
+        return fourier_features
+
+
+class IntFourierResNet(eqx.Module):
+    """ResMLP with integrated Fourier features."""
+    mlp: ResMLP
+    pos_dim: int
+    pos_mean: Array
+    pos_std: Array
+    pos_encoder: Integrated3DFourierFeatures
+    time_encoder: FourierFeatures = eqx.field(static=True)
+
+    def __init__(
+            self, key, input_dim, width_size, depth, time_embedding_dim=32,
+            pos_mean=jnp.zeros(3), pos_std=jnp.ones(3),
+            k_min=1.0, k_max=10.0, num_components=10, include_zero_freq=False
+    ):
+        self.pos_dim = input_dim
+
+        key, subkey = jax.random.split(key)
+        self.pos_encoder = Integrated3DFourierFeatures(
+            subkey, num_components, k_min, k_max, include_zero_freq
+        )
+
+        self.pos_mean = jnp.asarray(pos_mean)
+        self.pos_std = jnp.asarray(pos_std)
+
+        self.time_encoder = FourierFeatures(1, time_embedding_dim//2, 1024, False)
+
+        self.mlp = ResMLP(
+            in_size=input_dim + self.pos_encoder.out_dim + time_embedding_dim,
+            out_size=1,
+            width_size=width_size,
+            depth=depth,
+            key=key
+        )
+
+    def __call__(self, t: Float, pos: Array, condition: Optional[Array] = None) -> Array:
+        pos_emb = [pos]
+        pos_lab_frame = pos * self.pos_std + self.pos_mean
+        integrated_emb = self.pos_encoder(pos_lab_frame)
+        pos_emb.append(integrated_emb)
+        pos_emb.append(self.time_encoder(t))
+        pos_emb = jnp.concatenate(pos_emb, axis=-1)
+        return self.mlp(pos_emb)
+
+
+def _augmented_dynamics_fn(t: Float, y: Array, args: PyTree) -> Array:
     z, _ = y
-    dz_dt = net(t, z)
-    jac = jax.jacfwd(net, argnums=1)(t, z)
+    net, condition = args
+    dz_dt = net(t, z, condition)
+    jac = jax.jacfwd(net, argnums=1)(t, z, condition)
     d_log_det_dt = jnp.trace(jac)
     return (dz_dt, d_log_det_dt)
 
 
-
-
 class VectorField(eqx.Module):
     shape: tuple[int, ...] = eqx.field(static=True)
-    cond_shape: None = eqx.field(static=True)
+    cond_shape: Optional[tuple[int, ...]] = eqx.field(static=True)
     dynamics_net: MLP
     solver: diffrax.AbstractSolver = eqx.field(static=True)
     stepsize_controller: diffrax.AbstractStepSizeController = eqx.field(static=True)
@@ -598,8 +753,9 @@ class VectorField(eqx.Module):
         solver=None, stepsize_controller=None,
     ):
         input_dim = params["base_dist_dim"]
+        cond_dim = params.get("cond_dim", 0)
         self.shape = (input_dim,)
-        self.cond_shape = None
+        self.cond_shape = (cond_dim,) if cond_dim > 0 else None
 
         width = params["width"]
         depth = params["depth"]
@@ -607,16 +763,17 @@ class VectorField(eqx.Module):
         time_emb_dim = params.get("time_embedding_dim", 32)
 
         if model_type == "FourierTimeMLP":
-            self.dynamics_net = FourierTimeMLP(key, input_dim, width, depth, time_emb_dim)
+            self.dynamics_net = FourierTimeMLP(key, input_dim, width, depth, time_emb_dim, cond_dim)
         elif model_type == "MLP":
-            self.dynamics_net = MLP(key, input_dim, width, depth)
+            self.dynamics_net = MLP(key, input_dim, width, depth, cond_dim)
         elif model_type == "PositionalFourierTimeMLP":
             pos_embedding_dim = params["pos_embedding_dim"]
             vel_embedding_dim = params["vel_embedding_dim"]
             self.dynamics_net = PositionalFourierTimeMLP(
                 key, input_dim, width, depth, time_emb_dim,
                 pos_embedding_dim, vel_embedding_dim,
-                posvel_max_freq=params["posvel_max_freq"]
+                posvel_max_freq=params["posvel_max_freq"],
+                cond_dim=cond_dim
             )
         elif model_type == "AlternatePositionalFourierTimeMLP":
             pos_embedding_dim = params["pos_embedding_dim"]
@@ -625,17 +782,18 @@ class VectorField(eqx.Module):
                 key, input_dim, width, depth, time_emb_dim,
                 pos_embedding_dim, vel_embedding_dim,
                 sigma_pos=params["sigma_pos"],
-                sigma_vel=params["sigma_vel"]
+                sigma_vel=params["sigma_vel"],
+                cond_dim=cond_dim
             )
         elif model_type == "FourierTimeResMLP":
             self.dynamics_net = FourierTimeResMLP(
-                key, input_dim, width, depth, time_emb_dim
+                key, input_dim, width, depth, time_emb_dim, cond_dim
             )
         elif model_type == "PosResMLP":
             pos_width = params["nn_pos_width"]
             pos_depth = params["nn_pos_depth"]
             self.dynamics_net = PosResMLP(
-                key, input_dim, pos_width, pos_depth, width, depth, time_emb_dim
+                key, input_dim, pos_width, pos_depth, width, depth, time_emb_dim, cond_dim
             )
         elif model_type == "FactorizedResMLP":
             self.dynamics_net = FactorizedResMLP(
@@ -646,7 +804,8 @@ class VectorField(eqx.Module):
                 vel_depth=params["nn_vel_depth"],
                 main_width=width,
                 main_depth=depth,
-                time_embedding_dim=time_emb_dim
+                time_embedding_dim=time_emb_dim,
+                cond_dim=cond_dim
             )
         elif model_type == "SHPosTimeResMLP":
             self.dynamics_net = SHPosTimeResMLP(
@@ -657,7 +816,8 @@ class VectorField(eqx.Module):
                 pos_std=jnp.array(params["pos_std"]),
                 normalize_SH=params.get("normalize_SH", False),
                 include_SH=params.get("include_SH", True),
-                include_r2=params.get("include_r2", False)
+                include_r2=params.get("include_r2", False),
+                cond_dim=cond_dim
             )
         elif model_type == "SHRadialEmbeddingResMLP":
             self.dynamics_net = SHRadialEmbeddingResMLP(
@@ -670,45 +830,56 @@ class VectorField(eqx.Module):
                 r_min=params["pos_emb_r_min"],
                 r_max=params["pos_emb_r_max"],
                 gamma=params.get("pos_emb_gamma", 10),
+                cond_dim=cond_dim
+            )
+        elif model_type == "IntFourierResNet":
+            self.dynamics_net = IntFourierResNet(
+                key, input_dim, width, depth,
+                pos_mean=jnp.array(params["pos_mean"]),
+                pos_std=jnp.array(params["pos_std"]),
+                time_embedding_dim=time_emb_dim,
+                k_min=params["k_min"],
+                k_max=params["k_max"],
+                num_components=params["num_components"],
+                include_zero_freq=params["include_zero_freq"]
             )
         else:
             raise ValueError
 
-        #self.solver = solver if solver is not None else diffrax.Kvaerno5()
         self.solver = solver if solver is not None else diffrax.Tsit5()
         self.stepsize_controller = (
             stepsize_controller if stepsize_controller is not None
             else diffrax.PIDController(rtol=1e-4, atol=1e-5)
         )
 
-    def transform_and_log_det(self, x: Array, condition=None) -> tuple[Array, Array]:
+    def transform_and_log_det(self, x: Array, condition: Optional[Array] = None) -> tuple[Array, Array]:
         y0 = (x, jnp.zeros(()))
         solution = diffrax.diffeqsolve(
             terms=diffrax.ODETerm(_augmented_dynamics_fn),
             solver=self.solver, t0=0.0, t1=1.0, dt0=None, y0=y0,
-            args=self.dynamics_net, saveat=diffrax.SaveAt(t1=True),
+            args=(self.dynamics_net, condition), saveat=diffrax.SaveAt(t1=True),
             stepsize_controller=self.stepsize_controller, max_steps=100000
         )
         y, log_det = jax.tree_util.tree_map(lambda leaf: leaf[0], solution.ys)
         return y, log_det
 
-    def inverse_and_log_det(self, y: Array, condition=None) -> tuple[Array, Array]:
+    def inverse_and_log_det(self, y: Array, condition: Optional[Array] = None) -> tuple[Array, Array]:
         y0 = (y, jnp.zeros(()))
         solution = diffrax.diffeqsolve(
             terms=diffrax.ODETerm(_augmented_dynamics_fn),
             solver=self.solver, t0=1.0, t1=0.0, dt0=None, y0=y0,
-            args=self.dynamics_net, saveat=diffrax.SaveAt(t1=True),
+            args=(self.dynamics_net, condition), saveat=diffrax.SaveAt(t1=True),
             stepsize_controller=self.stepsize_controller, max_steps=100000
         )
         x, log_det_inv = jax.tree_util.tree_map(lambda leaf: leaf[0], solution.ys)
         return x, log_det_inv
 
-    def transform(self, x: Array, condition=None) -> Array:
+    def transform(self, x: Array, condition: Optional[Array] = None) -> Array:
         """Computes the forward transformation from x to y."""
         y, _ = self.transform_and_log_det(x, condition)
         return y
 
-    def inverse(self, y: Array, condition=None) -> Array:
+    def inverse(self, y: Array, condition: Optional[Array] = None) -> Array:
         """Computes the inverse transformation from y to x."""
         x, _ = self.inverse_and_log_det(y, condition)
         return x
