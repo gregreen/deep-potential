@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dpjax"
+version = "0.1.0"
+description = "JAX/Flax implementation for deep-potential"
+readme = "README_JAX.md"
+requires-python = ">=3.10"
+authors = [{ name = "deep-potential contributors" }]
+dependencies = [
+  "numpy>=1.23",
+  "h5py>=3.8",
+  "pyyaml>=6.0",
+  "tqdm>=4.66",
+  "matplotlib>=3.7",
+  "jax>=0.4.25",
+  "jaxlib>=0.4.25",
+  "flax>=0.8.2",
+  "optax>=0.2.2",
+  "orbax-checkpoint>=0.5.0",
+  "chex>=0.1.86",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dpjax*"]
+
+[tool.setuptools]
+include-package-data = true

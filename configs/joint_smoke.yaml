@@ -1,0 +1,23 @@
+seed: 2
+
+data:
+  dataset: eta
+
+train:
+  batch_size: 1024
+  epochs: 1
+  max_batches_per_epoch: 2
+
+  lr_df: 1.0e-4
+  lr_phi: 1.0e-4
+  grad_clip: 1.0
+
+  lambda_cbe: 1.0
+  lambda_nll: 0.3
+
+  mode: alt
+  alt_period: 1
+
+  log_every: 1
+  ckpt_every: 0
+  max_to_keep: 2

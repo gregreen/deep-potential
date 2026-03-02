@@ -2,13 +2,23 @@
 
 from __future__ import print_function, division
 
-import tensorflow as tf
-print(f'Tensorflow version {tf.__version__}')
+try:
+    import tensorflow as tf
+
+    print(f"Tensorflow version {tf.__version__}")
+except ModuleNotFoundError:  # allow using pure-numpy toy systems without TF
+    tf = None
 
 import numpy as np
 import scipy
 
-from scipy.integrate import cumtrapz, solve_ivp
+try:
+    # SciPy < 1.10
+    from scipy.integrate import cumtrapz
+except ImportError:  # SciPy >= 1.10
+    from scipy.integrate import cumulative_trapezoid as cumtrapz
+
+from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 
 
@@ -105,8 +115,11 @@ def integrate_path(force_fn, x0, v0, t_max, **kwargs):
     return sol, x, v
 
 
-@tf.function
 def calc_force(phi_func, x):
+    if tf is None:
+        raise ModuleNotFoundError(
+            "TensorFlow is required for calc_force/calc_force_np, but is not installed."
+        )
     with tf.GradientTape() as g:
         g.watch(x)
         phi = phi_func(x)
@@ -115,6 +128,10 @@ def calc_force(phi_func, x):
 
 
 def calc_force_np(phi_func, x):
+    if tf is None:
+        raise ModuleNotFoundError(
+            "TensorFlow is required for calc_force/calc_force_np, but is not installed."
+        )
     x = tf.constant(x)
     return calc_force(phi_func, x).numpy()
 

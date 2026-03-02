@@ -1,0 +1,18 @@
+seed: 1
+
+data:
+  dataset: eta
+
+normalizer:
+  eps: 1.0e-6
+
+potential:
+  hidden_sizes: [256, 256, 256]
+
+train:
+  batch_size: 4096
+  epochs: 64
+  lr: 1.0e-3
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_every: 200

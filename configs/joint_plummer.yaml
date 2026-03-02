@@ -1,0 +1,31 @@
+seed: 2
+
+data:
+  dataset: eta
+
+# Joint fine-tune (scheme B):
+#   loss = lambda_cbe * L_cbe_A + lambda_nll * NLL
+# Notes:
+# - mode: "both" backprops through score (2nd-order w.r.t. DF params); start with small batch + small LR.
+# - mode: "alt" alternates DF/Phi updates (block coordinate descent).
+train:
+  batch_size: 4096
+  epochs: 4
+
+  # Learning rates (recommend ~1e-4 for fine-tune)
+  lr_df: 1.0e-4
+  lr_phi: 1.0e-4
+
+  grad_clip: 1.0
+
+  # Loss weights
+  lambda_cbe: 1.0
+  lambda_nll: 0.3
+
+  # Update mode: both | alt
+  mode: alt
+  alt_period: 1
+
+  log_every: 50
+  ckpt_every: 200
+  max_to_keep: 3

@@ -1,0 +1,21 @@
+seed: 0
+
+data:
+  dataset: eta
+
+normalizer:
+  eps: 1.0e-6
+
+flow:
+  dim: 6
+  n_coupling: 10
+  hidden_sizes: [128, 128]
+  s_max: 2.0
+
+train:
+  batch_size: 8192
+  epochs: 32
+  lr: 1.0e-3
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_every: 200
