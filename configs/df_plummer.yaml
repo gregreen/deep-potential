@@ -8,14 +8,17 @@ normalizer:
 
 flow:
   dim: 6
-  n_coupling: 10
-  hidden_sizes: [128, 128]
+  n_coupling: 8
+  hidden_sizes: [16, 16, 16]
   s_max: 2.0
 
 train:
   batch_size: 8192
-  epochs: 32
-  lr: 1.0e-3
+  epochs: 256
+  lr:
+    max: 0.02
+    final: 0.001
+    warmup_frac: 0.1
   grad_clip: 1.0
   log_every: 50
   ckpt_every: 200

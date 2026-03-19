@@ -122,3 +122,59 @@ python experiments/smoke_dpjax.py
 - `run-dir/normalizer.npz`
 - `run-dir/ckpt/`（Orbax）
 - `run-dir/metrics.csv`
+
+## Jupyter Notebook 交互式开发
+
+项目支持通过 Jupyter Notebook 进行交互式调试和训练。所有训练/评估脚本均已重构为可导入的函数，可以在 Notebook 中直接调用。
+
+### 安装 Notebook 依赖
+
+```bash
+pip install -e ".[notebook]"
+```
+
+### 启动 JupyterLab
+
+```bash
+# 本地 CPU 调试模式（秒级编译，适合原型验证）
+JAX_PLATFORM_NAME=cpu jupyter lab
+
+# GPU 模式
+XLA_PYTHON_CLIENT_PREALLOCATE=false jupyter lab
+```
+
+### Notebook 索引
+
+`notebooks/` 目录包含以下示例：
+
+| Notebook | 说明 |
+|----------|------|
+| `01_data_generation.ipynb` | 生成 Plummer 模拟数据，加载 HDF5，可视化相空间分布 |
+| `02_train_df.ipynb` | 训练分布函数（RealNVP 归一化流） |
+| `03_train_phi.ipynb` | 训练势能网络（冻结 DF） |
+| `04_joint_finetuning.ipynb` | DF + Φ 联合微调 |
+| `05_visualization.ipynb` | 可视化：势能切片、径向曲线、训练指标 |
+| `06_full_pipeline.ipynb` | 端到端完整流程 |
+
+### 在 Notebook 中调用训练
+
+```python
+from dpjax.config import load_config, merge_config
+from dpjax.paths import DATA_DIR, RUNS_DIR
+from experiments.train_df import run_df_training
+
+cfg = load_config("configs/df_plummer.yaml")
+cfg = merge_config(cfg, {"train": {"epochs": 4, "batch_size": 256}})
+
+result = run_df_training(cfg, DATA_DIR / "plummer_n131072.h5", RUNS_DIR / "plummer/df")
+```
+
+### 远程 GPU 服务器（Docker）
+
+项目提供了一个 `docker/docker-compose.yml`，可在搭载 NVIDIA GPU 的 Linux 服务器上启动 JupyterLab：
+
+```bash
+cd docker
+docker compose up -d
+# 浏览器打开 http://<server-ip>:8888
+```

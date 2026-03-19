@@ -23,6 +23,18 @@ dependencies = [
   "chex>=0.1.86",
 ]
 
+[project.optional-dependencies]
+notebook = [
+  "jupyter>=1.0",
+  "jupyterlab>=4.0",
+  "ipywidgets>=8.0",
+  "nbstripout>=0.6",
+]
+dev = [
+  "dpjax[notebook]",
+  "pytest>=7.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["dpjax*"]

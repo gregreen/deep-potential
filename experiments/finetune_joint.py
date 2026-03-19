@@ -5,6 +5,7 @@ import argparse
 import csv
 import shutil
 from pathlib import Path
+from typing import Any, Dict
 
 
 # JAX 默认会预分配大量 GPU 显存；在共享/繁忙 GPU 上容易导致初始化 OOM。
@@ -16,18 +17,14 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import yaml
+from tqdm.auto import tqdm
 
 from dpjax.data import Normalizer, iter_batches, load_eta_h5
 from dpjax.flows.realnvp import RealNVP, RealNVPConfig, log_prob_apply, score_apply
 from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply
+from dpjax.paths import ensure_dir, resolve_path
 from dpjax.physics.cbe import loss_cbe_A, residual_A
 from dpjax.utils.ckpt import create_manager, finalize, restore_latest, save
-
-
-def _ensure_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
 
 
 def _load_df(df_run_dir: Path) -> tuple[RealNVP, dict, Normalizer, dict]:
@@ -74,39 +71,66 @@ def _load_phi(phi_run_dir: Path) -> tuple[PotentialMLP, dict, dict]:
     return model, params, cfg
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Joint fine-tuning for DF + Phi (scheme B). "
-            "Optimizes L = lambda_cbe * L_cbe + lambda_nll * NLL with small LR."
-        )
-    )
-    parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--df-run-dir", type=str, required=True)
-    parser.add_argument("--phi-run-dir", type=str, required=True)
-    parser.add_argument("--run-dir", type=str, required=True)
-    parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# Core fine-tuning function – callable from both CLI and Jupyter
+# ---------------------------------------------------------------------------
 
-    cfg_in = yaml.safe_load(Path(args.config).read_text())
+def run_joint_finetuning(
+    config: Dict[str, Any],
+    data_path: str | Path,
+    df_run_dir: str | Path,
+    phi_run_dir: str | Path,
+    run_dir: str | Path,
+    *,
+    resume: bool = False,
+) -> Dict[str, Any]:
+    """Joint fine-tuning for DF + Phi (scheme B).
 
-    run_dir = _ensure_dir(args.run_dir)
-    df_out = _ensure_dir(run_dir / "df")
-    phi_out = _ensure_dir(run_dir / "phi")
+    Optimizes ``L = lambda_cbe * L_cbe + lambda_nll * NLL`` with small LR.
+
+    Parameters
+    ----------
+    config : dict
+        Joint training configuration (typically loaded from a YAML file).
+    data_path : str or Path
+        Path to the HDF5 data file containing ``eta``.
+    df_run_dir : str or Path
+        Directory of the completed DF training run.
+    phi_run_dir : str or Path
+        Directory of the completed Phi training run.
+    run_dir : str or Path
+        Directory for joint checkpoints, metrics, and config snapshots.
+    resume : bool
+        If ``True``, resume from the latest joint checkpoint.
+
+    Returns
+    -------
+    dict
+        ``{"df_params": ..., "phi_params": ..., "df_model": ...,
+          "phi_model": ..., "normalizer": ..., "final_step": int}``
+    """
+    data_path = resolve_path(data_path)
+    df_run_dir = resolve_path(df_run_dir)
+    phi_run_dir = resolve_path(phi_run_dir)
+
+    cfg_in = config
+
+    run_dir = ensure_dir(run_dir)
+    df_out = ensure_dir(run_dir / "df")
+    phi_out = ensure_dir(run_dir / "phi")
     (run_dir / "ckpt").mkdir(parents=True, exist_ok=True)
     (df_out / "ckpt").mkdir(parents=True, exist_ok=True)
     (phi_out / "ckpt").mkdir(parents=True, exist_ok=True)
 
-    df_model, df_params_init, normalizer, df_cfg = _load_df(Path(args.df_run_dir))
-    phi_model, phi_params_init, phi_cfg = _load_phi(Path(args.phi_run_dir))
+    df_model, df_params_init, normalizer, df_cfg = _load_df(Path(df_run_dir))
+    phi_model, phi_params_init, phi_cfg = _load_phi(Path(phi_run_dir))
 
     # Write config snapshots for compatibility with existing eval scripts.
     # - df_out mimics train_df output
     # - phi_out mimics train_phi output
     (df_out / "config.yaml").write_text(yaml.safe_dump(df_cfg, sort_keys=False))
     (phi_out / "config.yaml").write_text(yaml.safe_dump(phi_cfg, sort_keys=False))
-    shutil.copy2(Path(args.df_run_dir) / "normalizer.npz", df_out / "normalizer.npz")
+    shutil.copy2(Path(df_run_dir) / "normalizer.npz", df_out / "normalizer.npz")
 
     # Root config: merge flow/potential with joint training hyperparams.
     joint_cfg = dict(cfg_in) if isinstance(cfg_in, dict) else {}
@@ -115,7 +139,7 @@ def main() -> int:
     joint_cfg.setdefault("data", cfg_in.get("data", df_cfg.get("data", {"dataset": "eta"})))
     (run_dir / "config.yaml").write_text(yaml.safe_dump(joint_cfg, sort_keys=False))
 
-    eta = load_eta_h5(args.data, dataset=joint_cfg.get("data", {}).get("dataset", "eta"))
+    eta = load_eta_h5(data_path, dataset=joint_cfg.get("data", {}).get("dataset", "eta"))
     eta_std = normalizer.transform(eta)
 
     train_cfg = joint_cfg.get("train", {})
@@ -147,7 +171,7 @@ def main() -> int:
     ckpt_mgr_phi = create_manager(phi_out / "ckpt", max_to_keep=max_to_keep)
 
     step0 = 0
-    if args.resume:
+    if resume:
         restored = restore_latest(ckpt_mgr_joint)
         df_params = restored["df_params"]
         phi_params = restored["phi_params"]
@@ -209,7 +233,7 @@ def main() -> int:
         return phi_p2, opt_s_phi2, loss, nll, cbe
 
     metrics_path = run_dir / "metrics.csv"
-    write_header = not metrics_path.exists() or not args.resume
+    write_header = not metrics_path.exists() or not resume
 
     with metrics_path.open("a", newline="") as f:
         writer = csv.writer(f)
@@ -233,15 +257,27 @@ def main() -> int:
 
         global_step = step0
 
-        for epoch in range(epochs):
-            for batch_np in iter_batches(
-                eta_std,
-                batch_size=batch_size,
-                rng=np_rng,
-                shuffle=True,
-                drop_remainder=True,
-                max_batches=max_batches_per_epoch,
-            ):
+        # 假设你已经有：n = eta_std.shape[0]、batch_size、epochs
+        n = eta_std.shape[0]  
+        steps_per_epoch = (n + batch_size - 1) // batch_size
+        total_steps = int(epochs) * int(steps_per_epoch)
+
+        start_epoch = step0 // steps_per_epoch
+        pbar = tqdm(total=total_steps, dynamic_ncols=True, unit="step")
+        if step0 > 0:
+            pbar.update(step0)
+
+        rng = jax.random.PRNGKey(seed + start_epoch)
+
+        global_step = step0
+        for epoch in range(start_epoch, epochs):
+            rng, step_rng = jax.random.split(rng)
+            
+            # Use numpy's standard RNG just for batch generation, seeded by jax rng
+            seed_val = int(jax.random.randint(step_rng, (), 0, 1000000))
+            np_rng = np.random.default_rng(seed_val)
+            
+            for batch_np in iter_batches(eta_std, batch_size, np_rng, shuffle=True):
                 eta_b = jnp.asarray(batch_np)
 
                 if mode == "both":
@@ -260,54 +296,20 @@ def main() -> int:
                 else:
                     raise ValueError(f"Unknown train.mode={mode!r}; expected 'both' or 'alt'.")
 
+                global_step += 1
+                pbar.update(1)
+
                 if (global_step % log_every) == 0:
-                    eta_small = eta_b[:1024]
-                    score_small = score_apply(df_model, df_params, eta_small)
-                    score_abs = jnp.abs(score_small)
-                    score_p50 = float(jnp.percentile(score_abs, 50.0))
-                    score_p99 = float(jnp.percentile(score_abs, 99.0))
-                    score_max = float(jnp.max(score_abs))
+                    pbar.set_description(f"epoch={epoch}")
+                    pbar.set_postfix({
+                        "step": global_step,
+                        "loss": float(loss),
+                        "nll": float(nll),
+                        "cbe": float(cbe),
+                        "r_std": float(r_std),
+                    })
 
-                    grad_phi_small = grad_phi_apply(phi_model, phi_params, eta_small[:, :3])
-                    r = residual_A(eta_small, score_small, grad_phi_small, normalizer)
-                    r_mean = float(jnp.mean(r))
-                    r_std = float(jnp.std(r))
-                    r_p99 = float(jnp.percentile(jnp.abs(r), 99.0))
-
-                    writer.writerow(
-                        [
-                            global_step,
-                            epoch,
-                            update_tag,
-                            float(loss),
-                            float(nll),
-                            float(cbe),
-                            r_mean,
-                            r_std,
-                            r_p99,
-                            score_p50,
-                            score_p99,
-                            score_max,
-                        ]
-                    )
-                    f.flush()
-                    print(
-                        " ".join(
-                            [
-                                f"step={global_step}",
-                                f"epoch={epoch}",
-                                f"upd={update_tag}",
-                                f"loss={float(loss):.4e}",
-                                f"nll={float(nll):.4e}",
-                                f"cbe={float(cbe):.4e}",
-                                f"r_std={r_std:.3g}",
-                                f"|r|p99={r_p99:.3g}",
-                                f"score|p99={score_p99:.3g}",
-                            ]
-                        )
-                    )
-
-                if ckpt_every and (global_step % ckpt_every) == 0 and global_step != step0:
+                if (global_step % ckpt_every) == 0:
                     item_joint = {
                         "df_params": df_params,
                         "df_opt_state": opt_state_df,
@@ -319,7 +321,7 @@ def main() -> int:
                     save(ckpt_mgr_df, global_step, {"params": df_params, "opt_state": opt_state_df, "step": global_step})
                     save(ckpt_mgr_phi, global_step, {"params": phi_params, "opt_state": opt_state_phi, "step": global_step})
 
-                global_step += 1
+        pbar.close()
 
     # Final save
     item_joint = {
@@ -341,6 +343,41 @@ def main() -> int:
     print(f"Saved final joint checkpoint at step {global_step}.")
     print(f"DF run dir:  {df_out}")
     print(f"Phi run dir: {phi_out}")
+
+    return {
+        "df_params": df_params,
+        "phi_params": phi_params,
+        "df_model": df_model,
+        "phi_model": phi_model,
+        "normalizer": normalizer,
+        "final_step": global_step,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Joint fine-tuning for DF + Phi (scheme B). "
+            "Optimizes L = lambda_cbe * L_cbe + lambda_nll * NLL with small LR."
+        )
+    )
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--df-run-dir", type=str, required=True)
+    parser.add_argument("--phi-run-dir", type=str, required=True)
+    parser.add_argument("--run-dir", type=str, required=True)
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+
+    cfg = yaml.safe_load(Path(args.config).read_text())
+    run_joint_finetuning(
+        cfg, args.data, args.df_run_dir, args.phi_run_dir, args.run_dir,
+        resume=args.resume,
+    )
     return 0
 
 

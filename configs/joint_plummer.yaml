@@ -9,18 +9,18 @@ data:
 # - mode: "both" backprops through score (2nd-order w.r.t. DF params); start with small batch + small LR.
 # - mode: "alt" alternates DF/Phi updates (block coordinate descent).
 train:
-  batch_size: 4096
-  epochs: 4
+  batch_size: 2048 #4096
+  epochs: 2048
 
   # Learning rates (recommend ~1e-4 for fine-tune)
   lr_df: 1.0e-4
-  lr_phi: 1.0e-4
+  lr_phi: 3e-5
 
   grad_clip: 1.0
 
   # Loss weights
   lambda_cbe: 1.0
-  lambda_nll: 0.3
+  lambda_nll: 0.5
 
   # Update mode: both | alt
   mode: alt
@@ -28,4 +28,4 @@ train:
 
   log_every: 50
   ckpt_every: 200
-  max_to_keep: 3
+  max_to_keep: 60

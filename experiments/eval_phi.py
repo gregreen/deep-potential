@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -12,14 +13,9 @@ import yaml
 from dpjax.data import Normalizer, iter_batches, load_eta_h5
 from dpjax.flows.realnvp import RealNVP, RealNVPConfig, score_apply
 from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply, phi_apply
+from dpjax.paths import ensure_dir, resolve_path
 from dpjax.physics.cbe import residual_A
 from dpjax.utils.ckpt import create_manager, restore_latest
-
-
-def _ensure_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
 
 
 def _load_df(df_run_dir: Path) -> tuple[RealNVP, dict, Normalizer]:
@@ -73,36 +69,48 @@ def _plummer_ar(r: np.ndarray) -> np.ndarray:
     return -r * (1.0 + r**2) ** (-1.5)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate trained Phi/DF on residual stats and Plummer radial curves.")
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--df-run-dir", type=str, required=True)
-    parser.add_argument("--phi-run-dir", type=str, required=True)
-    parser.add_argument("--out-dir", type=str, default=None)
-    parser.add_argument("--n-eval", type=int, default=32768)
-    parser.add_argument("--batch-size", type=int, default=4096)
-    parser.add_argument("--seed", type=int, default=0)
+# ---------------------------------------------------------------------------
+# Core evaluation function – callable from both CLI and Jupyter
+# ---------------------------------------------------------------------------
 
-    parser.add_argument("--r-min", type=float, default=1.0e-3)
-    parser.add_argument("--r-max", type=float, default=10.0)
-    parser.add_argument("--n-r", type=int, default=256)
-    parser.add_argument("--r-ref", type=float, default=1.0)
+def run_eval_phi(
+    data_path: str | Path,
+    df_run_dir: str | Path,
+    phi_run_dir: str | Path,
+    *,
+    out_dir: Optional[str | Path] = None,
+    n_eval: int = 32768,
+    batch_size: int = 4096,
+    seed: int = 0,
+    r_min: float = 1.0e-3,
+    r_max: float = 10.0,
+    n_r: int = 256,
+    r_ref: float = 1.0,
+) -> Dict[str, Any]:
+    """Evaluate trained Phi/DF on residual stats and Plummer radial curves.
 
-    args = parser.parse_args()
+    Returns
+    -------
+    dict
+        ``{"stats": dict, "radial": dict, "out_dir": Path, "plots_dir": Path}``
+    """
+    data_path = resolve_path(data_path)
+    df_run_dir = resolve_path(df_run_dir)
+    phi_run_dir = resolve_path(phi_run_dir)
 
-    df_model, df_params, normalizer = _load_df(Path(args.df_run_dir))
-    phi_model, phi_params = _load_phi(Path(args.phi_run_dir))
+    df_model, df_params, normalizer = _load_df(Path(df_run_dir))
+    phi_model, phi_params = _load_phi(Path(phi_run_dir))
 
-    out_dir = _ensure_dir(args.out_dir or args.phi_run_dir)
-    plots_dir = _ensure_dir(out_dir / "plots")
+    out_dir = ensure_dir(out_dir or phi_run_dir)
+    plots_dir = ensure_dir(out_dir / "plots")
 
-    eta = load_eta_h5(args.data, dataset="eta")
+    eta = load_eta_h5(data_path, dataset="eta")
     eta_std = normalizer.transform(eta)
 
     n_total = eta_std.shape[0]
-    n_eval = int(min(args.n_eval, n_total))
+    n_eval = int(min(n_eval, n_total))
 
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
     idx = rng.choice(n_total, size=n_eval, replace=False)
     eta_eval = eta_std[idx]
 
@@ -116,7 +124,7 @@ def main() -> int:
         return residual_A(eta_std_batch, score_std, grad_phi_std, normalizer)
 
     rs: list[np.ndarray] = []
-    for batch_np in iter_batches(eta_eval, batch_size=int(args.batch_size), rng=rng, shuffle=False, drop_remainder=False):
+    for batch_np in iter_batches(eta_eval, batch_size=int(batch_size), rng=rng, shuffle=False, drop_remainder=False):
         r = residual_batch(jnp.asarray(batch_np)).astype(jnp.float32)
         rs.append(np.asarray(r))
 
@@ -135,7 +143,7 @@ def main() -> int:
     print(json.dumps(stats, indent=2))
 
     # Radial curves along x-axis
-    r = np.geomspace(args.r_min, args.r_max, num=int(args.n_r)).astype(np.float32)
+    r = np.geomspace(r_min, r_max, num=int(n_r)).astype(np.float32)
     x_phys = np.stack([r, np.zeros_like(r), np.zeros_like(r)], axis=-1)
     x_std = (x_phys - mean_x[None, :]) / std_x[None, :]
 
@@ -152,7 +160,7 @@ def main() -> int:
     ar_true = _plummer_ar(r)
 
     # Align potential by constant offset at r_ref
-    r_ref = float(args.r_ref)
+    r_ref = float(r_ref)
     phi_true_ref = float(_plummer_phi(np.array([r_ref], dtype=np.float32))[0])
     # Nearest grid point
     i_ref = int(np.argmin(np.abs(r - r_ref)))
@@ -198,6 +206,42 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"Plot skipped: {e}")
 
+    return {
+        "stats": stats,
+        "radial": {
+            "r": r, "phi_learned": phi_learned, "phi_learned_shift": phi_learned_shift,
+            "phi_true": phi_true, "ar_learned": ar_learned, "ar_true": ar_true,
+        },
+        "out_dir": out_dir,
+        "plots_dir": plots_dir,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Evaluate trained Phi/DF on residual stats and Plummer radial curves.")
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--df-run-dir", type=str, required=True)
+    parser.add_argument("--phi-run-dir", type=str, required=True)
+    parser.add_argument("--out-dir", type=str, default=None)
+    parser.add_argument("--n-eval", type=int, default=32768)
+    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--r-min", type=float, default=1.0e-3)
+    parser.add_argument("--r-max", type=float, default=10.0)
+    parser.add_argument("--n-r", type=int, default=256)
+    parser.add_argument("--r-ref", type=float, default=1.0)
+    args = parser.parse_args()
+
+    run_eval_phi(
+        args.data, args.df_run_dir, args.phi_run_dir,
+        out_dir=args.out_dir, n_eval=args.n_eval, batch_size=args.batch_size,
+        seed=args.seed, r_min=args.r_min, r_max=args.r_max,
+        n_r=args.n_r, r_ref=args.r_ref,
+    )
     return 0
 
 
