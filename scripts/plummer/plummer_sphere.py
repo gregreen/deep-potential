@@ -401,7 +401,19 @@ class PlummerSphereSelfn(PlummerSphere):
             self.df_normalization = 1 / jnp.mean(p_obs_vals)
             print(f"Estimated DF normalization constant: {self.df_normalization}")
         else:
-            self.df_normalization = 1.0
+            # --- Estimate normalization factor for selection function ---
+            n_batches = int(np.ceil(self.dustmap_n_samples / self.dustmap_batch_size))
+            rng = np.random.default_rng(42)
+            p_obs_vals = []
+            print(f"Estimating the normalization constant of the DF with {self.dustmap_n_samples} samples...")
+            for i in range(n_batches):
+                n_sample_batch = min(self.dustmap_batch_size, self.dustmap_n_samples - i*self.dustmap_batch_size)
+                eta_batch = super().sample_df(n_sample_batch, rng=rng)
+                p_obs_batch = self.p_obs(eta_batch[:, :3])
+                p_obs_vals.append(p_obs_batch)
+            p_obs_vals = np.concatenate(p_obs_vals, axis=0)
+            self.df_normalization = 1 / jnp.mean(p_obs_vals)
+            print(f"Estimated DF normalization constant: {self.df_normalization}")
 
     def p_obs(self, x):
         r = jnp.linalg.norm(x, axis=1)
