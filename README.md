@@ -11,4 +11,6 @@ both extremely flexible and easily differentiable. This latter property is
 critical, as the collisionless Boltzmann equation contains gradients of the
 potential (and of the distribution function).
 
-Information on how to set up runs is TODO
+This version is implemented in JAX, with some legacy code in Tensorflow 2.x.
+There is an out-of-date PyTorch implementation at
+[tingyuansen/deep-potential](https://github.com/tingyuansen/deep-potential).
