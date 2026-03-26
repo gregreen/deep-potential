@@ -11,10 +11,6 @@ both extremely flexible and easily differentiable. This latter property is
 critical, as the collisionless Boltzmann equation contains gradients of the
 potential (and of the distribution function).
 
-See `notebooks/plummer_sphere_example.ipynb` for an explanation of the method
-and a demonstration with a simple toy system - the Plummer Sphere with
-isotropic velocities.
-
 This version is implemented in JAX, with some legacy code in Tensorflow 2.x.
 There is an out-of-date PyTorch implementation at
 [tingyuansen/deep-potential](https://github.com/tingyuansen/deep-potential).
