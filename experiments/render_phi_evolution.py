@@ -3,49 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import jax
 import jax.numpy as jnp
 import numpy as np
-import yaml
 
-from dpjax.data import Normalizer
-from dpjax.flows.realnvp import RealNVP, RealNVPConfig
-from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply, phi_apply
-from dpjax.utils.ckpt import create_manager, restore_latest, restore_step
-
-
-def _load_df(df_run_dir: Path) -> tuple[RealNVP, dict, Normalizer]:
-    df_cfg_path = df_run_dir / "config.yaml"
-    if not df_cfg_path.exists():
-        raise FileNotFoundError(f"Missing {df_cfg_path}")
-
-    df_cfg = yaml.safe_load(df_cfg_path.read_text())
-    flow_cfg = df_cfg.get("flow", {})
-    model = RealNVP(
-        RealNVPConfig(
-            dim=int(flow_cfg.get("dim", 6)),
-            n_coupling=int(flow_cfg.get("n_coupling", 10)),
-            hidden_sizes=tuple(int(x) for x in flow_cfg.get("hidden_sizes", [128, 128])),
-            s_max=float(flow_cfg.get("s_max", 2.0)),
-        )
-    )
-
-    norm = Normalizer.load_npz(df_run_dir / "normalizer.npz")
-
-    ckpt_mgr = create_manager(df_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params, norm
-
-
-def _load_phi_model(phi_run_dir: Path) -> PotentialMLP:
-    cfg_path = phi_run_dir / "config.yaml"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Missing {cfg_path}")
-    cfg = yaml.safe_load(cfg_path.read_text())
-    pot_cfg = cfg.get("potential", {})
-    return PotentialMLP(PotentialConfig(hidden_sizes=tuple(int(x) for x in pot_cfg.get("hidden_sizes", [256, 256, 256]))))
+from dpjax.flows.api import load_df
+from dpjax.models.potential import grad_phi_apply, load_phi, phi_apply
+from dpjax.physics.analytic import plummer_ar, plummer_phi
+from dpjax.utils.ckpt import create_manager, restore_step
 
 
 def _sorted_steps(ckpt_dir: Path) -> list[int]:
@@ -54,14 +18,6 @@ def _sorted_steps(ckpt_dir: Path) -> list[int]:
         if child.is_dir() and child.name.isdigit():
             steps.append(int(child.name))
     return sorted(steps)
-
-
-def _plummer_phi(r: np.ndarray) -> np.ndarray:
-    return -(1.0 + r**2) ** (-0.5)
-
-
-def _plummer_ar(r: np.ndarray) -> np.ndarray:
-    return -r * (1.0 + r**2) ** (-1.5)
 
 
 def main() -> int:
@@ -77,8 +33,8 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    df_model, df_params, normalizer = _load_df(Path(args.df_run_dir))
-    phi_model = _load_phi_model(Path(args.phi_run_dir))
+    df_model, df_params, normalizer, _ = load_df(args.df_run_dir)
+    phi_model, _, _ = load_phi(args.phi_run_dir)
 
     ckpt_dir = Path(args.phi_run_dir) / "ckpt"
     steps = _sorted_steps(ckpt_dir)
@@ -98,11 +54,11 @@ def main() -> int:
 
     x_std_j = jnp.asarray(x_std)
 
-    phi_true = _plummer_phi(r)
-    ar_true = _plummer_ar(r)
+    phi_true = plummer_phi(r)
+    ar_true = plummer_ar(r)
 
     i_ref = int(np.argmin(np.abs(r - float(args.r_ref))))
-    phi_true_ref = float(_plummer_phi(np.array([float(args.r_ref)], dtype=np.float32))[0])
+    phi_true_ref = float(plummer_phi(np.array([float(args.r_ref)], dtype=np.float32))[0])
 
     import matplotlib.pyplot as plt
 

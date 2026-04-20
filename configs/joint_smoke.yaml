@@ -14,6 +14,11 @@ train:
 
   lambda_cbe: 1.0
   lambda_nll: 0.3
+  loss_type: robust
+  alpha: 1.0
+  beta: 1.0
+  lambda_mass: 1.0
+  l2_reg: 0.1
 
   mode: alt
   alt_period: 1

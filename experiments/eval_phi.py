@@ -8,65 +8,13 @@ from typing import Any, Dict, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-import yaml
 
-from dpjax.data import Normalizer, iter_batches, load_eta_h5
-from dpjax.flows.realnvp import RealNVP, RealNVPConfig, score_apply
-from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply, phi_apply
+from dpjax.data import iter_batches, load_eta_h5
+from dpjax.flows.api import load_df, score_apply
+from dpjax.models.potential import grad_phi_apply, load_phi, phi_apply
 from dpjax.paths import ensure_dir, resolve_path
+from dpjax.physics.analytic import plummer_ar, plummer_phi
 from dpjax.physics.cbe import residual_A
-from dpjax.utils.ckpt import create_manager, restore_latest
-
-
-def _load_df(df_run_dir: Path) -> tuple[RealNVP, dict, Normalizer]:
-    df_cfg_path = df_run_dir / "config.yaml"
-    if not df_cfg_path.exists():
-        raise FileNotFoundError(f"Missing {df_cfg_path}")
-
-    df_cfg = yaml.safe_load(df_cfg_path.read_text())
-    flow_cfg = df_cfg.get("flow", {})
-    model = RealNVP(
-        RealNVPConfig(
-            dim=int(flow_cfg.get("dim", 6)),
-            n_coupling=int(flow_cfg.get("n_coupling", 10)),
-            hidden_sizes=tuple(int(x) for x in flow_cfg.get("hidden_sizes", [128, 128])),
-            s_max=float(flow_cfg.get("s_max", 2.0)),
-        )
-    )
-
-    norm = Normalizer.load_npz(df_run_dir / "normalizer.npz")
-
-    ckpt_mgr = create_manager(df_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params, norm
-
-
-def _load_phi(phi_run_dir: Path) -> tuple[PotentialMLP, dict]:
-    cfg_path = phi_run_dir / "config.yaml"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Missing {cfg_path}")
-
-    cfg = yaml.safe_load(cfg_path.read_text())
-    pot_cfg = cfg.get("potential", {})
-    model = PotentialMLP(PotentialConfig(hidden_sizes=tuple(int(x) for x in pot_cfg.get("hidden_sizes", [256, 256, 256]))))
-
-    ckpt_mgr = create_manager(phi_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params
-
-
-def _plummer_phi(r: np.ndarray) -> np.ndarray:
-    # Matches legacy generator: Phi = -(1 + r^2)^(-1/2)
-    return -(1.0 + r**2) ** (-0.5)
-
-
-def _plummer_ar(r: np.ndarray) -> np.ndarray:
-    # Signed radial acceleration along +r_hat: a_r = -dPhi/dr = - r * (1+r^2)^(-3/2)
-    return -r * (1.0 + r**2) ** (-1.5)
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +46,9 @@ def run_eval_phi(
     df_run_dir = resolve_path(df_run_dir)
     phi_run_dir = resolve_path(phi_run_dir)
 
-    df_model, df_params, normalizer = _load_df(Path(df_run_dir))
-    phi_model, phi_params = _load_phi(Path(phi_run_dir))
+    df_model, df_params, normalizer, df_cfg = load_df(df_run_dir)
+    flow_cfg = df_cfg.get("flow", {})
+    phi_model, phi_params, _ = load_phi(phi_run_dir)
 
     out_dir = ensure_dir(out_dir or phi_run_dir)
     plots_dir = ensure_dir(out_dir / "plots")
@@ -119,7 +68,7 @@ def run_eval_phi(
 
     @jax.jit
     def residual_batch(eta_std_batch: jnp.ndarray) -> jnp.ndarray:
-        score_std = score_apply(df_model, df_params, eta_std_batch)
+        score_std = score_apply(df_model, df_params, eta_std_batch, flow_cfg)
         grad_phi_std = grad_phi_apply(phi_model, phi_params, eta_std_batch[:, :3])
         return residual_A(eta_std_batch, score_std, grad_phi_std, normalizer)
 
@@ -156,12 +105,12 @@ def run_eval_phi(
     # Along x-axis, radial acceleration equals -dPhi/dx
     ar_learned = -grad_phi_phys[:, 0]
 
-    phi_true = _plummer_phi(r)
-    ar_true = _plummer_ar(r)
+    phi_true = plummer_phi(r)
+    ar_true = plummer_ar(r)
 
     # Align potential by constant offset at r_ref
     r_ref = float(r_ref)
-    phi_true_ref = float(_plummer_phi(np.array([r_ref], dtype=np.float32))[0])
+    phi_true_ref = float(plummer_phi(np.array([r_ref], dtype=np.float32))[0])
     # Nearest grid point
     i_ref = int(np.argmin(np.abs(r - r_ref)))
     phi_learned_shift = phi_learned - phi_learned[i_ref] + phi_true_ref

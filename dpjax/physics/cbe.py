@@ -55,3 +55,22 @@ def loss_cbe_A(
 ) -> jnp.ndarray:
     r = residual_A(eta_std, score_std, grad_phi_std, normalizer)
     return jnp.mean(r**2)
+
+
+def loss_cbe_robust(
+    residual_phys: jnp.ndarray,
+    laplacian_phi_phys: jnp.ndarray,
+    *,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    lambda_mass: float = 1.0,
+) -> jnp.ndarray:
+    """Robust CBE loss with negative-density penalty (paper-inspired Eq. 9).
+
+    ``residual_phys`` corresponds to ``∂f/∂t`` proxy from CBE residual in
+    physical units, and ``laplacian_phi_phys`` corresponds to ``∇²Φ``.
+    """
+
+    non_stationarity = jnp.arcsinh(alpha * jnp.abs(residual_phys))
+    neg_density_penalty = jnp.arcsinh(beta * jnp.maximum(-laplacian_phi_phys, 0.0))
+    return jnp.mean(non_stationarity + lambda_mass * neg_density_penalty)

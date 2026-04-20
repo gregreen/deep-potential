@@ -6,11 +6,9 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-import yaml
 
 from dpjax.data import Normalizer
-from dpjax.models.potential import PotentialConfig, PotentialMLP
-from dpjax.utils.ckpt import create_manager, restore_latest
+from dpjax.models.potential import load_phi
 
 
 def _load_normalizer(df_run_dir: Path) -> Normalizer:
@@ -18,22 +16,6 @@ def _load_normalizer(df_run_dir: Path) -> Normalizer:
     if not p.exists():
         raise FileNotFoundError(f"Missing {p}")
     return Normalizer.load_npz(p)
-
-
-def _load_phi(phi_run_dir: Path) -> tuple[PotentialMLP, dict]:
-    cfg_path = phi_run_dir / "config.yaml"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Missing {cfg_path}")
-
-    cfg = yaml.safe_load(cfg_path.read_text())
-    pot_cfg = cfg.get("potential", {})
-    model = PotentialMLP(PotentialConfig(hidden_sizes=tuple(int(x) for x in pot_cfg.get("hidden_sizes", [256, 256, 256]))))
-
-    ckpt_mgr = create_manager(phi_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params
 
 
 def main() -> int:
@@ -53,7 +35,7 @@ def main() -> int:
     phi_run_dir = Path(args.phi_run_dir)
 
     normalizer = _load_normalizer(df_run_dir)
-    phi_model, phi_params = _load_phi(phi_run_dir)
+    phi_model, phi_params, _ = load_phi(phi_run_dir)
 
     out_dir = Path(args.out_dir) if args.out_dir else (phi_run_dir / "plots")
     out_dir.mkdir(parents=True, exist_ok=True)

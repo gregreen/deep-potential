@@ -39,6 +39,10 @@ class Normalizer:
         eta_std = eta_std.astype(np.float32, copy=False)
         return eta_std * self.std + self.mean
 
+    def inverse_transform(self, eta_std: np.ndarray) -> np.ndarray:
+        """Backward-compatible alias for :meth:`inverse`."""
+        return self.inverse(eta_std)
+
     def save_npz(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

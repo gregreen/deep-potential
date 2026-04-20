@@ -158,8 +158,6 @@ def plot_1d_marginals(
 def plot_2d_marginal(
     coords_train: dict[str, np.ndarray],
     coords_sample: dict[str, np.ndarray],
-    _eta_train=None,
-    _eta_sample=None,
     fig_dir: str | None = None,
     dim1: str = "x",
     dim2: str = "y",
@@ -261,5 +259,154 @@ def plot_2d_marginal(
     Path(fig_dir).mkdir(parents=True, exist_ok=True)
     for fmt in fig_fmt:
         fig.savefig(Path(fig_dir) / f"df_marginals_2d_{dim1}_{dim2}.{fmt}")
+    plt.close(fig)
+    return None
+
+
+def plot_2d_marginals_grid(
+    coords_train: dict[str, np.ndarray],
+    coords_sample: dict[str, np.ndarray],
+    *,
+    dims: Iterable[tuple[str, str]] = (("x", "y"), ("x", "z"), ("vx", "vy")),
+    fig_dir: str | None = None,
+    fig_name: str = "df_marginals_2d_grid",
+    fig_fmt: Iterable[str] = ("png",),
+    dpi: int = 150,
+    bins: int = 128,
+    logscale: bool = False,
+    diff_vmax: float | None = 5.0,
+):
+    """Plot multiple 2D marginals in a 3-column layout per row.
+
+    Each row corresponds to one ``(dim1, dim2)`` pair and has three panels:
+    1) train density
+    2) sample density
+    3) signed significance-like residual
+
+    Colorbars are arranged per-row as:
+    - one shared bar for columns 1-2
+    - one separate bar for column 3
+    """
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm, Normalize
+
+    dims = list(dims)
+    if len(dims) == 0:
+        raise ValueError("dims must contain at least one (dim1, dim2) pair")
+
+    n_rows = len(dims)
+    fig, ax_arr = plt.subplots(
+        n_rows,
+        3,
+        figsize=(10.5, 3.4 * n_rows),
+        dpi=dpi,
+        squeeze=False,
+        constrained_layout=True,
+    )
+
+    for i, (dim1, dim2) in enumerate(dims):
+        x_train = coords_train[dim1]
+        y_train = coords_train[dim2]
+        x_samp = coords_sample[dim1]
+        y_samp = coords_sample[dim2]
+
+        lims = []
+        for z, key in [(x_train, dim1), (y_train, dim2)]:
+            zlim = np.nanpercentile(z, [1.0, 99.0])
+            w = zlim[1] - zlim[0]
+            zlim = [zlim[0] - 0.2 * w, zlim[1] + 0.2 * w]
+            if key in {"cylR", "r"}:
+                zlim[0] = max(float(zlim[0]), 0.0)
+            if key in {"phi", "cylphi"}:
+                zlim = [-np.pi, np.pi]
+            if key == "cth":
+                zlim = [-1.0, 1.0]
+            lims.append(zlim)
+
+        xlim, ylim = lims
+        xedges = np.linspace(float(xlim[0]), float(xlim[1]), int(bins) + 1)
+        yedges = np.linspace(float(ylim[0]), float(ylim[1]), int(bins) + 1)
+
+        nt, _, _ = np.histogram2d(x_train, y_train, bins=[xedges, yedges])
+        ns, _, _ = np.histogram2d(x_samp, y_samp, bins=[xedges, yedges])
+
+        nt_show = nt.T
+        ns_show = ns.T
+
+        main_vmax = np.nanpercentile(np.concatenate([nt_show.ravel(), ns_show.ravel()]), 99.5)
+        main_vmax = max(float(main_vmax), 1.0)
+        if logscale:
+            main_norm = LogNorm(vmin=1.0, vmax=main_vmax)
+            nt_plot = np.maximum(nt_show, 1.0)
+            ns_plot = np.maximum(ns_show, 1.0)
+        else:
+            main_norm = Normalize(vmin=0.0, vmax=main_vmax)
+            nt_plot = nt_show
+            ns_plot = ns_show
+
+        n_train = max(len(x_train), 1)
+        n_samp = max(len(x_samp), 1)
+        dn = (ns / n_samp - nt / n_train)
+        denom = np.sqrt(np.maximum(ns, 1.0) * (n_train / n_samp)) / n_train
+        dn = dn / np.maximum(denom, 1.0e-12)
+
+        auto_diff_vmax = np.nanpercentile(np.abs(dn), 99.0)
+        auto_diff_vmax = max(float(auto_diff_vmax), 1.0)
+        row_diff_vmax = auto_diff_vmax if diff_vmax is None else float(diff_vmax)
+
+        ax_t, ax_s, ax_d = ax_arr[i, 0], ax_arr[i, 1], ax_arr[i, 2]
+        im_t = ax_t.imshow(
+            nt_plot,
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+            origin="lower",
+            aspect="auto",
+            norm=main_norm,
+            cmap="viridis",
+        )
+        im_s = ax_s.imshow(
+            ns_plot,
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+            origin="lower",
+            aspect="auto",
+            norm=main_norm,
+            cmap="viridis",
+        )
+        im_d = ax_d.imshow(
+            dn.T,
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+            origin="lower",
+            aspect="auto",
+            cmap="coolwarm_r",
+            vmin=-row_diff_vmax,
+            vmax=row_diff_vmax,
+        )
+
+        ax_t.set_xlabel(dim1)
+        ax_t.set_ylabel(dim2)
+        ax_s.set_xlabel(dim1)
+        ax_s.set_ylabel(dim2)
+        ax_d.set_xlabel(dim1)
+        ax_d.set_ylabel(dim2)
+
+        if i == 0:
+            ax_t.set_title("train")
+            ax_s.set_title("sample")
+            ax_d.set_title("Poisson significance ($sigma$)")
+
+        cb_main = fig.colorbar(im_s, ax=[ax_t, ax_s], location="top", fraction=0.06, pad=0.02)
+        cb_main.set_label("counts" if not logscale else "counts (log)")
+
+        cb_diff = fig.colorbar(im_d, ax=ax_d, location="top", fraction=0.06, pad=0.02)
+        cb_diff.set_label(r"\$\\Delta\$ (sigma-like)")
+
+    if fig_dir is None or len(list(fig_fmt)) == 0:
+        return fig
+
+    from pathlib import Path
+
+    Path(fig_dir).mkdir(parents=True, exist_ok=True)
+    for fmt in fig_fmt:
+        fig.savefig(Path(fig_dir) / f"{fig_name}.{fmt}")
     plt.close(fig)
     return None

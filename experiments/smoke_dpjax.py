@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from dpjax.data import Normalizer
-from dpjax.flows.realnvp import RealNVP, RealNVPConfig, log_prob_apply, score_apply
+from dpjax.flows.api import build_flow, init_flow, log_prob_apply, score_apply
 from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply
 from dpjax.physics.cbe import residual_A
 
@@ -16,11 +16,12 @@ def main() -> int:
     # Fake standardized batch
     x = jax.random.normal(key, shape=(128, 6), dtype=jnp.float32)
 
-    flow = RealNVP(RealNVPConfig())
-    params_flow = flow.init(key, x, method=RealNVP.log_prob)["params"]
+    flow_cfg = {"type": "realnvp", "dim": 6}
+    flow = build_flow(flow_cfg)
+    params_flow = init_flow(flow, key, flow_cfg)
 
-    lp = log_prob_apply(flow, params_flow, x)
-    score = score_apply(flow, params_flow, x[:16])
+    lp = log_prob_apply(flow, params_flow, x, flow_cfg)
+    score = score_apply(flow, params_flow, x[:16], flow_cfg)
 
     phi = PotentialMLP(PotentialConfig())
     params_phi = phi.init(key, x[:, :3])["params"]

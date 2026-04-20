@@ -21,6 +21,7 @@ dependencies = [
   "optax>=0.2.2",
   "orbax-checkpoint>=0.5.0",
   "chex>=0.1.86",
+  "diffrax>=0.5.0",
 ]
 
 [project.optional-dependencies]
@@ -30,8 +31,12 @@ notebook = [
   "ipywidgets>=8.0",
   "nbstripout>=0.6",
 ]
+tracking = [
+  "wandb>=0.16",
+  "tensorboard>=2.14",
+]
 dev = [
-  "dpjax[notebook]",
+  "dpjax[notebook,tracking]",
   "pytest>=7.0",
 ]
 

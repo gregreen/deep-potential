@@ -19,56 +19,19 @@ import optax
 import yaml
 from tqdm.auto import tqdm
 
-from dpjax.data import Normalizer, iter_batches, load_eta_h5
-from dpjax.flows.realnvp import RealNVP, RealNVPConfig, log_prob_apply, score_apply
-from dpjax.models.potential import PotentialConfig, PotentialMLP, grad_phi_apply
+from dpjax.data import iter_batches, load_eta_h5
+from dpjax.flows.api import load_df, log_prob_apply, score_apply
+from dpjax.models.potential import grad_phi_apply, laplacian_phi_apply, load_phi
 from dpjax.paths import ensure_dir, resolve_path
-from dpjax.physics.cbe import loss_cbe_A, residual_A
+from dpjax.physics.cbe import loss_cbe_robust, residual_A
 from dpjax.utils.ckpt import create_manager, finalize, restore_latest, save
 
 
-def _load_df(df_run_dir: Path) -> tuple[RealNVP, dict, Normalizer, dict]:
-    df_cfg_path = df_run_dir / "config.yaml"
-    if not df_cfg_path.exists():
-        raise FileNotFoundError(f"Missing {df_cfg_path}")
-
-    df_cfg = yaml.safe_load(df_cfg_path.read_text())
-    flow_cfg = df_cfg.get("flow", {})
-    model = RealNVP(
-        RealNVPConfig(
-            dim=int(flow_cfg.get("dim", 6)),
-            n_coupling=int(flow_cfg.get("n_coupling", 10)),
-            hidden_sizes=tuple(int(x) for x in flow_cfg.get("hidden_sizes", [128, 128])),
-            s_max=float(flow_cfg.get("s_max", 2.0)),
-        )
-    )
-
-    norm_path = df_run_dir / "normalizer.npz"
-    if not norm_path.exists():
-        raise FileNotFoundError(f"Missing {norm_path}")
-    norm = Normalizer.load_npz(norm_path)
-
-    ckpt_mgr = create_manager(df_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params, norm, df_cfg
-
-
-def _load_phi(phi_run_dir: Path) -> tuple[PotentialMLP, dict, dict]:
-    cfg_path = phi_run_dir / "config.yaml"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Missing {cfg_path}")
-
-    cfg = yaml.safe_load(cfg_path.read_text())
-    pot_cfg = cfg.get("potential", {})
-    model = PotentialMLP(PotentialConfig(hidden_sizes=tuple(int(x) for x in pot_cfg.get("hidden_sizes", [256, 256, 256]))))
-
-    ckpt_mgr = create_manager(phi_run_dir / "ckpt")
-    restored = restore_latest(ckpt_mgr)
-    params = restored["params"]
-
-    return model, params, cfg
+def _mean_param_square(params: dict) -> jnp.ndarray:
+    leaves = jax.tree_util.tree_leaves(params)
+    sq_sum = sum(jnp.sum(jnp.square(x)) for x in leaves)
+    n_elem = sum(x.size for x in leaves)
+    return sq_sum / jnp.maximum(jnp.asarray(n_elem, dtype=jnp.float32), 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +85,9 @@ def run_joint_finetuning(
     (df_out / "ckpt").mkdir(parents=True, exist_ok=True)
     (phi_out / "ckpt").mkdir(parents=True, exist_ok=True)
 
-    df_model, df_params_init, normalizer, df_cfg = _load_df(Path(df_run_dir))
-    phi_model, phi_params_init, phi_cfg = _load_phi(Path(phi_run_dir))
+    df_model, df_params_init, normalizer, df_cfg = load_df(df_run_dir)
+    flow_cfg = df_cfg.get("flow", {})
+    phi_model, phi_params_init, phi_cfg = load_phi(phi_run_dir)
 
     # Write config snapshots for compatibility with existing eval scripts.
     # - df_out mimics train_df output
@@ -154,11 +118,21 @@ def run_joint_finetuning(
 
     lambda_cbe = float(train_cfg.get("lambda_cbe", 1.0))
     lambda_nll = float(train_cfg.get("lambda_nll", 0.3))
+    loss_type = str(train_cfg.get("loss_type", "robust")).lower()
+    alpha = float(train_cfg.get("alpha", 1.0))
+    beta = float(train_cfg.get("beta", 1.0))
+    lambda_mass = float(train_cfg.get("lambda_mass", 1.0))
+    l2_reg = float(train_cfg.get("l2_reg", 0.1))
 
     mode = str(train_cfg.get("mode", "both")).lower()
     alt_period = int(train_cfg.get("alt_period", 1))
     max_batches_per_epoch = train_cfg.get("max_batches_per_epoch", None)
     max_batches_per_epoch = int(max_batches_per_epoch) if max_batches_per_epoch is not None else None
+
+    if mode not in {"both", "alt"}:
+        raise ValueError(f"Unknown train.mode={mode!r}; expected 'both' or 'alt'.")
+    if loss_type not in {"robust", "mse"}:
+        raise ValueError(f"Unknown train.loss_type={loss_type!r}; expected 'robust' or 'mse'.")
 
     seed = int(joint_cfg.get("seed", 2))
     np_rng = np.random.default_rng(seed=seed)
@@ -184,17 +158,32 @@ def run_joint_finetuning(
         opt_state_df = opt_df.init(df_params)
         opt_state_phi = opt_phi.init(phi_params)
 
-    def _loss_terms(df_p: dict, phi_p: dict, eta_std_b: jnp.ndarray) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+    def _loss_terms(df_p: dict, phi_p: dict, eta_std_b: jnp.ndarray) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
         # NLL term
-        nll = -jnp.mean(log_prob_apply(df_model, df_p, eta_std_b))
+        nll = -jnp.mean(log_prob_apply(df_model, df_p, eta_std_b, flow_cfg))
 
         # CBE term
-        score_std = score_apply(df_model, df_p, eta_std_b)
+        score_std = score_apply(df_model, df_p, eta_std_b, flow_cfg)
         grad_phi_std = grad_phi_apply(phi_model, phi_p, eta_std_b[:, :3])
-        cbe = loss_cbe_A(eta_std_b, score_std, grad_phi_std, normalizer)
+        residual = residual_A(eta_std_b, score_std, grad_phi_std, normalizer)
 
-        loss = lambda_cbe * cbe + lambda_nll * nll
-        return loss, (nll, cbe)
+        if loss_type == "mse":
+            cbe = jnp.mean(residual**2)
+        else:
+            std_x = jnp.asarray(normalizer.std[:3], dtype=eta_std_b.dtype)
+            laplacian_phi_phys = laplacian_phi_apply(phi_model, phi_p, eta_std_b[:, :3], std_x=std_x)
+            cbe = loss_cbe_robust(
+                residual,
+                laplacian_phi_phys,
+                alpha=alpha,
+                beta=beta,
+                lambda_mass=lambda_mass,
+            )
+
+        l2 = l2_reg * _mean_param_square(phi_p)
+
+        loss = lambda_cbe * cbe + lambda_nll * nll + l2
+        return loss, (nll, cbe, l2)
 
     @jax.jit
     def _step_both(df_p, phi_p, opt_s_df, opt_s_phi, eta_std_b):
@@ -202,7 +191,7 @@ def run_joint_finetuning(
             df_pp, phi_pp = packed
             return _loss_terms(df_pp, phi_pp, eta_std_b)
 
-        (loss, (nll, cbe)), grads = jax.value_and_grad(loss_fn, has_aux=True)((df_p, phi_p))
+        (loss, (nll, cbe, l2)), grads = jax.value_and_grad(loss_fn, has_aux=True)((df_p, phi_p))
         grads_df, grads_phi = grads
 
         upd_df, opt_s_df2 = opt_df.update(grads_df, opt_s_df, df_p)
@@ -210,32 +199,37 @@ def run_joint_finetuning(
 
         df_p2 = optax.apply_updates(df_p, upd_df)
         phi_p2 = optax.apply_updates(phi_p, upd_phi)
-        return df_p2, phi_p2, opt_s_df2, opt_s_phi2, loss, nll, cbe
+        return df_p2, phi_p2, opt_s_df2, opt_s_phi2, loss, nll, cbe, l2
 
     @jax.jit
     def _step_df_only(df_p, opt_s_df, phi_p, eta_std_b):
         def loss_fn(df_pp):
             return _loss_terms(df_pp, phi_p, eta_std_b)
 
-        (loss, (nll, cbe)), grads_df = jax.value_and_grad(loss_fn, has_aux=True)(df_p)
+        (loss, (nll, cbe, l2)), grads_df = jax.value_and_grad(loss_fn, has_aux=True)(df_p)
         upd_df, opt_s_df2 = opt_df.update(grads_df, opt_s_df, df_p)
         df_p2 = optax.apply_updates(df_p, upd_df)
-        return df_p2, opt_s_df2, loss, nll, cbe
+        return df_p2, opt_s_df2, loss, nll, cbe, l2
 
     @jax.jit
     def _step_phi_only(phi_p, opt_s_phi, df_p, eta_std_b):
         def loss_fn(phi_pp):
             return _loss_terms(df_p, phi_pp, eta_std_b)
 
-        (loss, (nll, cbe)), grads_phi = jax.value_and_grad(loss_fn, has_aux=True)(phi_p)
+        (loss, (nll, cbe, l2)), grads_phi = jax.value_and_grad(loss_fn, has_aux=True)(phi_p)
         upd_phi, opt_s_phi2 = opt_phi.update(grads_phi, opt_s_phi, phi_p)
         phi_p2 = optax.apply_updates(phi_p, upd_phi)
-        return phi_p2, opt_s_phi2, loss, nll, cbe
+        return phi_p2, opt_s_phi2, loss, nll, cbe, l2
 
     metrics_path = run_dir / "metrics.csv"
-    write_header = not metrics_path.exists() or not resume
+    if resume:
+        metrics_mode = "a"
+        write_header = (not metrics_path.exists()) or (metrics_path.stat().st_size == 0)
+    else:
+        metrics_mode = "w"
+        write_header = True
 
-    with metrics_path.open("a", newline="") as f:
+    with metrics_path.open(metrics_mode, newline="") as f:
         writer = csv.writer(f)
         if write_header:
             writer.writerow(
@@ -246,6 +240,7 @@ def run_joint_finetuning(
                     "loss",
                     "nll",
                     "cbe",
+                    "l2",
                     "residual_mean",
                     "residual_std",
                     "residual_p99_abs",
@@ -257,15 +252,23 @@ def run_joint_finetuning(
 
         global_step = step0
 
-        # 假设你已经有：n = eta_std.shape[0]、batch_size、epochs
-        n = eta_std.shape[0]  
-        steps_per_epoch = (n + batch_size - 1) // batch_size
+        n = eta_std.shape[0]
+        steps_per_epoch = n // batch_size
+        if max_batches_per_epoch is not None:
+            steps_per_epoch = min(steps_per_epoch, max_batches_per_epoch)
+        if steps_per_epoch <= 0:
+            raise ValueError("No full batches per epoch. Decrease batch_size or increase dataset size.")
         total_steps = int(epochs) * int(steps_per_epoch)
 
         start_epoch = step0 // steps_per_epoch
-        pbar = tqdm(total=total_steps, dynamic_ncols=True, unit="step")
-        if step0 > 0:
-            pbar.update(step0)
+        pbar = tqdm(
+            total=total_steps,
+            initial=min(step0, total_steps),
+            dynamic_ncols=True,
+            unit="step",
+            mininterval=0.5,
+            smoothing=0.1,
+        )
 
         rng = jax.random.PRNGKey(seed + start_epoch)
 
@@ -277,29 +280,66 @@ def run_joint_finetuning(
             seed_val = int(jax.random.randint(step_rng, (), 0, 1000000))
             np_rng = np.random.default_rng(seed_val)
             
-            for batch_np in iter_batches(eta_std, batch_size, np_rng, shuffle=True):
+            for batch_np in iter_batches(
+                eta_std,
+                batch_size,
+                np_rng,
+                shuffle=True,
+                max_batches=max_batches_per_epoch,
+            ):
                 eta_b = jnp.asarray(batch_np)
 
                 if mode == "both":
-                    df_params, phi_params, opt_state_df, opt_state_phi, loss, nll, cbe = _step_both(
+                    df_params, phi_params, opt_state_df, opt_state_phi, loss, nll, cbe, l2 = _step_both(
                         df_params, phi_params, opt_state_df, opt_state_phi, eta_b
                     )
                     update_tag = "both"
                 elif mode == "alt":
                     phase = (global_step // max(1, alt_period)) % 2
                     if phase == 0:
-                        df_params, opt_state_df, loss, nll, cbe = _step_df_only(df_params, opt_state_df, phi_params, eta_b)
+                        df_params, opt_state_df, loss, nll, cbe, l2 = _step_df_only(df_params, opt_state_df, phi_params, eta_b)
                         update_tag = "df"
                     else:
-                        phi_params, opt_state_phi, loss, nll, cbe = _step_phi_only(phi_params, opt_state_phi, df_params, eta_b)
+                        phi_params, opt_state_phi, loss, nll, cbe, l2 = _step_phi_only(phi_params, opt_state_phi, df_params, eta_b)
                         update_tag = "phi"
-                else:
-                    raise ValueError(f"Unknown train.mode={mode!r}; expected 'both' or 'alt'.")
 
                 global_step += 1
                 pbar.update(1)
 
                 if (global_step % log_every) == 0:
+                    eta_small = eta_b[:1024]
+                    score_small = score_apply(df_model, df_params, eta_small, flow_cfg)
+                    grad_phi_small = grad_phi_apply(phi_model, phi_params, eta_small[:, :3])
+                    r = residual_A(eta_small, score_small, grad_phi_small, normalizer)
+
+                    r_mean = float(jnp.mean(r))
+                    r_std = float(jnp.std(r))
+                    r_p99 = float(jnp.percentile(jnp.abs(r), 99.0))
+
+                    score_abs = jnp.abs(score_small)
+                    score_p50 = float(jnp.percentile(score_abs, 50.0))
+                    score_p99 = float(jnp.percentile(score_abs, 99.0))
+                    score_max_abs = float(jnp.max(score_abs))
+
+                    writer.writerow(
+                        [
+                            global_step,
+                            epoch,
+                            update_tag,
+                            float(loss),
+                            float(nll),
+                            float(cbe),
+                            float(l2),
+                            r_mean,
+                            r_std,
+                            r_p99,
+                            score_p50,
+                            score_p99,
+                            score_max_abs,
+                        ]
+                    )
+                    f.flush()
+
                     pbar.set_description(f"epoch={epoch}")
                     pbar.set_postfix({
                         "step": global_step,

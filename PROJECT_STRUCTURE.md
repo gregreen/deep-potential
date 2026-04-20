@@ -32,21 +32,28 @@
 
 项目使用 `flax.linen` 进行面向对象的网络定义。
 
-### 分布函数 (DF) 网络：RealNVP
-*   **位置**: `dpjax/flows/realnvp.py`
-*   **架构描述**: 基于 Affine Coupling (仿射耦合层) 的归一化流 (Normalizing Flow)。
+### 分布函数 (DF) 网络：统一后端（RealNVP / FFJORD）
+*   **位置**: `dpjax/flows/api.py`（统一入口），后端实现位于 `dpjax/flows/realnvp.py` 和 `dpjax/flows/ffjord.py`。
+*   **架构描述**:
+    *   **RealNVP**：基于 Affine Coupling 的离散流，适合作为快速基线；
+    *   **FFJORD**：连续归一化流（Neural ODE），当前默认参数与论文设定对齐为 **3 blocks × (3 hidden layers, 每层 128 神经元, tanh)**。
 *   **输入维度**: 6D 相空间数据坐标 $(x, y, z, v_x, v_y, v_z)$。
-*   **网络细节**: 
-    *   采用掩码（Masking）交替处理输入维度（`[1, 1, 1, 0, 0, 0]` 和 `[0, 0, 0, 1, 1, 1]` 交替）。
-    *   内部用于计算缩放因子 $s$ 和平移因子 $t$ 的网络是一个隐藏层形状（如 `[16, 16, 16]`）的 MLP，默认激活函数通常为 ReLU。
-    *   缩放限制：为了数值稳定，设置了强行截断的缩放区间 $[-s_{max}, s_{max}]$。
+*   **切换方式**: 通过配置项 `flow.type` 选择后端（`realnvp` / `ffjord`）。
 
 ### 引力势能 ($\Phi$) 网络
 *   **位置**: `dpjax/models/potential.py`
 *   **架构描述**: 标准的多层感知机 (MLP)。
 *   **网络细节**:
     *   将 3D 的空间坐标 $(x, y, z)$ 映射到 1D 的标量势能 $\Phi$。
+    *   默认结构与论文实现对齐：**4 层隐藏层，每层 512 神经元**。
     *   **激活函数特别要求**：各隐藏层使用 `tanh` 激活函数。避免使用 `relu`，因为 `relu` 的二阶偏导为 0，这会导致物理引力（梯度本身）在后续计算或推导时变得病态或不连续。
+
+### CBE 损失（鲁棒形式）
+*   **位置**: `dpjax/physics/cbe.py`
+*   **默认训练目标**:
+    *   使用 `asinh(|residual|)` 形式惩罚非平稳性，降低极端样本对训练的主导；
+    *   额外加入负密度惩罚项 `asinh(max(-\nabla^2\Phi, 0))`，抑制非物理质量分布；
+    *   在 `train_phi` / `finetune_joint` 中可通过 `train.loss_type` 切换为传统 `mse`。
 
 ---
 

@@ -141,6 +141,13 @@ misc/
 # Checkpoints
 checkpoints/
 
+# IDE settings
+.vscode/
+.windsurf/
+
+# References (large binary files)
+references/
+
 # Custom dirs
 data/
 paper_barmodel_202306/
