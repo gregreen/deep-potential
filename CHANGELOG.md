@@ -8,6 +8,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2026-04-21] Vibe Coding 日志规范 `[AI-assisted]`
+
+> **Session intent**: 建立适合 AI 辅助开发的 CHANGELOG 规范和轻量自动化提醒机制，通过 `/log` workflow 减少手动维护成本。
+
+### Added
+- `~/.windsurf/workflows/log.md` — `/log` 斜线命令：自动读取 git log → 生成格式化 CHANGELOG 条目 → commit push
+- `AGENTS.md` 提醒规则 — 仅在 `git push` 或 TODO 全完成时末尾一句话提醒，其余场景零额外 token
+
+### Changed
+- `CHANGELOG.md` — 重写为 Vibe Coding 格式：Session intent + `[AI-assisted]` 标签 + Added/Changed/Removed/Commits 分类
+
+### Commits
+```
+c400258 docs: normalize CHANGELOG format + add vibe-coding log workflow rules
+3989b61 docs: add CHANGELOG.md documenting notebook-to-script refactor
+```
+
+---
+
 ## [2026-04-20] Script Pipeline Refactor `[AI-assisted]`
 
 > **Session intent**: 解决 Jupyter Notebook 中 GPU 显存无法释放、SSH 断开训练中断的问题，将整个训练流程迁移为独立 CLI 脚本，并集成 W&B/TensorBoard 实验监控。
