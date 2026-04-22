@@ -8,6 +8,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2026-04-22] DF 训练 v2 + 数据生成修复 `[AI-assisted]`
+
+> **Session intent**: 使用当前 FFJORD 配置从头训练 DF（解决 v1 因 resume 不匹配导致的 ODE max_steps 崩溃），修复数据生成脚本的过采样问题，并生成 2^19 / 2^20 规模的 train/test 数据集用于正式复现实验。
+
+### Added
+- `data/plummer_n524288_train.h5` — 2^19 (524,288) 训练数据 (seed=2024, max_dist=10)
+- `data/plummer_n1048576_test.h5` — 2^20 (1,048,576) 测试数据 (同源划分，无重叠)
+
+### Changed
+- `experiments/gendata_plummer.py` — 加入过采样循环保证输出恰好等于 `--total-n`；新增 `--test-n` 精确指定测试集数量；`np.random.seed()` 使采样可复现
+
+### Training runs
+- `runs/plummer/df_full_ffjord_v2` — FFJORD DF 全新训练 (96 epochs, 9696 steps)
+  - 最终 loss: -130.4 | val_loss: -130.5 | score_p99: 4.22 | score_max_abs: 9.93
+  - W&B: `dp-plummer/df-ffjord-v2`
+
+---
+
 ## [2026-04-21] Vibe Coding 日志规范 `[AI-assisted]`
 
 > **Session intent**: 建立适合 AI 辅助开发的 CHANGELOG 规范和轻量自动化提醒机制，通过 `/log` workflow 减少手动维护成本。

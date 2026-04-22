@@ -11,7 +11,7 @@ import numpy as np
 
 from dpjax.data import iter_batches, load_eta_h5
 from dpjax.flows.api import load_df, score_apply
-from dpjax.models.potential import grad_phi_apply, load_phi, phi_apply
+from dpjax.models.potential import grad_phi_apply, laplacian_phi_apply, load_phi, phi_apply
 from dpjax.paths import ensure_dir, resolve_path
 from dpjax.physics.analytic import plummer_ar, plummer_phi
 from dpjax.physics.cbe import residual_A
@@ -79,6 +79,17 @@ def run_eval_phi(
 
     r_all = np.concatenate(rs, axis=0)
 
+    # Save per-point residuals with physical coordinates for spatial map
+    eta_eval_phys = normalizer.inverse(eta_eval)
+    np.savez(
+        out_dir / "residual_spatial.npz",
+        x=eta_eval_phys[:, 0],
+        y=eta_eval_phys[:, 1],
+        z=eta_eval_phys[:, 2],
+        residual=r_all,
+    )
+    print(f"Saved residual_spatial.npz ({r_all.shape[0]} points)")
+
     stats = {
         "n_eval": int(r_all.shape[0]),
         "residual_mean": float(np.mean(r_all)),
@@ -115,6 +126,15 @@ def run_eval_phi(
     i_ref = int(np.argmin(np.abs(r - r_ref)))
     phi_learned_shift = phi_learned - phi_learned[i_ref] + phi_true_ref
 
+    # Density profile: rho = Laplacian(Phi) / (4 pi)
+    std_x_j = jnp.asarray(std_x)
+    lap_phys = np.asarray(
+        laplacian_phi_apply(phi_model, phi_params, x_std_j, std_x=std_x_j),
+        dtype=np.float32,
+    )
+    rho_learned = lap_phys / (4.0 * np.pi)
+    rho_analytic = (3.0 / (4.0 * np.pi)) * (1.0 + r ** 2) ** (-2.5)
+
     np.savez(
         out_dir / "radial_curves_plummer.npz",
         r=r,
@@ -123,6 +143,8 @@ def run_eval_phi(
         phi_true=phi_true,
         ar_learned=ar_learned,
         ar_true=ar_true,
+        rho_learned=rho_learned,
+        rho_analytic=rho_analytic,
     )
 
     # Optional plotting

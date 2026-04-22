@@ -82,6 +82,14 @@ def run_eval_df(
     # 2D marginal grid (train vs sample): x-y, x-z, vx-vy
     _plot_2d_grid(eta, eta_samp, out_dir)
 
+    # Save sample data for offline notebook plotting
+    np.savez(
+        out_dir / "df_samples.npz",
+        eta_train=eta,
+        eta_sample=eta_samp,
+    )
+    print(f"  Saved df_samples.npz ({eta.shape[0]} train, {eta_samp.shape[0]} sample)")
+
     result: Dict[str, Any] = {
         "eta_coords": eta_coords, "samp_coords": samp_coords, "out_dir": out_dir,
     }
@@ -214,6 +222,14 @@ def _plummer_diagnostics(
     plt.close(fig)
     print(f"  Wrote gradient comparison plot")
 
+    # Save gradient data for offline notebook plotting
+    np.savez(
+        out_dir / "gradient_comparison.npz",
+        score_true=score_true,
+        score_est=score_est,
+    )
+    print(f"  Saved gradient_comparison.npz")
+
     # ---- 2. Score residual histograms ----
     score_resid = score_est - score_true
     fig, ax_arr = plt.subplots(2, 3, figsize=(16, 9))
@@ -310,6 +326,17 @@ def _plummer_diagnostics(
     fig.savefig(out_dir / "df_rv_comparison.png", dpi=100)
     plt.close(fig)
     print(f"  Wrote r-v comparison plot")
+
+    # Save r-v data for offline notebook plotting
+    np.savez(
+        out_dir / "rv_comparison.npz",
+        r=r_grid,
+        v=v_grid,
+        n_ideal=n_ideal,
+        n_samp=n_samp,
+        n_flow_total=len(r_samp),
+    )
+    print(f"  Saved rv_comparison.npz")
 
     return {
         "slopes": dict(zip(dim_labels, slopes)),

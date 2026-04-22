@@ -49,25 +49,45 @@ def main() -> int:
         description="Generate Plummer-sphere phase-space data (train + optional test split)."
     )
     parser.add_argument("--total-n", type=int, required=True, help="Total number of samples to generate.")
-    parser.add_argument("--test-frac", type=float, default=0.0, help="Fraction of data for test set (0 = no split).")
+    parser.add_argument("--test-frac", type=float, default=0.0, help="Fraction of data for test set (0 = no split). Ignored if --test-n is set.")
+    parser.add_argument("--test-n", type=int, default=None, help="Exact number of test samples (overrides --test-frac).")
     parser.add_argument("--max-dist", type=float, default=10.0, help="Maximum radial distance for sampling.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for train/test split.")
     parser.add_argument("--train-out", type=str, required=True, help="Output path for training data (.h5).")
     parser.add_argument("--test-out", type=str, default=None, help="Output path for test data (.h5). Required if --test-frac > 0.")
     args = parser.parse_args()
 
-    if args.test_frac > 0 and args.test_out is None:
-        parser.error("--test-out is required when --test-frac > 0")
+    has_split = args.test_n is not None or args.test_frac > 0
+    if has_split and args.test_out is None:
+        parser.error("--test-out is required when --test-frac > 0 or --test-n is set")
 
-    # Generate
-    print(f"Generating {args.total_n} Plummer samples (max_dist={args.max_dist}) ...")
-    eta_all = np.asarray(sample_df(args.total_n, max_dist=args.max_dist), dtype=np.float32)
-    print(f"  Generated {eta_all.shape[0]} samples, shape={eta_all.shape}")
+    # Seed the global RNG so that sample_df (which uses np.random internally) is
+    # reproducible.  A separate RNG is used later for the train/test shuffle.
+    np.random.seed(args.seed)
+
+    # Generate – oversample in a loop to guarantee exactly total_n points after
+    # the max_dist filter inside sample_df.
+    target = args.total_n
+    chunks: list[np.ndarray] = []
+    n_collected = 0
+    print(f"Generating {target} Plummer samples (max_dist={args.max_dist}, seed={args.seed}) ...")
+    while n_collected < target:
+        n_request = int(1.2 * (target - n_collected)) + 1024
+        chunk = np.asarray(sample_df(n_request, max_dist=args.max_dist), dtype=np.float32)
+        chunks.append(chunk)
+        n_collected += chunk.shape[0]
+        print(f"  ... drew {chunk.shape[0]} samples (total so far: {n_collected})")
+    eta_all = np.concatenate(chunks, axis=0)[:target]
+    assert eta_all.shape[0] == target, f"Expected {target}, got {eta_all.shape[0]}"
+    print(f"  Final dataset: {eta_all.shape[0]} samples, shape={eta_all.shape}")
 
     # Split
-    if args.test_frac > 0:
-        n_test = int(round(eta_all.shape[0] * args.test_frac))
-        n_test = max(n_test, 1)
+    if has_split:
+        if args.test_n is not None:
+            n_test = args.test_n
+        else:
+            n_test = int(round(eta_all.shape[0] * args.test_frac))
+        n_test = max(min(n_test, eta_all.shape[0] - 1), 1)
 
         rng = np.random.default_rng(args.seed)
         perm = rng.permutation(eta_all.shape[0])
