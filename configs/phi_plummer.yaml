@@ -12,13 +12,16 @@ potential:
 train:
   batch_size: 2048
   epochs: 1024
-  loss_type: robust
+  loss_type: mse
   alpha: 1.0
   beta: 1.0
   lambda_mass: 1.0
-  l2_reg: 0.1
+  l2_reg: 0.001
+  reweight:
+    gamma: 0.0
+    r_ref: 1.0
   lr:
-    max: 0.05
+    max: 0.01
     final: 5.0e-6
     warmup_frac: 0.1
   grad_clip: 1.0

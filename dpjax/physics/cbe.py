@@ -52,9 +52,12 @@ def loss_cbe_A(
     score_std: jnp.ndarray,
     grad_phi_std: jnp.ndarray,
     normalizer: Normalizer,
+    weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r = residual_A(eta_std, score_std, grad_phi_std, normalizer)
-    return jnp.mean(r**2)
+    if weights is None:
+        return jnp.mean(r**2)
+    return jnp.mean(weights * r**2)
 
 
 def loss_cbe_robust(
@@ -64,6 +67,7 @@ def loss_cbe_robust(
     alpha: float = 1.0,
     beta: float = 1.0,
     lambda_mass: float = 1.0,
+    weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Robust CBE loss with negative-density penalty (paper-inspired Eq. 9).
 
@@ -73,4 +77,7 @@ def loss_cbe_robust(
 
     non_stationarity = jnp.arcsinh(alpha * jnp.abs(residual_phys))
     neg_density_penalty = jnp.arcsinh(beta * jnp.maximum(-laplacian_phi_phys, 0.0))
-    return jnp.mean(non_stationarity + lambda_mass * neg_density_penalty)
+    per_sample = non_stationarity + lambda_mass * neg_density_penalty
+    if weights is None:
+        return jnp.mean(per_sample)
+    return jnp.mean(weights * per_sample)

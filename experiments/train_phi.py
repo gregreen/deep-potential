@@ -40,6 +40,7 @@ def run_phi_training(
     run_dir: str | Path,
     *,
     resume: bool = False,
+    init_params_dir: Optional[str | Path] = None,
     logger: Optional["ExperimentLogger"] = None,
 ) -> Dict[str, Any]:
     """Train the potential network Phi with a frozen DF using CBE residual.
@@ -57,6 +58,11 @@ def run_phi_training(
         Directory for checkpoints, metrics, and config snapshots.
     resume : bool
         If ``True``, resume from the latest checkpoint in *run_dir*.
+    init_params_dir : str or Path, optional
+        If provided, initialize Phi parameters from the latest checkpoint
+        found in ``init_params_dir/ckpt`` while creating a fresh optimizer
+        state. This is intended for fine-tuning with changed optimizer or
+        loss settings.
 
     Returns
     -------
@@ -67,6 +73,10 @@ def run_phi_training(
     data_path = resolve_path(data_path)
     df_run_dir = resolve_path(df_run_dir)
     run_dir = ensure_dir(run_dir)
+    if resume and init_params_dir is not None:
+        raise ValueError("--resume and --init-params are mutually exclusive.")
+    if init_params_dir is not None:
+        init_params_dir = resolve_path(init_params_dir)
     (run_dir / "ckpt").mkdir(parents=True, exist_ok=True)
 
     (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
@@ -88,12 +98,20 @@ def run_phi_training(
     beta = float(train_cfg.get("beta", 1.0))
     lambda_mass = float(train_cfg.get("lambda_mass", 1.0))
     l2_reg = float(train_cfg.get("l2_reg", 0.1))
+    rw_cfg = train_cfg.get("reweight", {})
+    rw_gamma = float(rw_cfg.get("gamma", 0.0))
+    rw_r_ref = float(rw_cfg.get("r_ref", 1.0))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     log_every = int(train_cfg.get("log_every", 50))
     ckpt_every = int(train_cfg.get("ckpt_every", 200))
     max_to_keep = int(train_cfg.get("max_to_keep", 3))
     n_devices = int(jax.local_device_count())
     use_sharding = bool(train_cfg.get("multi_gpu", True)) and n_devices > 1
+
+    if rw_gamma < 0.0:
+        raise ValueError(f"train.reweight.gamma must be >= 0, got {rw_gamma}.")
+    if rw_r_ref <= 0.0:
+        raise ValueError(f"train.reweight.r_ref must be > 0, got {rw_r_ref}.")
 
     if use_sharding:
         if batch_size < n_devices:
@@ -128,6 +146,14 @@ def run_phi_training(
 
     dummy_x = jnp.zeros((1, 3), dtype=jnp.float32)
     phi_params = phi_model.init(rng, dummy_x)["params"]
+    if init_params_dir is not None:
+        init_ckpt_mgr = create_manager(Path(init_params_dir) / "ckpt")
+        init_restored = restore_latest(init_ckpt_mgr)
+        phi_params = init_restored["params"]
+        print(
+            "[train_phi] restore_mode=weights_only, "
+            f"init_params_from={init_params_dir}"
+        )
 
     # Compute step counts to configure schedules
     n = int(eta_std.shape[0])
@@ -152,6 +178,10 @@ def run_phi_training(
         f"total_steps={total_steps}"
     )
     print(f"[train_phi] local devices: {device_list}")
+    print(
+        "[train_phi] reweight: "
+        f"gamma={rw_gamma}, r_ref={rw_r_ref}"
+    )
 
     # Configure learning rate
     lr_config = train_cfg.get("lr", 1.0e-3)
@@ -178,10 +208,26 @@ def run_phi_training(
     ckpt_mgr = create_manager(run_dir / "ckpt", max_to_keep=max_to_keep)
     step0 = 0
     if resume:
+        print(f"[train_phi] restore_mode=full_resume, run_dir={run_dir}")
         restored = restore_latest(ckpt_mgr)
         phi_params = restored["params"]
-        opt_state = restored["opt_state"]
         step0 = int(restored.get("step", 0))
+        # Try to restore optimizer state; if the checkpoint was saved with a
+        # different optimizer config (e.g. changed lr schedule), orbax may
+        # deserialise the state as plain dicts which are incompatible.
+        try:
+            restored_opt = restored["opt_state"]
+            # Quick smoke-test: run a dummy update to verify compatibility
+            _dummy_grads = jax.tree_util.tree_map(jnp.zeros_like, phi_params)
+            opt.update(_dummy_grads, restored_opt, phi_params)
+            opt_state = restored_opt
+            print(f"[train_phi] restored opt_state from step {step0}")
+        except (AttributeError, TypeError, ValueError) as exc:
+            print(
+                f"[train_phi] WARNING: opt_state incompatible ({exc!r}), "
+                "re-initialising optimizer from current params."
+            )
+            opt_state = opt.init(phi_params)
 
     def _to_host(tree):
         return jax.tree_util.tree_map(lambda x: np.asarray(jax.device_get(x)), tree)
@@ -198,13 +244,22 @@ def run_phi_training(
     def train_step(phi_params, opt_state, eta_std_batch):
         x_std = eta_std_batch[:, :3]
         std_x = jnp.asarray(normalizer.std[:3], dtype=eta_std_batch.dtype)
+        mean_x = jnp.asarray(normalizer.mean[:3], dtype=eta_std_batch.dtype)
 
         def loss_fn(p):
             score_std = score_apply(df_model, df_params, eta_std_batch, flow_cfg)
             grad_phi_std = grad_phi_apply(phi_model, p, x_std)
 
+            # Compute per-sample radial weights
+            weights = None
+            if rw_gamma > 0.0:
+                x_phys = x_std * std_x + mean_x
+                r_phys = jnp.sqrt(jnp.sum(x_phys**2, axis=-1) + 1e-12)
+                raw_w = (r_phys / rw_r_ref) ** rw_gamma
+                weights = raw_w / jnp.mean(raw_w)  # normalize so mean(w)=1
+
             if loss_type == "mse":
-                cbe_loss = loss_cbe_A(eta_std_batch, score_std, grad_phi_std, normalizer)
+                cbe_loss = loss_cbe_A(eta_std_batch, score_std, grad_phi_std, normalizer, weights=weights)
             else:
                 residual = residual_A(eta_std_batch, score_std, grad_phi_std, normalizer)
                 laplacian_phi_phys = laplacian_phi_apply(phi_model, p, x_std, std_x=std_x)
@@ -214,6 +269,7 @@ def run_phi_training(
                     alpha=alpha,
                     beta=beta,
                     lambda_mass=lambda_mass,
+                    weights=weights,
                 )
 
             return cbe_loss + l2_reg * _mean_param_square(p)
@@ -254,7 +310,11 @@ def run_phi_training(
                 eta_b = jnp.asarray(batch_np)
                 if use_sharding:
                     eta_b = jax.device_put(eta_b, batch_sharding)
-                phi_params, opt_state, loss = train_step(phi_params, opt_state, eta_b)
+                phi_params, opt_state, loss = train_step(
+                    phi_params,
+                    opt_state,
+                    eta_b,
+                )
                 loss_scalar = float(jax.device_get(loss))
 
                 need_host_state = (global_step % log_every) == 0
@@ -329,6 +389,12 @@ def main() -> int:
     parser.add_argument("--run-dir", type=str, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--init-params",
+        type=str,
+        default=None,
+        help="Initialize Phi params from another run_dir checkpoint (weights-only init).",
+    )
+    parser.add_argument(
         "--override", type=str, default=None,
         help="JSON string of config overrides, e.g. '{\"train\": {\"epochs\": 32}}'.",
     )
@@ -336,6 +402,8 @@ def main() -> int:
     parser.add_argument("--project", type=str, default="dp-plummer", help="W&B project name.")
     parser.add_argument("--run-name", type=str, default=None, help="W&B / experiment run name.")
     args = parser.parse_args()
+    if args.resume and args.init_params:
+        parser.error("--resume and --init-params cannot be used together.")
 
     import json
     import sys
@@ -358,7 +426,7 @@ def main() -> int:
     ) as logger:
         run_phi_training(
             cfg, args.data, args.df_run_dir, run_dir,
-            resume=args.resume, logger=logger,
+            resume=args.resume, init_params_dir=args.init_params, logger=logger,
         )
 
     return 0
