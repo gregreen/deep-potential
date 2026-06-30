@@ -181,7 +181,10 @@ def main():
     print("\n--- Step 2: p_obs Model ---")
     pobs_path = pobs_dir / "pobs_model.eqx"
 
-    if args.train_pobs or not pobs_path.exists():
+    if args.resume and pobs_path.exists():
+        print("Resuming: p_obs model exists, loading from disk.")
+        pobs_model_wrapped = ObservedDensityFlow.load(pobs_path)
+    elif args.train_pobs or not pobs_path.exists():
         print("Training p_obs (unconditional flow on observed dims)...")
 
         # Prepare data in the format expected by flow_matching
@@ -252,7 +255,12 @@ def main():
         )
 
         # Wrap in ObservedDensityFlow using the trained flow
-        pobs_model_wrapped = ObservedDensityFlow.from_flow(dim_spec, pobs_model)
+        pobs_model_wrapped = ObservedDensityFlow.from_flow(
+            dim_spec, pobs_model,
+            vf_type="FourierTimeResMLP",
+            vf_width=args.pobs_width,
+            vf_depth=args.pobs_depth,
+        )
         pobs_model_wrapped.save(pobs_path)
         print(f"  Saved to {pobs_path}")
     else:
@@ -307,6 +315,12 @@ def main():
     phi_final_path = joint_dir / "phi_final.eqx"
     punk_final_path = joint_dir / "punk_final.eqx"
     loss_history_path = joint_dir / "loss_history.json"
+
+    # Save config early so it exists even if joint training is interrupted
+    import json
+    joint_dir.mkdir(parents=True, exist_ok=True)
+    with open(joint_dir / "config.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
 
     if args.resume and phi_final_path.exists() and punk_final_path.exists():
         print("Resuming: final models found, skipping joint training.")

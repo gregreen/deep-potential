@@ -38,6 +38,10 @@ class ObservedDensityFlow(eqx.Module):
 
     flow: fom.NormalizingFlow
     dim_spec: DimSpec = eqx.field(static=True)
+    vf_type: str = eqx.field(static=True)
+    vf_width: int = eqx.field(static=True)
+    vf_depth: int = eqx.field(static=True)
+    vf_time_emb: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -47,16 +51,12 @@ class ObservedDensityFlow(eqx.Module):
         data_std: Array,
         vector_field_params: dict,
     ):
-        """Initialize the observed density flow.
-
-        Args:
-            key: JAX random key.
-            dim_spec: Dimension specification.
-            data_mean: Mean of observed training data, shape (obs_dim,).
-            data_std: Std of observed training data, shape (obs_dim,).
-            vector_field_params: Parameters for the vector field neural network.
-        """
+        """Initialize the observed density flow."""
         self.dim_spec = dim_spec
+        self.vf_type = vector_field_params.get("type", "FourierTimeResMLP")
+        self.vf_width = vector_field_params.get("width", 32)
+        self.vf_depth = vector_field_params.get("depth", 3)
+        self.vf_time_emb = vector_field_params.get("time_embedding_dim", 32)
 
         if data_mean.shape[0] != dim_spec.obs_dim:
             raise ValueError(
@@ -136,15 +136,20 @@ class ObservedDensityFlow(eqx.Module):
         )
 
     def save(self, path: Path):
-        """Save the model to disk with metadata for correct reloading."""
+        """Save model with full architecture metadata for exact reconstruction."""
         import json
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         eqx.tree_serialise_leaves(path, self)
-        meta = {"obs_dim": self.dim_spec.obs_dim,
-                "obs_indices": list(self.dim_spec.obs_indices)}
-        json_path = path.with_suffix(".json")
-        with open(json_path, "w") as f:
+        meta = {
+            "obs_dim": self.dim_spec.obs_dim,
+            "obs_indices": list(self.dim_spec.obs_indices),
+            "vf_type": self.vf_type,
+            "vf_width": self.vf_width,
+            "vf_depth": self.vf_depth,
+            "vf_time_emb": self.vf_time_emb,
+        }
+        with open(path.with_suffix(".json"), "w") as f:
             json.dump(meta, f)
 
     @classmethod
@@ -152,39 +157,31 @@ class ObservedDensityFlow(eqx.Module):
         cls,
         dim_spec: DimSpec,
         trained_flow: fom.NormalizingFlow,
+        vf_type: str = "FourierTimeResMLP",
+        vf_width: int = 64,
+        vf_depth: int = 3,
+        vf_time_emb: int = 32,
     ) -> "ObservedDensityFlow":
         """Wrap an already-trained NormalizingFlow.
 
-        Args:
-            dim_spec: Dimension specification.
-            trained_flow: Trained unconditional NormalizingFlow on η_obs.
-
-        Returns:
-            ObservedDensityFlow wrapping the trained flow.
+        Stores architecture params so the model can be reloaded correctly.
         """
-        # Create minimal instance and replace the flow
+        obs_dim = dim_spec.obs_dim
         dummy = cls(
-            key=jax.random.key(0),
-            dim_spec=dim_spec,
-            data_mean=jnp.zeros(dim_spec.obs_dim),
-            data_std=jnp.ones(dim_spec.obs_dim),
+            key=jax.random.key(0), dim_spec=dim_spec,
+            data_mean=jnp.zeros(obs_dim), data_std=jnp.ones(obs_dim),
             vector_field_params={
-                "type": "FourierTimeResMLP",
-                "input_dim": dim_spec.obs_dim,
-                "width": 32,
-                "depth": 2,
-                "cond_dim": 0,
-                "base_dist_dim": dim_spec.obs_dim,
-                "time_embedding_dim": 32,
+                "type": vf_type, "input_dim": obs_dim,
+                "width": vf_width, "depth": vf_depth, "cond_dim": 0,
+                "base_dist_dim": obs_dim, "time_embedding_dim": vf_time_emb,
             },
         )
-        # Replace the flow while keeping dim_spec
         wrapped = eqx.tree_at(lambda m: m.flow, dummy, trained_flow)
         return wrapped
 
     @classmethod
     def load(cls, path: Path) -> "ObservedDensityFlow":
-        """Load a model from disk. Reads metadata JSON for correct dimensions."""
+        """Load model from disk. Uses metadata JSON for exact architecture."""
         import json
         path = Path(path)
         json_path = path.with_suffix(".json")
@@ -192,15 +189,17 @@ class ObservedDensityFlow(eqx.Module):
             meta = json.load(f)
         obs_dim = meta["obs_dim"]
         dim_spec = DimSpec(meta["obs_indices"])
-        depth = meta.get("depth", 3)
-        width = meta.get("width", 32)
         dummy = cls(
             key=jax.random.key(0), dim_spec=dim_spec,
             data_mean=jnp.zeros(obs_dim), data_std=jnp.ones(obs_dim),
             vector_field_params={
-                "type": "FourierTimeResMLP", "input_dim": obs_dim,
-                "width": width, "depth": depth, "cond_dim": 0,
-                "base_dist_dim": obs_dim, "time_embedding_dim": 32,
+                "type": meta.get("vf_type", "FourierTimeResMLP"),
+                "input_dim": obs_dim,
+                "width": meta.get("vf_width", 64),
+                "depth": meta.get("vf_depth", 3),
+                "cond_dim": 0,
+                "base_dist_dim": obs_dim,
+                "time_embedding_dim": meta.get("vf_time_emb", 32),
             },
         )
         return eqx.tree_deserialise_leaves(path, like=dummy)

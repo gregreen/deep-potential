@@ -77,13 +77,29 @@ def benchmark(run_dir: Path, fig_dir: Path, n_eval: int = 5000):
     data_dir = run_dir / "data"
     joint_dir = run_dir / "models" / "joint"
 
-    # Load config
+    # Load config (may not exist if joint training was interrupted)
     import json
-    with open(joint_dir / "config.json", "r") as f:
-        config = json.load(f)
+    config_path = joint_dir / "config.json"
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        dim_spec_str = config["dim_spec"]
+        symmetry = config.get("symmetry", "spherical")
+        phi_width = config.get("phi_width", 64)
+        phi_depth = config.get("phi_depth", 3)
+        punk_type = config.get("punk_type", "gaussian")
+        punk_width = config.get("punk_width", 64)
+        punk_depth = config.get("punk_depth", 3)
+        punk_n_layers = config.get("punk_n_layers", 3)
+    else:
+        print("Warning: config.json not found, using defaults.")
+        dim_spec_str = "xyvz"
+        symmetry = "spherical"
+        phi_width, phi_depth = 64, 3
+        punk_type = "gaussian"
+        punk_width, punk_depth, punk_n_layers = 64, 3, 3
 
-    dim_spec = DimSpec.from_string(config["dim_spec"])
-    symmetry = config.get("symmetry", "spherical")
+    dim_spec = DimSpec.from_string(dim_spec_str)
 
     # Load data
     print("Loading data...")
@@ -101,27 +117,32 @@ def benchmark(run_dir: Path, fig_dir: Path, n_eval: int = 5000):
 
     phi_model = ProjectedPotential(
         key=jax.random.key(0), symmetry_type=symmetry,
-        width_size=config.get("phi_width", 64),
-        depth=config.get("phi_depth", 3),
+        width_size=phi_width, depth=phi_depth,
     )
     phi_model = eqx.tree_deserialise_leaves(
         joint_dir / "phi_final.eqx", like=phi_model)
 
     punk_model = make_punk_model(
-        model_type=config.get("punk_type", "gaussian"),
+        model_type=punk_type,
         key=jax.random.key(0),
         unk_dim=dim_spec.unk_dim,
         obs_dim=dim_spec.obs_dim,
-        width_size=config.get("punk_width", 64),
-        depth=config.get("punk_depth", 3),
-        n_layers=config.get("punk_n_layers", 3),
+        width_size=punk_width, depth=punk_depth,
+        n_layers=punk_n_layers,
     )
     punk_model = eqx.tree_deserialise_leaves(
         joint_dir / "punk_final.eqx", like=punk_model)
 
-    # Load loss history
-    with open(joint_dir / "loss_history.json", "r") as f:
-        loss_history = json.load(f)
+    # Load loss history (may not exist if training was interrupted)
+    loss_history_path = joint_dir / "loss_history.json"
+    if loss_history_path.exists():
+        with open(loss_history_path, "r") as f:
+            loss_history = json.load(f)
+    else:
+        print("Warning: loss_history.json not found, skipping training curves.")
+        loss_history = {"train_loss": [], "val_loss": [], "train_cbe": [],
+                        "val_cbe": [], "train_entropy": [], "val_entropy": [],
+                        "train_df_dt": [], "val_df_dt": []}
 
     # Evaluate Φ and ρ on evaluation subset
     print("Evaluating Φ and ρ...")

@@ -10,13 +10,14 @@ python3 -m partial_obs.run_partial_obs \
   --pobs-epochs 512 \
   --pobs-width 64 \
   --pobs-depth 5 \
-  --punk-width 64 \
-  --punk-depth 5 \
-  --phi-width 64 \
-  --phi-depth 5 \
-  --batch-size 256 \
-  --n-epochs 512 \
-  --run-dir runs/test
+  --punk-width 32 \
+  --punk-depth 3 \
+  --phi-width 32 \
+  --phi-depth 3 \
+  --batch-size 1024 \
+  --n-epochs 128 \
+  --run-dir runs/test \
+  --resume
 
 python3 -m partial_obs.benchmark_partial_obs \
   --n-eval 4096 \
