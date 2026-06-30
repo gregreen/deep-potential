@@ -41,6 +41,8 @@ from partial_obs.joint_training import (
     prepare_training_data,
     split_precomputed,
     train_partial_obs,
+    save_precomputed,
+    load_precomputed,
 )
 
 
@@ -71,6 +73,8 @@ def main():
     parser.add_argument("--pobs-lr", type=float, default=1e-3)
     parser.add_argument("--pobs-width", type=int, default=64,
                         help="Width of p_obs flow vector field.")
+    parser.add_argument("--pobs-depth", type=int, default=3,
+                        help="Depth of p_obs flow vector field.")
 
     # p_unk model
     parser.add_argument("--punk-type", type=str, default="gaussian",
@@ -83,11 +87,6 @@ def main():
                         help="Depth of p_unk ResNet.")
     parser.add_argument("--punk-n-layers", type=int, default=3,
                         help="Number of coupling layers (discrete_flow only).")
-    parser.add_argument("--pretrain-punk", action="store_true",
-                        help="Pre-train p_unk on (obs, unk) pairs.")
-    parser.add_argument("--pretrain-punk-epochs", type=int, default=50)
-    parser.add_argument("--pretrain-punk-batch-size", type=int, default=5000)
-    parser.add_argument("--pretrain-punk-lr", type=float, default=1e-3)
 
     # Φ model
     parser.add_argument("--symmetry", type=str, default="spherical",
@@ -119,6 +118,8 @@ def main():
     # Misc
     parser.add_argument("--checkpoint-every", type=int, default=100,
                         help="Checkpoint frequency in epochs.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip training steps if output files already exist.")
     parser.add_argument("--generate-only", action="store_true",
                         help="Only generate mock data, then exit.")
     parser.add_argument("--load-data-dir", type=str, default=None,
@@ -193,11 +194,13 @@ def main():
         )
 
         vf_params = {
+            "type": "FourierTimeResMLP",
             "input_dim": dim_spec.obs_dim,
             "width": args.pobs_width,
-            "depth": 3,
+            "depth": args.pobs_depth,
             "cond_dim": 0,
             "base_dist_dim": dim_spec.obs_dim,
+            "time_embedding_dim": 32,
         }
 
         key, subkey = jax.random.split(key)
@@ -209,12 +212,17 @@ def main():
             model_dir=str(pobs_dir),
         )
 
-        # Simple optimizer
+        # Compute training steps based on actual data size
+        n_train = eta_obs.shape[0] * 3 // 4  # 75% for training
+        steps_per_epoch = max(1, n_train // args.pobs_batch_size)
+        total_steps = args.pobs_epochs * steps_per_epoch
+        warmup_steps = min(500, total_steps // 4)
+
         schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=args.pobs_lr,
-            warmup_steps=500,
-            decay_steps=args.pobs_epochs * (eta_obs.shape[0] // args.pobs_batch_size),
+            warmup_steps=warmup_steps,
+            decay_steps=total_steps,
             end_value=1e-6,
         )
         optimizer = optax.chain(
@@ -236,7 +244,11 @@ def main():
             epochs=args.pobs_epochs,
             batch_size=args.pobs_batch_size,
             time_scheduler_type="uniform",
-            loss_params={},
+            loss_params={
+                "sb_constant": 0.0,
+                "kinetic_reg": 0.0,
+                "jacobian_reg": 0.0,
+            },
         )
 
         # Wrap in ObservedDensityFlow using the trained flow
@@ -250,10 +262,9 @@ def main():
     print(f"  p_obs parameters: {pobs_model_wrapped.count_parameters():,}")
 
     # =====================================================================
-    # Step 3: Pre-train p_unk
+    # Step 3: Initialize p_unk (trained jointly with Φ, no pre-training)
     # =====================================================================
-    print(f"\n--- Step 3: p_unk Pre-training ({args.punk_type}) ---")
-    punk_path = punk_dir / "punk_pretrained.eqx"
+    print(f"\n--- Step 3: Initialize p_unk ({args.punk_type}) ---")
 
     key, subkey = jax.random.split(key)
     punk_model = make_punk_model(
@@ -265,149 +276,132 @@ def main():
         depth=args.punk_depth,
         n_layers=args.punk_n_layers,
     )
-
-    if args.pretrain_punk or not punk_path.exists():
-        print(f"Pre-training {args.punk_type} p_unk on (obs, unk) pairs...")
-
-        # Maximum likelihood pre-training
-        n_train = int(len(eta_obs) * 0.75)
-        train_obs = jnp.array(eta_obs[:n_train])
-        train_unk = jnp.array(eta_unk[:n_train])
-        val_obs = jnp.array(eta_obs[n_train:])
-        val_unk = jnp.array(eta_unk[n_train:])
-
-        optimizer = optax.adam(args.pretrain_punk_lr)
-        opt_state = optimizer.init(eqx.filter(punk_model, eqx.is_array))
-
-        @eqx.filter_jit
-        def punk_pretrain_step(model, opt_state, obs_batch, unk_batch):
-            def nll(m):
-                return -jnp.mean(m.log_prob(unk_batch, obs_batch))
-            loss, grads = eqx.filter_value_and_grad(nll)(model)
-            updates, opt_state = optimizer.update(grads, opt_state, model)
-            model = eqx.apply_updates(model, updates)
-            return model, opt_state, loss
-
-        batch_size = args.pretrain_punk_batch_size
-        steps_per_epoch = n_train // batch_size
-
-        best_val_loss = float("inf")
-        for epoch in range(args.pretrain_punk_epochs):
-            key, perm_key = jax.random.split(key)
-            perm = jax.random.permutation(perm_key, n_train)
-
-            epoch_loss = 0.0
-            for step in range(steps_per_epoch):
-                idx = perm[step * batch_size:(step + 1) * batch_size]
-                if len(idx) < batch_size:
-                    continue
-                punk_model, opt_state, loss = punk_pretrain_step(
-                    punk_model, opt_state,
-                    train_obs[idx], train_unk[idx],
-                )
-                epoch_loss += float(loss)
-
-            # Validation
-            val_nll = -jnp.mean(punk_model.log_prob(val_obs[:5000], val_unk[:5000]))
-            epoch_loss /= steps_per_epoch
-
-            if epoch % 10 == 0 or epoch == args.pretrain_punk_epochs - 1:
-                print(f"  Epoch {epoch+1}: train NLL={epoch_loss:.4f}, "
-                      f"val NLL={float(val_nll):.4f}")
-
-            if float(val_nll) < best_val_loss:
-                best_val_loss = float(val_nll)
-
-        eqx.tree_serialise_leaves(punk_path, punk_model)
-        print(f"  Saved to {punk_path}")
-    else:
-        print(f"Loading pre-trained p_unk from {punk_path}")
-        punk_model = eqx.tree_deserialise_leaves(punk_path, like=punk_model)
-
     print(f"  p_unk parameters: {punk_model.count_parameters():,}")
+    print(f"  (will be trained jointly with Φ via CBE + entropy)")
 
     # =====================================================================
-    # Step 4: Pre-compute ∇ ln p_obs
+    # Step 4: Pre-compute ∇ ln p_obs (checkpoint to disk)
     # =====================================================================
     print("\n--- Step 4: Pre-computing ∇ ln p_obs ---")
+    precompute_path = joint_dir / "precomputed.h5"
 
-    precomputed = prepare_training_data(
-        pobs_model_wrapped,
-        eta_obs,
-        batch_size=1024,
-    )
+    if args.resume and precompute_path.exists():
+        precomputed = load_precomputed(precompute_path)
+    else:
+        precomputed = prepare_training_data(
+            pobs_model_wrapped,
+            eta_obs,
+            batch_size=1024,
+        )
+        save_precomputed(precomputed, precompute_path)
+
     precomputed_train, precomputed_val = split_precomputed(precomputed, val_frac=0.25)
     print(f"  Train: {precomputed_train['eta_obs'].shape[0]:,} samples")
     print(f"  Val:   {precomputed_val['eta_obs'].shape[0]:,} samples")
 
     # =====================================================================
-    # Step 5: Jointly train Φ + p_unk
+    # Step 5: Jointly train Φ + p_unk (or load if resuming)
     # =====================================================================
     print(f"\n--- Step 5: Joint Training ({args.symmetry} symmetry) ---")
 
-    key, subkey = jax.random.split(key)
+    phi_final_path = joint_dir / "phi_final.eqx"
+    punk_final_path = joint_dir / "punk_final.eqx"
+    loss_history_path = joint_dir / "loss_history.json"
 
-    # Create Φ model
-    phi_model = ProjectedPotential(
-        key=subkey,
-        symmetry_type=args.symmetry,
-        width_size=args.phi_width,
-        depth=args.phi_depth,
-    )
+    if args.resume and phi_final_path.exists() and punk_final_path.exists():
+        print("Resuming: final models found, skipping joint training.")
+        # Load Φ
+        phi_model = ProjectedPotential(
+            key=jax.random.key(0),
+            symmetry_type=args.symmetry,
+            width_size=args.phi_width,
+            depth=args.phi_depth,
+        )
+        phi_model = eqx.tree_deserialise_leaves(phi_final_path, like=phi_model)
 
-    # Setup optimizer for both models
-    n_train = precomputed_train["eta_obs"].shape[0]
-    steps_per_epoch = n_train // args.batch_size
+        # Load p_unk
+        key, subkey = jax.random.split(key)
+        punk_model = make_punk_model(
+            model_type=args.punk_type,
+            key=subkey,
+            unk_dim=dim_spec.unk_dim,
+            obs_dim=dim_spec.obs_dim,
+            width_size=args.punk_width,
+            depth=args.punk_depth,
+            n_layers=args.punk_n_layers,
+        )
+        punk_model = eqx.tree_deserialise_leaves(punk_final_path, like=punk_model)
 
-    schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=args.lr,
-        warmup_steps=min(500, steps_per_epoch * 5),
-        decay_steps=args.n_epochs * steps_per_epoch,
-        end_value=1e-7,
-    )
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adam(schedule),
-    )
+        # Load loss history if available
+        import json
+        if loss_history_path.exists():
+            with open(loss_history_path, "r") as f:
+                loss_history = json.load(f)
+            print(f"  Loaded loss history ({len(loss_history.get('train_loss', []))} epochs)")
+    else:
+        key, subkey = jax.random.split(key)
 
-    loss_params = {
-        "alpha": args.alpha,
-        "beta": args.beta,
-        "lambda_poisson": args.lambda_poisson,
-        "gamma_entropy": args.gamma_entropy,
-        "l2_phi": args.l2_phi,
-        "l2_punk": args.l2_punk,
-    }
+        # Create Φ model
+        phi_model = ProjectedPotential(
+            key=subkey,
+            symmetry_type=args.symmetry,
+            width_size=args.phi_width,
+            depth=args.phi_depth,
+        )
 
-    phi_model, punk_model, loss_history = train_partial_obs(
-        key=key,
-        phi_model=phi_model,
-        punk_model=punk_model,
-        pobs_model=pobs_model_wrapped,
-        dim_spec=dim_spec,
-        precomputed_train=precomputed_train,
-        precomputed_val=precomputed_val,
-        optimizer=optimizer,
-        n_epochs=args.n_epochs,
-        batch_size=args.batch_size,
-        loss_params=loss_params,
-        checkpoint_frequency_epochs=args.checkpoint_every,
-        checkpoint_dir=joint_dir,
-    )
+        # Setup optimizer for both models
+        n_train = precomputed_train["eta_obs"].shape[0]
+        steps_per_epoch = n_train // args.batch_size
 
-    # Save final models
-    joint_dir.mkdir(parents=True, exist_ok=True)
-    eqx.tree_serialise_leaves(joint_dir / "phi_final.eqx", phi_model)
-    eqx.tree_serialise_leaves(joint_dir / "punk_final.eqx", punk_model)
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=args.lr,
+            warmup_steps=min(500, steps_per_epoch * 5),
+            decay_steps=args.n_epochs * steps_per_epoch,
+            end_value=1e-7,
+        )
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(schedule),
+        )
 
-    import json
-    with open(joint_dir / "loss_history.json", "w") as f:
-        json.dump(loss_history, f, indent=2)
-    with open(joint_dir / "config.json", "w") as f:
-        json.dump(vars(args), f, indent=2)
+        loss_params = {
+            "alpha": args.alpha,
+            "beta": args.beta,
+            "lambda_poisson": args.lambda_poisson,
+            "gamma_entropy": args.gamma_entropy,
+            "l2_phi": args.l2_phi,
+            "l2_punk": args.l2_punk,
+        }
 
-    print(f"\nFinal models saved to {joint_dir}")
+        phi_model, punk_model, loss_history = train_partial_obs(
+            key=key,
+            phi_model=phi_model,
+            punk_model=punk_model,
+            pobs_model=pobs_model_wrapped,
+            dim_spec=dim_spec,
+            precomputed_train=precomputed_train,
+            precomputed_val=precomputed_val,
+            optimizer=optimizer,
+            n_epochs=args.n_epochs,
+            batch_size=args.batch_size,
+            loss_params=loss_params,
+            checkpoint_frequency_epochs=args.checkpoint_every,
+            checkpoint_dir=joint_dir,
+        )
+
+        # Save final models
+        joint_dir.mkdir(parents=True, exist_ok=True)
+        eqx.tree_serialise_leaves(phi_final_path, phi_model)
+        eqx.tree_serialise_leaves(punk_final_path, punk_model)
+
+        import json
+        with open(loss_history_path, "w") as f:
+            json.dump(loss_history, f, indent=2)
+        with open(joint_dir / "config.json", "w") as f:
+            json.dump(vars(args), f, indent=2)
+
+        print(f"\nFinal models saved to {joint_dir}")
     print(f"  phi_final.eqx: {phi_model.count_parameters():,} parameters")
     print(f"  punk_final.eqx: {punk_model.count_parameters():,} parameters")
     print("Done!")

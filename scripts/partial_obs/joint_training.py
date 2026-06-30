@@ -116,6 +116,42 @@ def split_precomputed(
     return train_data, val_data
 
 
+def save_precomputed(precomputed: dict, path: Path):
+    """Save precomputed ∇ ln p_obs data to HDF5.
+
+    Args:
+        precomputed: Output of prepare_training_data.
+        path: File path (e.g., joint_dir / "precomputed.h5").
+    """
+    import h5py
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        for key in ["eta_obs", "ln_pobs", "grad_obs_ln_pobs"]:
+            f.create_dataset(key, data=precomputed[key], compression="lzf",
+                             chunks=True)
+    print(f"  Saved precomputed data to {path}")
+
+
+def load_precomputed(path: Path) -> dict:
+    """Load precomputed ∇ ln p_obs data from HDF5.
+
+    Args:
+        path: File path to precomputed.h5.
+
+    Returns:
+        Dictionary with eta_obs, ln_pobs, grad_obs_ln_pobs.
+    """
+    import h5py
+    precomputed = {}
+    with h5py.File(path, "r") as f:
+        for key in ["eta_obs", "ln_pobs", "grad_obs_ln_pobs"]:
+            precomputed[key] = f[key][:].astype("f4")
+    print(f"  Loaded precomputed data from {path} "
+          f"({precomputed['eta_obs'].shape[0]:,} points)")
+    return precomputed
+
+
 # =============================================================================
 # CBE residual computation
 # =============================================================================
@@ -288,48 +324,47 @@ def partial_obs_loss_fn(
 # =============================================================================
 
 @eqx.filter_jit
-def make_train_step(
-    phi_model_static,
-    punk_model_static,
+def _train_step(
+    phi_params,
+    punk_params,
+    phi_static,
+    punk_static,
     dim_spec,
     loss_params,
     optimizer,
+    opt_state,
+    key,
+    eta_obs_batch,
+    precomputed_ln_pobs,
+    precomputed_grad_obs,
+    val_loss,
 ):
-    """Create a jitted training step function.
-
-    We use a factory pattern so the static parts of the models are captured
-    in the closure and don't need to be passed at each step.
-    """
-    def _loss(phi_params, punk_params, key, eta_obs, ln_pobs, grad_obs):
-        phi_model = eqx.combine(phi_params, phi_model_static)
-        punk_model = eqx.combine(punk_params, punk_model_static)
+    """Single joint training step (jitted)."""
+    def _loss(phi_p, punk_p, k, eobs, lnp, gobs):
+        phi_m = eqx.combine(phi_p, phi_static)
+        punk_m = eqx.combine(punk_p, punk_static)
         total_loss, aux = partial_obs_loss_fn(
-            phi_model, punk_model, dim_spec, key,
-            eta_obs, ln_pobs, grad_obs, loss_params,
+            phi_m, punk_m, dim_spec, k,
+            eobs, lnp, gobs, loss_params,
         )
         return total_loss, aux
 
-    def train_step(phi_params, punk_params, opt_state, key, eta_obs_batch,
-                   precomputed_ln_pobs, precomputed_grad_obs, val_loss=None):
-        (loss, aux), grads = jax.value_and_grad(_loss, argnums=(0, 1), has_aux=True)(
-            phi_params, punk_params, key,
-            eta_obs_batch, precomputed_ln_pobs, precomputed_grad_obs,
-        )
+    (loss, aux), grads = jax.value_and_grad(_loss, argnums=(0, 1), has_aux=True)(
+        phi_params, punk_params, key,
+        eta_obs_batch, precomputed_ln_pobs, precomputed_grad_obs,
+    )
 
-        # Combine gradients
-        combined_grads = {"phi": grads[0], "punk": grads[1]}
-        combined_params = {"phi": phi_params, "punk": punk_params}
+    combined_grads = {"phi": grads[0], "punk": grads[1]}
+    combined_params = {"phi": phi_params, "punk": punk_params}
 
-        updates, opt_state = optimizer.update(
-            combined_grads, opt_state, combined_params,
-            value=val_loss,
-        )
-        combined_params = optax.apply_updates(combined_params, updates)
+    updates, opt_state = optimizer.update(
+        combined_grads, opt_state, combined_params,
+        value=val_loss,
+    )
+    combined_params = optax.apply_updates(combined_params, updates)
 
-        return (combined_params["phi"], combined_params["punk"],
-                opt_state, loss, aux)
-
-    return train_step
+    return (combined_params["phi"], combined_params["punk"],
+            opt_state, loss, aux)
 
 
 # =============================================================================
@@ -350,7 +385,6 @@ def build_partial_obs_filter(
                            "r_scale", "R_scale", "z_scale"}
 
     def _filter_fn(path, leaf):
-        import jax.tree_util as jtu
         from jax.tree_util import GetAttrKey
         final_key = path[-1] if path else None
         if isinstance(final_key, GetAttrKey):
@@ -358,8 +392,11 @@ def build_partial_obs_filter(
                 return False
         return isinstance(leaf, jax.Array)
 
-    phi_params, phi_static = eqx.partition(phi_model, _filter_fn)
-    punk_params, punk_static = eqx.partition(punk_model, _filter_fn)
+    phi_filter_spec = jax.tree_util.tree_map_with_path(_filter_fn, phi_model)
+    punk_filter_spec = jax.tree_util.tree_map_with_path(_filter_fn, punk_model)
+
+    phi_params, phi_static = eqx.partition(phi_model, phi_filter_spec)
+    punk_params, punk_static = eqx.partition(punk_model, punk_filter_spec)
 
     return phi_params, phi_static, punk_params, punk_static
 
@@ -433,11 +470,6 @@ def train_partial_obs(
     # Initialize optimizer state with combined params
     opt_state = optimizer.init({"phi": phi_params, "punk": punk_params})
 
-    # Create jitted train step
-    train_step_fn = make_train_step(
-        phi_static, punk_static, dim_spec, loss_params, optimizer,
-    )
-
     print("Starting joint training of Φ + p_unk...")
     print(f"  Φ params: {phi_model.count_parameters():,}")
     print(f"  p_unk params: {punk_model.count_parameters():,}")
@@ -473,9 +505,12 @@ def train_partial_obs(
             ln_pobs_batch = ln_pobs_all[idx]
             grad_obs_batch = grad_obs_all[idx]
 
-            phi_params, punk_params, opt_state, loss, aux = train_step_fn(
-                phi_params, punk_params, opt_state,
+            phi_params, punk_params, opt_state, loss, aux = _train_step(
+                phi_params, punk_params,
+                phi_static, punk_static,
+                dim_spec, loss_params, optimizer, opt_state,
                 step_key, eta_obs_batch, ln_pobs_batch, grad_obs_batch,
+                val_loss=jnp.array(0.0),
             )
 
             epoch_losses.append(float(loss))

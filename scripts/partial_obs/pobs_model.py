@@ -136,10 +136,16 @@ class ObservedDensityFlow(eqx.Module):
         )
 
     def save(self, path: Path):
-        """Save the model to disk."""
+        """Save the model to disk with metadata for correct reloading."""
+        import json
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         eqx.tree_serialise_leaves(path, self)
+        meta = {"obs_dim": self.dim_spec.obs_dim,
+                "obs_indices": list(self.dim_spec.obs_indices)}
+        json_path = path.with_suffix(".json")
+        with open(json_path, "w") as f:
+            json.dump(meta, f)
 
     @classmethod
     def from_flow(
@@ -162,9 +168,15 @@ class ObservedDensityFlow(eqx.Module):
             dim_spec=dim_spec,
             data_mean=jnp.zeros(dim_spec.obs_dim),
             data_std=jnp.ones(dim_spec.obs_dim),
-            vector_field_params={"input_dim": dim_spec.obs_dim, "width": 32,
-                                 "depth": 2, "cond_dim": 0,
-                                 "base_dist_dim": dim_spec.obs_dim},
+            vector_field_params={
+                "type": "FourierTimeResMLP",
+                "input_dim": dim_spec.obs_dim,
+                "width": 32,
+                "depth": 2,
+                "cond_dim": 0,
+                "base_dist_dim": dim_spec.obs_dim,
+                "time_embedding_dim": 32,
+            },
         )
         # Replace the flow while keeping dim_spec
         wrapped = eqx.tree_at(lambda m: m.flow, dummy, trained_flow)
@@ -172,21 +184,26 @@ class ObservedDensityFlow(eqx.Module):
 
     @classmethod
     def load(cls, path: Path) -> "ObservedDensityFlow":
-        """Load a model from disk.
-
-        Needs a minimal shell model for deserialization. We create one with
-        dummy parameters and then overwrite via tree_deserialise_leaves.
-        """
-        # Create a dummy with minimal params
+        """Load a model from disk. Reads metadata JSON for correct dimensions."""
+        import json
+        path = Path(path)
+        json_path = path.with_suffix(".json")
+        with open(json_path, "r") as f:
+            meta = json.load(f)
+        obs_dim = meta["obs_dim"]
+        dim_spec = DimSpec(meta["obs_indices"])
+        depth = meta.get("depth", 3)
+        width = meta.get("width", 32)
         dummy = cls(
-            key=jax.random.key(0),
-            dim_spec=DimSpec([0]),  # will be overwritten
-            data_mean=jnp.zeros(1),
-            data_std=jnp.ones(1),
-            vector_field_params={"input_dim": 1, "width": 32, "depth": 2,
-                                 "cond_dim": 0, "base_dist_dim": 1},
+            key=jax.random.key(0), dim_spec=dim_spec,
+            data_mean=jnp.zeros(obs_dim), data_std=jnp.ones(obs_dim),
+            vector_field_params={
+                "type": "FourierTimeResMLP", "input_dim": obs_dim,
+                "width": width, "depth": depth, "cond_dim": 0,
+                "base_dist_dim": obs_dim, "time_embedding_dim": 32,
+            },
         )
-        return eqx.tree_deserialise_leaves(Path(path), like=dummy)
+        return eqx.tree_deserialise_leaves(path, like=dummy)
 
     def __repr__(self) -> str:
         return (

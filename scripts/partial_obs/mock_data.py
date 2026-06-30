@@ -129,7 +129,7 @@ def save_partial_obs_data(data: dict, output_dir: Path, dim_spec: DimSpec):
     print(f"  obs_data.h5:   {data['eta_obs'].shape} (observed)")
     print(f"  unk_data.h5:   {data['eta_unk'].shape} (unobserved)")
     print(f"  ground_truth.h5: analytical Φ, ρ, r")
-    print(f"  full_pairs.h5: paired obs+unk for p_unk pre-training")
+    print(f"  full_pairs.h5: paired obs+unk for convenience")
 
 
 def load_partial_obs_data(data_dir: Path) -> dict:
